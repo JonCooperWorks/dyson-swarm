@@ -236,15 +236,25 @@ async fn full_walkthrough() {
     let llm_router_inner = proxy::http::router(proxy_svc);
 
     let prober: Arc<dyn HealthProber> = Arc::new(StubProber);
+    let users_store: Arc<dyn dyson_warden::traits::UserStore> =
+        Arc::new(dyson_warden::db::users::SqlxUserStore::new(pool.clone()));
+    let (user_auth, _user_id) =
+        dyson_warden::auth::user::fixed_user_auth(users_store.clone(), "alice").await;
     let app_state = http::AppState {
         secrets: secrets_svc,
         instances: instance_svc.clone(),
         snapshots: snapshot_svc.clone(),
         prober,
         tokens: tokens_store.clone(),
+        users: users_store,
         sandbox_domain: "cube.test".into(),
     };
-    let app = http::router(app_state, AuthState::enforced("admin-token"), llm_router_inner);
+    let app = http::router(
+        app_state,
+        AuthState::enforced("admin-token"),
+        user_auth,
+        llm_router_inner,
+    );
     let warden_url = spawn(app).await;
 
     let admin = reqwest::Client::new();

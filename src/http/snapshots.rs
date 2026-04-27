@@ -8,12 +8,13 @@
 
 use std::collections::BTreeMap;
 
-use axum::extract::{Path, State};
+use axum::extract::{Extension, Path, State};
 use axum::http::StatusCode;
 use axum::routing::post;
 use axum::{Json, Router};
 use serde::Deserialize;
 
+use crate::auth::CallerIdentity;
 use crate::http::instances::warden_err_to_status;
 use crate::http::AppState;
 use crate::instance::CreatedInstance;
@@ -39,10 +40,10 @@ struct RestoreBody {
 
 async fn snapshot(
     State(state): State<AppState>,
+    Extension(caller): Extension<CallerIdentity>,
     Path(id): Path<String>,
 ) -> Result<(StatusCode, Json<SnapshotView>), StatusCode> {
-    let owner = crate::auth::caller_owner_placeholder();
-    match state.snapshots.snapshot(owner, &id).await {
+    match state.snapshots.snapshot(&caller.user_id, &id).await {
         Ok(row) => Ok((StatusCode::CREATED, Json(SnapshotView::from(row)))),
         Err(e) => Err(warden_err_to_status(e)),
     }
@@ -50,10 +51,10 @@ async fn snapshot(
 
 async fn backup(
     State(state): State<AppState>,
+    Extension(caller): Extension<CallerIdentity>,
     Path(id): Path<String>,
 ) -> Result<(StatusCode, Json<SnapshotView>), StatusCode> {
-    let owner = crate::auth::caller_owner_placeholder();
-    match state.snapshots.backup(owner, &id).await {
+    match state.snapshots.backup(&caller.user_id, &id).await {
         Ok(row) => Ok((StatusCode::CREATED, Json(SnapshotView::from(row)))),
         Err(e) => Err(warden_err_to_status(e)),
     }
@@ -61,10 +62,10 @@ async fn backup(
 
 async fn pull(
     State(state): State<AppState>,
+    Extension(caller): Extension<CallerIdentity>,
     Path(id): Path<String>,
 ) -> Result<Json<SnapshotView>, StatusCode> {
-    let owner = crate::auth::caller_owner_placeholder();
-    match state.snapshots.pull(owner, &id).await {
+    match state.snapshots.pull(&caller.user_id, &id).await {
         Ok(row) => Ok(Json(SnapshotView::from(row))),
         Err(e) => Err(warden_err_to_status(e)),
     }
@@ -72,13 +73,13 @@ async fn pull(
 
 async fn restore(
     State(state): State<AppState>,
+    Extension(caller): Extension<CallerIdentity>,
     Path(_source_id): Path<String>,
     Json(body): Json<RestoreBody>,
 ) -> Result<(StatusCode, Json<CreatedInstance>), StatusCode> {
-    let owner = crate::auth::caller_owner_placeholder();
     match state
         .snapshots
-        .restore(owner, &body.snapshot_id, body.ttl_seconds, body.env)
+        .restore(&caller.user_id, &body.snapshot_id, body.ttl_seconds, body.env)
         .await
     {
         Ok(c) => Ok((StatusCode::CREATED, Json(c))),

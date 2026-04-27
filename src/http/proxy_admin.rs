@@ -138,10 +138,13 @@ mod tests {
             .await
             .unwrap();
         let token = tokens_store.mint(&id, "*").await.unwrap();
+        let users_store: Arc<dyn crate::traits::UserStore> =
+            Arc::new(crate::db::users::SqlxUserStore::new(pool));
         let state = AppState {
             secrets: svc,
             instances: instance_svc,
             snapshots: snapshot_svc,
+            users: users_store,
             prober: Arc::new(StubProber),
             tokens: tokens_store.clone(),
             sandbox_domain: "cube.test".into(),
@@ -150,7 +153,27 @@ mod tests {
     }
 
     async fn spawn(state: AppState) -> String {
-        let app = crate::http::router(state, AuthState::dangerous_no_auth(), axum::Router::new());
+        // proxy_admin endpoints are admin-bearer-gated, so we only need a
+        // permissive admin posture. The user middleware never runs on admin
+        // routes, so any UserAuthState works here.
+        struct AlwaysMissing;
+        #[async_trait::async_trait]
+        impl crate::auth::Authenticator for AlwaysMissing {
+            async fn authenticate(
+                &self,
+                _: &axum::http::HeaderMap,
+            ) -> Result<crate::auth::UserIdentity, crate::auth::AuthError> {
+                Err(crate::auth::AuthError::Missing)
+            }
+        }
+        let user_auth =
+            crate::auth::UserAuthState::new(Arc::new(AlwaysMissing), state.users.clone());
+        let app = crate::http::router(
+            state,
+            AuthState::dangerous_no_auth(),
+            user_auth,
+            axum::Router::new(),
+        );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {

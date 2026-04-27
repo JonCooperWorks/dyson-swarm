@@ -21,6 +21,26 @@ pub struct Config {
     #[serde(default)]
     pub providers: Providers,
     pub backup: BackupConfig,
+    #[serde(default)]
+    pub oidc: Option<OidcConfigToml>,
+}
+
+/// OIDC issuer configuration, lifted out of [`crate::auth::oidc::OidcConfig`]
+/// so the TOML schema is stable independent of the auth module's internal
+/// types. Mirrors the runtime config 1:1.
+#[derive(Debug, Clone, Deserialize)]
+pub struct OidcConfigToml {
+    pub issuer: String,
+    pub audience: String,
+    #[serde(default)]
+    pub jwks_url: Option<String>,
+    /// Default 24h.
+    #[serde(default = "default_jwks_ttl")]
+    pub jwks_ttl_seconds: u64,
+}
+
+fn default_jwks_ttl() -> u64 {
+    24 * 60 * 60
 }
 
 fn default_ttl() -> i64 {

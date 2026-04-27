@@ -76,12 +76,11 @@ pub trait Authenticator: Send + Sync {
     async fn authenticate(&self, headers: &HeaderMap) -> Result<UserIdentity, AuthError>;
 }
 
-/// Placeholder used by `/v1/*` route handlers until phase 5 wires real
-/// auth-resolved owner ids from request extensions. Returns the seeded
-/// `legacy` user so existing tests pass.
-///
-/// FIXME(phase5): replace every call site with an extractor that reads the
-/// resolved [`UserIdentity`] from the request extensions.
-pub fn caller_owner_placeholder() -> &'static str {
-    "legacy"
+pub use user::{user_middleware, CallerIdentity, UserAuthState};
+
+/// Pull the resolved caller out of an `axum::http::Extensions` map. Routes
+/// receive this via the `Extension(CallerIdentity)` extractor, but we keep
+/// a free function around for tests and middleware plumbing.
+pub fn caller_from_extensions(ext: &axum::http::Extensions) -> Option<&CallerIdentity> {
+    ext.get::<CallerIdentity>()
 }

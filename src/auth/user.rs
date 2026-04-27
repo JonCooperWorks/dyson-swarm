@@ -121,6 +121,55 @@ async fn resolve_or_provision(
     Ok(row)
 }
 
+/// Build a `UserAuthState` whose authenticator always returns a fixed
+/// identity, and seed an active user row with that subject. Returns the
+/// state and the user's `id` so tests can assert against it.
+///
+/// Test/integration helper. Production builds should use the OIDC + bearer
+/// chain assembled in `main.rs`.
+pub async fn fixed_user_auth(
+    users: Arc<dyn UserStore>,
+    subject: &str,
+) -> (UserAuthState, String) {
+    use crate::auth::{AuthSource, UserIdentity};
+
+    struct Fixed(UserIdentity);
+
+    #[async_trait::async_trait]
+    impl crate::auth::Authenticator for Fixed {
+        async fn authenticate(
+            &self,
+            _: &axum::http::HeaderMap,
+        ) -> Result<UserIdentity, crate::auth::AuthError> {
+            Ok(self.0.clone())
+        }
+    }
+
+    let id = format!("test-{subject}");
+    users
+        .create(UserRow {
+            id: id.clone(),
+            subject: subject.into(),
+            email: None,
+            display_name: None,
+            status: UserStatus::Active,
+            created_at: 0,
+            activated_at: Some(0),
+            last_seen_at: None,
+        })
+        .await
+        .expect("create test user");
+    let identity = UserIdentity {
+        subject: subject.into(),
+        email: None,
+        display_name: None,
+        source: AuthSource::Bearer,
+        claims: serde_json::Value::Null,
+    };
+    let auth = UserAuthState::new(Arc::new(Fixed(identity)), users);
+    (auth, id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

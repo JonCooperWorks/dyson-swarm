@@ -10,6 +10,7 @@
 //! Each sub-module exports a `router(state)` factory; this module decides
 //! which auth layer wraps which subtree.
 
+pub mod admin_users;
 pub mod healthz;
 pub mod instances;
 pub mod proxy_admin;
@@ -20,7 +21,7 @@ use std::sync::Arc;
 
 use axum::{middleware, Router};
 
-use crate::auth::{admin_bearer, AuthState};
+use crate::auth::{admin_bearer, user_middleware, AuthState, UserAuthState};
 use crate::instance::InstanceService;
 use crate::secrets::SecretsService;
 use crate::snapshot::SnapshotService;
@@ -35,24 +36,48 @@ pub struct AppState {
     pub snapshots: Arc<SnapshotService>,
     pub prober: Arc<dyn HealthProber>,
     pub tokens: Arc<dyn TokenStore>,
+    pub users: Arc<dyn crate::traits::UserStore>,
     pub sandbox_domain: String,
 }
 
 /// Build the public `Router`.
 ///
-/// `auth` decides whether `/v1/*` requires an admin bearer or runs in
-/// `--dangerous-no-auth` pass-through mode. `extra` lets the caller mount
-/// additional subtrees (e.g. the LLM proxy at `/llm/*`) outside the admin
-/// auth layer; pass `Router::new()` if there are none.
-pub fn router(state: AppState, auth: AuthState, extra: Router) -> Router {
-    let v1 = Router::new()
+/// `auth` decides whether `/v1/*` requires an admin bearer (legacy admin
+/// path used by `--dangerous-no-auth` and ops bearers) or runs in
+/// pass-through. `user_auth` configures the user-identity middleware that
+/// resolves OIDC/bearer credentials to a `users` row and stamps it on the
+/// request extensions.
+///
+/// Routing tiers (outermost first):
+/// - `/healthz` — open
+/// - `/v1/admin/*` — admin-bearer only (god-mode for ops)
+/// - `/v1/*` (non-admin) — user-identity middleware required
+/// - `/llm/*` (the proxy) — its own per-instance proxy_token gate, mounted
+///   via `extra`
+pub fn router(
+    state: AppState,
+    auth: AuthState,
+    user_auth: UserAuthState,
+    extra: Router,
+) -> Router {
+    // Admin-only routes — keep the admin-bearer layer and skip user_middleware
+    // so ops can manage users without an account themselves.
+    let admin = proxy_admin::router(state.clone())
+        .merge(crate::http::admin_users::router(state.clone()))
+        .layer(middleware::from_fn_with_state(auth.clone(), admin_bearer));
+
+    // Tenant routes — every request resolves to a CallerIdentity.
+    let tenant = Router::new()
         .merge(instances::router(state.clone()))
         .merge(snapshots::router(state.clone()))
-        .merge(secrets::router(state.clone()))
-        .merge(proxy_admin::router(state))
-        .layer(middleware::from_fn_with_state(auth, admin_bearer));
+        .merge(secrets::router(state))
+        .layer(middleware::from_fn_with_state(user_auth, user_middleware));
 
-    Router::new().merge(healthz::router()).merge(v1).merge(extra)
+    Router::new()
+        .merge(healthz::router())
+        .merge(admin)
+        .merge(tenant)
+        .merge(extra)
 }
 
 #[cfg(test)]
@@ -103,7 +128,7 @@ mod tests {
         }
     }
 
-    async fn build_state() -> AppState {
+    async fn build_state() -> (AppState, Arc<dyn crate::traits::UserStore>) {
         let pool = open_in_memory().await.unwrap();
         let raw: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
         let svc = Arc::new(SecretsService::new(raw.clone()));
@@ -111,6 +136,8 @@ mod tests {
         let instances_store: Arc<dyn InstanceStore> =
             Arc::new(SqlxInstanceStore::new(pool.clone()));
         let tokens_store: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(pool.clone()));
+        let users_store: Arc<dyn crate::traits::UserStore> =
+            Arc::new(crate::db::users::SqlxUserStore::new(pool.clone()));
         let instance_svc = Arc::new(InstanceService::new(
             cube.clone(),
             instances_store.clone(),
@@ -129,62 +156,121 @@ mod tests {
             backup,
             instance_svc.clone(),
         ));
-        AppState {
+        let state = AppState {
             secrets: svc,
             instances: instance_svc,
             snapshots: snapshot_svc,
             prober: Arc::new(StubProber),
             tokens: tokens_store,
+            users: users_store.clone(),
             sandbox_domain: "cube.test".into(),
-        }
+        };
+        (state, users_store)
     }
 
-    async fn spawn(state: AppState, auth: AuthState) -> String {
+    async fn spawn(state: AppState, auth: AuthState, user_auth: UserAuthState) -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let app = router(state, auth, Router::new());
+        let app = router(state, auth, user_auth, Router::new());
         tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
         format!("http://{addr}")
     }
 
+    async fn build_with_user(subject: &str) -> (AppState, UserAuthState, String) {
+        let (state, users) = build_state().await;
+        let (user_auth, user_id) = crate::auth::user::fixed_user_auth(users, subject).await;
+        (state, user_auth, user_id)
+    }
+
+    fn deny_user_auth(users: Arc<dyn crate::traits::UserStore>) -> UserAuthState {
+        // Authenticator that always returns Missing — used to verify the
+        // tenant routes 401 when the resolver finds no credential.
+        struct AlwaysMissing;
+        #[async_trait::async_trait]
+        impl crate::auth::Authenticator for AlwaysMissing {
+            async fn authenticate(
+                &self,
+                _: &axum::http::HeaderMap,
+            ) -> Result<crate::auth::UserIdentity, crate::auth::AuthError> {
+                Err(crate::auth::AuthError::Missing)
+            }
+        }
+        UserAuthState::new(Arc::new(AlwaysMissing), users)
+    }
+
     #[tokio::test]
     async fn healthz_is_open() {
-        let state = build_state().await;
-        let base = spawn(state, AuthState::enforced("s3cr3t")).await;
+        let (state, users) = build_state().await;
+        let base = spawn(
+            state,
+            AuthState::enforced("admin-token"),
+            deny_user_auth(users),
+        )
+        .await;
         let r = reqwest::get(format!("{base}/healthz")).await.unwrap();
         assert_eq!(r.status(), 200);
         assert_eq!(r.text().await.unwrap(), "ok");
     }
 
     #[tokio::test]
-    async fn v1_without_bearer_is_401() {
-        let state = build_state().await;
-        let base = spawn(state, AuthState::enforced("s3cr3t")).await;
+    async fn tenant_route_without_credential_is_401() {
+        let (state, users) = build_state().await;
+        let base = spawn(
+            state,
+            AuthState::enforced("admin-token"),
+            deny_user_auth(users),
+        )
+        .await;
         let r = reqwest::get(format!("{base}/v1/instances")).await.unwrap();
         assert_eq!(r.status(), 401);
     }
 
     #[tokio::test]
-    async fn v1_with_correct_bearer_is_200() {
-        let state = build_state().await;
-        let base = spawn(state, AuthState::enforced("s3cr3t")).await;
+    async fn tenant_route_with_active_user_is_200() {
+        let (state, user_auth, _user_id) = build_with_user("alice").await;
+        let base = spawn(state, AuthState::enforced("admin-token"), user_auth).await;
+        let r = reqwest::get(format!("{base}/v1/instances")).await.unwrap();
+        assert_eq!(r.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn admin_route_without_admin_bearer_is_401() {
+        let (state, users) = build_state().await;
+        let base = spawn(
+            state,
+            AuthState::enforced("admin-token"),
+            deny_user_auth(users),
+        )
+        .await;
+        let r = reqwest::get(format!("{base}/v1/admin/users")).await.unwrap();
+        assert_eq!(r.status(), 401);
+    }
+
+    #[tokio::test]
+    async fn admin_route_with_admin_bearer_is_200() {
+        let (state, users) = build_state().await;
+        let base = spawn(
+            state,
+            AuthState::enforced("admin-token"),
+            deny_user_auth(users),
+        )
+        .await;
         let r = reqwest::Client::new()
-            .get(format!("{base}/v1/instances"))
-            .bearer_auth("s3cr3t")
+            .get(format!("{base}/v1/admin/users"))
+            .bearer_auth("admin-token")
             .send()
             .await
             .unwrap();
         assert_eq!(r.status(), 200);
-        assert!(r.headers().get("x-warden-insecure").is_none());
     }
 
     #[tokio::test]
-    async fn dangerous_no_auth_passes_with_marker_header() {
-        let state = build_state().await;
-        let base = spawn(state, AuthState::dangerous_no_auth()).await;
-        let r = reqwest::get(format!("{base}/v1/instances")).await.unwrap();
+    async fn dangerous_no_auth_marker_header_on_admin_routes() {
+        let (state, users) = build_state().await;
+        let base = spawn(state, AuthState::dangerous_no_auth(), deny_user_auth(users)).await;
+        let r = reqwest::get(format!("{base}/v1/admin/users")).await.unwrap();
         assert_eq!(r.status(), 200);
         assert_eq!(
             r.headers().get("x-warden-insecure").map(|v| v.to_str().unwrap()),
@@ -194,11 +280,11 @@ mod tests {
 
     #[tokio::test]
     async fn healthz_does_not_emit_insecure_header() {
-        // The marker header is scoped to /v1/* — /healthz must not advertise
-        // an auth posture (it wasn't subject to the auth layer in the first
-        // place).
-        let state = build_state().await;
-        let base = spawn(state, AuthState::dangerous_no_auth()).await;
+        // The marker header is scoped to admin routes — /healthz must not
+        // advertise an auth posture (it wasn't subject to the auth layer in
+        // the first place).
+        let (state, users) = build_state().await;
+        let base = spawn(state, AuthState::dangerous_no_auth(), deny_user_auth(users)).await;
         let r = reqwest::get(format!("{base}/healthz")).await.unwrap();
         assert_eq!(r.status(), 200);
         assert!(r.headers().get("x-warden-insecure").is_none());

@@ -20,9 +20,10 @@ use dyson_warden::{
     proxy::{self, policy_check::InstancePolicy, ProxyService},
     secrets::SecretsService,
     snapshot::SnapshotService,
+    auth::{bearer::BearerAuthenticator, chain::ChainAuthenticator, oidc, Authenticator, UserAuthState},
     traits::{
         AuditStore, BackupSink, CubeClient, HealthProber, InstanceStore, PolicyStore, SecretStore,
-        SnapshotStore, TokenStore,
+        SnapshotStore, TokenStore, UserStore,
     },
     ttl,
 };
@@ -114,6 +115,7 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         Arc::new(db::policies::SqlitePolicyStore::new(pool.clone()));
     let audit_store: Arc<dyn AuditStore> =
         Arc::new(db::audit::SqliteAuditStore::new(pool.clone()));
+    let users_store: Arc<dyn UserStore> = Arc::new(db::users::SqlxUserStore::new(pool.clone()));
 
     let proxy_base = format!("http://{}/llm", cfg.bind);
     let instance_svc = Arc::new(InstanceService::new(
@@ -200,15 +202,43 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     };
     let llm_router = proxy::http::router(proxy_svc);
 
+    // Authenticator chain: bearer first (cheap, in-DB lookup), then OIDC if
+    // configured. Bearer claims everything that doesn't look like a JWT;
+    // OIDC handles the JWT shape and is the primary path in production.
+    let mut auth_links: Vec<Arc<dyn Authenticator>> =
+        vec![Arc::new(BearerAuthenticator::new(users_store.clone()))];
+    if let Some(oidc_cfg) = &cfg.oidc {
+        let runtime_cfg = oidc::OidcConfig {
+            issuer: oidc_cfg.issuer.clone(),
+            audience: oidc_cfg.audience.clone(),
+            jwks_url: oidc_cfg.jwks_url.clone(),
+            jwks_ttl: Duration::from_secs(oidc_cfg.jwks_ttl_seconds),
+        };
+        match oidc::OidcAuthenticator::new(runtime_cfg) {
+            Ok(o) => auth_links.push(Arc::new(o)),
+            Err(err) => {
+                tracing::error!(error = %err, "oidc authenticator init failed");
+                return ExitCode::from(2);
+            }
+        }
+    } else {
+        tracing::warn!("no [oidc] section in config — only opaque bearer auth available");
+    }
+    let user_auth = UserAuthState::new(
+        Arc::new(ChainAuthenticator::new(auth_links)),
+        users_store.clone(),
+    );
+
     let app_state = http::AppState {
         secrets: secrets_svc,
         instances: instance_svc,
         snapshots: snapshot_svc,
         prober,
         tokens: tokens_store,
+        users: users_store,
         sandbox_domain: cfg.cube.sandbox_domain.clone(),
     };
-    let app = http::router(app_state, auth, llm_router);
+    let app = http::router(app_state, auth, user_auth, llm_router);
 
     let listener = match tokio::net::TcpListener::bind(&cfg.bind).await {
         Ok(l) => l,

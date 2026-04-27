@@ -6,13 +6,14 @@
 //! - `GET    /v1/instances/:id/url`      → just the sandbox URL
 //! - `POST   /v1/instances/:id/probe`    → run a probe synchronously
 
-use axum::extract::{Path, State};
+use axum::extract::{Extension, Path, State};
 use axum::http::{StatusCode, Uri};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Serialize;
 
+use crate::auth::CallerIdentity;
 use crate::error::WardenError;
 use crate::http::{secrets::store_err_to_status, AppState};
 use crate::instance::{CreateRequest, CreatedInstance};
@@ -32,9 +33,10 @@ pub fn router(state: AppState) -> Router {
 
 async fn create_instance(
     State(state): State<AppState>,
+    Extension(caller): Extension<CallerIdentity>,
     Json(req): Json<CreateRequest>,
 ) -> Result<(StatusCode, Json<CreatedInstance>), StatusCode> {
-    match state.instances.create(crate::auth::caller_owner_placeholder(), req).await {
+    match state.instances.create(&caller.user_id, req).await {
         Ok(c) => Ok((StatusCode::CREATED, Json(c))),
         Err(e) => Err(warden_err_to_status(e)),
     }
@@ -42,6 +44,7 @@ async fn create_instance(
 
 async fn list_instances(
     State(state): State<AppState>,
+    Extension(caller): Extension<CallerIdentity>,
     uri: Uri,
 ) -> Result<Json<Vec<InstanceView>>, StatusCode> {
     let q = parse_query(uri.query().unwrap_or(""));
@@ -60,7 +63,7 @@ async fn list_instances(
         status,
         include_destroyed,
     };
-    match state.instances.list(crate::auth::caller_owner_placeholder(), filter).await {
+    match state.instances.list(&caller.user_id, filter).await {
         Ok(rows) => Ok(Json(rows.into_iter().map(InstanceView::from).collect())),
         Err(e) => Err(warden_err_to_status(e)),
     }
@@ -81,9 +84,10 @@ fn parse_query(s: &str) -> std::collections::HashMap<String, String> {
 
 async fn get_instance(
     State(state): State<AppState>,
+    Extension(caller): Extension<CallerIdentity>,
     Path(id): Path<String>,
 ) -> Result<Json<InstanceView>, StatusCode> {
-    match state.instances.get(crate::auth::caller_owner_placeholder(), &id).await {
+    match state.instances.get(&caller.user_id, &id).await {
         Ok(row) => Ok(Json(InstanceView::from(row))),
         Err(e) => Err(warden_err_to_status(e)),
     }
@@ -91,9 +95,10 @@ async fn get_instance(
 
 async fn destroy_instance(
     State(state): State<AppState>,
+    Extension(caller): Extension<CallerIdentity>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    match state.instances.destroy(crate::auth::caller_owner_placeholder(), &id).await {
+    match state.instances.destroy(&caller.user_id, &id).await {
         Ok(()) => StatusCode::NO_CONTENT,
         Err(e) => warden_err_to_status(e),
     }
@@ -106,11 +111,12 @@ struct UrlView {
 
 async fn probe_instance(
     State(state): State<AppState>,
+    Extension(caller): Extension<CallerIdentity>,
     Path(id): Path<String>,
 ) -> Result<Json<ProbeResult>, StatusCode> {
     match state
         .instances
-        .probe(crate::auth::caller_owner_placeholder(), &*state.prober, &id)
+        .probe(&caller.user_id, &*state.prober, &id)
         .await
     {
         Ok(r) => Ok(Json(r)),
@@ -120,9 +126,10 @@ async fn probe_instance(
 
 async fn instance_url(
     State(state): State<AppState>,
+    Extension(caller): Extension<CallerIdentity>,
     Path(id): Path<String>,
 ) -> Result<Json<UrlView>, StatusCode> {
-    let row = match state.instances.get(crate::auth::caller_owner_placeholder(), &id).await {
+    let row = match state.instances.get(&caller.user_id, &id).await {
         Ok(r) => r,
         Err(e) => return Err(warden_err_to_status(e)),
     };

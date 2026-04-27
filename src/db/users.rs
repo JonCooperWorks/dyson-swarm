@@ -41,6 +41,8 @@ fn row_to_user(row: &sqlx::sqlite::SqliteRow) -> Result<UserRow, StoreError> {
         created_at: row.try_get("created_at").map_err(map_sqlx)?,
         activated_at: row.try_get("activated_at").map_err(map_sqlx)?,
         last_seen_at: row.try_get("last_seen_at").map_err(map_sqlx)?,
+        openrouter_key_id: row.try_get("openrouter_key_id").map_err(map_sqlx)?,
+        openrouter_key_limit_usd: row.try_get("openrouter_key_limit_usd").map_err(map_sqlx)?,
     })
 }
 
@@ -198,6 +200,40 @@ impl UserStore for SqlxUserStore {
         }
         Ok(())
     }
+
+    async fn set_openrouter_key_id(
+        &self,
+        user_id: &str,
+        key_id: Option<&str>,
+    ) -> Result<(), StoreError> {
+        let r = sqlx::query("UPDATE users SET openrouter_key_id = ? WHERE id = ?")
+            .bind(key_id)
+            .bind(user_id)
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+        if r.rows_affected() == 0 {
+            return Err(StoreError::NotFound);
+        }
+        Ok(())
+    }
+
+    async fn set_openrouter_limit(
+        &self,
+        user_id: &str,
+        limit_usd: f64,
+    ) -> Result<(), StoreError> {
+        let r = sqlx::query("UPDATE users SET openrouter_key_limit_usd = ? WHERE id = ?")
+            .bind(limit_usd)
+            .bind(user_id)
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+        if r.rows_affected() == 0 {
+            return Err(StoreError::NotFound);
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -215,7 +251,36 @@ mod tests {
             created_at: 100,
             activated_at: None,
             last_seen_at: None,
+            openrouter_key_id: None,
+            openrouter_key_limit_usd: 10.0,
         }
+    }
+
+    #[tokio::test]
+    async fn openrouter_key_round_trip() {
+        let pool = open_in_memory().await.unwrap();
+        let store = SqlxUserStore::new(pool);
+        store.create(sample("alice")).await.unwrap();
+
+        // Default limit is 10.0 from the migration default.
+        let r0 = store.get("u-alice").await.unwrap().unwrap();
+        assert!(r0.openrouter_key_id.is_none());
+        assert!((r0.openrouter_key_limit_usd - 10.0).abs() < 1e-9);
+
+        store
+            .set_openrouter_key_id("u-alice", Some("or-key-abc"))
+            .await
+            .unwrap();
+        store.set_openrouter_limit("u-alice", 25.0).await.unwrap();
+
+        let r1 = store.get("u-alice").await.unwrap().unwrap();
+        assert_eq!(r1.openrouter_key_id.as_deref(), Some("or-key-abc"));
+        assert!((r1.openrouter_key_limit_usd - 25.0).abs() < 1e-9);
+
+        // Clearing on suspend / delete.
+        store.set_openrouter_key_id("u-alice", None).await.unwrap();
+        let r2 = store.get("u-alice").await.unwrap().unwrap();
+        assert!(r2.openrouter_key_id.is_none());
     }
 
     #[tokio::test]

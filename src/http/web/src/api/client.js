@@ -128,6 +128,16 @@ export class WardenClient {
     );
   }
 
+  // ─── Models (upstream provider catalogue) ──────────────────────
+
+  /// Returns `{ models: ["anthropic/claude-sonnet-4-5", ...] }` from
+  /// the configured upstream LLM provider (e.g. OpenRouter).  Used by
+  /// the create-form picker so the SPA never talks to the upstream
+  /// directly.
+  listProviderModels() {
+    return this._json('/v1/models', { headers: { Accept: 'application/json' } });
+  }
+
   // ─── Per-instance secrets ───────────────────────────────────────
 
   // Returns names only (the backend deliberately strips values).
@@ -156,7 +166,7 @@ export class WardenClient {
     );
   }
 
-  // ─── Admin (admin-bearer required; OIDC users can't reach these) ─
+  // ─── Admin (caller must carry the configured admin permission/role) ─
 
   adminListUsers() {
     return this._json('/v1/admin/users');
@@ -176,6 +186,22 @@ export class WardenClient {
   }
   adminRevokeApiKey(token) {
     return this._json(`/v1/admin/users/keys/${encodeURIComponent(token)}`, { method: 'DELETE' });
+  }
+  /// Stage 6: set the user's OpenRouter USD spend cap.  Mirrors
+  /// upstream when the user already has a key minted.
+  adminSetOpenRouterLimit(id, limit_usd) {
+    return this._json(`/v1/admin/users/${encodeURIComponent(id)}/openrouter_limit`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ limit_usd }),
+    });
+  }
+  /// Stage 6: force a fresh OpenRouter key mint for the user.
+  /// Returns the plaintext once — surface immediately, never log.
+  adminForceMintOpenRouterKey(id) {
+    return this._json(`/v1/admin/users/${encodeURIComponent(id)}/openrouter_key/mint`, {
+      method: 'POST',
+    });
   }
   adminRevokeProxyToken(token) {
     return this._json(

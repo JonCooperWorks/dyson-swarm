@@ -368,6 +368,95 @@
   font-size: 12px;
 }
 
+/* ── Chip-input (multi-model picker) ───────────────────────────── */
+
+.chip-input {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.chip-input:focus-within { outline: 2px solid var(--accent); outline-offset: -2px; }
+.chip-input-text {
+  flex: 1;
+  min-width: 140px;
+  padding: 2px 4px;
+  background: transparent;
+  border: 0;
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 13px;
+}
+.chip-input-text:focus { outline: none; }
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px 2px 8px;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 12px;
+}
+.chip-primary { border-color: var(--accent); }
+.chip-x {
+  background: transparent;
+  border: 0;
+  color: var(--fg-muted);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 2px;
+}
+.chip-x:hover { color: var(--fg); }
+.chip-add {
+  cursor: pointer;
+  background: var(--bg-2);
+  color: var(--fg-muted);
+}
+.chip-add:hover { color: var(--fg); border-color: var(--accent); }
+
+.model-suggestions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 6px;
+}
+.model-suggestion-group { display: flex; flex-direction: column; gap: 4px; }
+.model-suggestion-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  color: var(--fg-muted);
+  letter-spacing: 0.04em;
+}
+.model-suggestion-chips { display: flex; flex-wrap: wrap; gap: 4px; max-height: 96px; overflow-y: auto; }
+
+/* ── Indeterminate progress bar (provisioning state) ──────────── */
+
+.progress-bar {
+  height: 4px;
+  background: var(--bg-2);
+  border-radius: 999px;
+  overflow: hidden;
+  margin-top: 12px;
+}
+.progress-bar-indeterminate {
+  height: 100%;
+  width: 30%;
+  background: var(--accent);
+  border-radius: 999px;
+  animation: progress-slide 1.4s ease-in-out infinite;
+}
+@keyframes progress-slide {
+  0%   { transform: translateX(-100%); }
+  50%  { transform: translateX(180%); }
+  100% { transform: translateX(380%); }
+}
+
 .kv {
   display: flex;
   flex-direction: column;

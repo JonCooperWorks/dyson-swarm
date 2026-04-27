@@ -250,6 +250,10 @@ function toStorageShape(t) {
   const expSec = typeof t.expires_in === 'number' ? t.expires_in : 3600;
   return {
     access_token: t.access_token,
+    // Held only for `id_token_hint` on RP-initiated logout — never
+    // sent to warden's API.  Auth0's end_session endpoint accepts
+    // logout without a hint but skips the consent screen with one.
+    id_token: t.id_token || null,
     refresh_token: t.refresh_token || null,
     expires_at: Date.now() + expSec * 1000,
     token_type: t.token_type || 'Bearer',
@@ -350,10 +354,38 @@ export async function bootstrapAuth() {
     mode: 'oidc',
     config: cfg,
     getToken: () => readTokens()?.access_token || null,
-    logout: () => {
-      writeTokens(null);
-      writePending(null);
-      onRedirect();
-    },
+    logout: () => signOut(cfg, discovery, onRedirect),
   };
+}
+
+// RP-initiated logout (OIDC spec).  Clearing the SPA's tokens isn't
+// enough on its own — the IdP still has a session cookie, so the
+// next /authorize round-trip silently re-issues a token for the same
+// user (classic "sign-out doesn't sign out" trap).  We redirect to
+// the IdP's end_session_endpoint so it drops its own session, then
+// it bounces back to `${origin}/` with no tokens, where bootstrapAuth
+// kicks off a fresh authorization flow.
+//
+// Auth0 / Okta / Keycloak all expose end_session_endpoint via
+// discovery.  IdPs that don't (rare these days) fall back to the old
+// behavior — local-only logout — which is at least no worse than the
+// previous implementation.
+//
+// `post_logout_redirect_uri` must be allowlisted on the IdP side
+// (Auth0: Application → "Allowed Logout URLs").  When the IdP
+// rejects the URL it 400s the redirect; the user lands on an error
+// page instead of warden's splash.
+function signOut(cfg, discovery, onRedirect) {
+  const tokens = readTokens();
+  writeTokens(null);
+  writePending(null);
+  if (!discovery.end_session_endpoint) {
+    onRedirect();
+    return;
+  }
+  const url = new URL(discovery.end_session_endpoint);
+  url.searchParams.set('client_id', cfg.client_id);
+  url.searchParams.set('post_logout_redirect_uri', `${window.location.origin}/`);
+  if (tokens?.id_token) url.searchParams.set('id_token_hint', tokens.id_token);
+  window.location.assign(url.toString());
 }

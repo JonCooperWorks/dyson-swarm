@@ -1,52 +1,55 @@
 /* warden — Admin view (users + proxy-token revocation).
  *
- * Admin routes (/v1/admin/*) sit behind the admin-bearer middleware,
- * not the user-OIDC chain.  The SPA's normal token won't reach them,
- * so the Admin view prompts for the operator's admin token, stashes
- * it in sessionStorage (per-tab; clears on close), and builds a
- * dedicated WardenClient instance bound to it.
- *
- * Why not auto-elevate from OIDC: warden's threat model treats the
- * admin token as an out-of-band ops credential, separate from any
- * user identity.  Mixing the two would mean every OIDC user with the
- * UI loaded becomes an "admin candidate", which is exactly the
- * privilege coupling we want to avoid.
- *
- * The token is stored unobfuscated in sessionStorage — same XSS
- * exposure as the OIDC token, accepted under the same trust model.
+ * Admin routes (/v1/admin/*) sit behind the same OIDC chain as
+ * everything else, with an extra middleware that requires the
+ * caller's JWT to carry the configured admin permission/role.  The
+ * SPA's normal access token is therefore sufficient — no separate
+ * credential, no token prompt.  Users without the admin permission
+ * see a "not authorized" splash instead of the panels (driven by a
+ * probe of /v1/admin/users; backend is the source of truth).
  */
 
 import React from 'react';
-import { WardenClient } from '../api/client.js';
-
-const TOKEN_KEY = 'warden:admin-token';
-
-function readAdminToken() {
-  try { return sessionStorage.getItem(TOKEN_KEY) || ''; } catch { return ''; }
-}
-function writeAdminToken(t) {
-  if (!t) sessionStorage.removeItem(TOKEN_KEY);
-  else sessionStorage.setItem(TOKEN_KEY, t);
-}
+import { useApi } from '../hooks/useApi.jsx';
 
 export function AdminView() {
-  const [token, setToken] = React.useState(readAdminToken());
+  const { client } = useApi();
+  const [authz, setAuthz] = React.useState({ state: 'probing' }); // probing | ok | denied | error
 
-  if (!token) return <AdminTokenPrompt onSubmit={(t) => { writeAdminToken(t); setToken(t); }}/>;
+  React.useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        await client.adminListUsers();
+        if (!cancelled) setAuthz({ state: 'ok' });
+      } catch (e) {
+        if (cancelled) return;
+        if (e?.status === 401) setAuthz({ state: 'denied', reason: 'unauthenticated' });
+        else if (e?.status === 403) setAuthz({ state: 'denied', reason: 'forbidden' });
+        else setAuthz({ state: 'error', message: e?.message || 'admin probe failed' });
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [client]);
 
-  // Admin client — same class, different bearer source.  Built once
-  // per token change so a "forget" + re-enter cycle gets a fresh
-  // closure rather than a stale getToken pointing at the old value.
-  const client = React.useMemo(() => new WardenClient({ getToken: () => token }), [token]);
-  const forget = () => { writeAdminToken(''); setToken(''); };
+  if (authz.state === 'probing') {
+    return <main className="admin-pane"><p className="muted small">checking access…</p></main>;
+  }
+  if (authz.state === 'denied') {
+    return <NotAuthorized reason={authz.reason}/>;
+  }
+  if (authz.state === 'error') {
+    return (
+      <main className="admin-pane">
+        <div className="error">{authz.message}</div>
+      </main>
+    );
+  }
 
   return (
     <main className="admin-pane">
       <header className="admin-header">
         <h2>admin</h2>
-        <div className="admin-actions">
-          <button className="btn btn-ghost" onClick={forget}>forget admin token</button>
-        </div>
       </header>
       <UsersPanel client={client}/>
       <ProxyTokensPanel client={client}/>
@@ -54,38 +57,14 @@ export function AdminView() {
   );
 }
 
-function AdminTokenPrompt({ onSubmit }) {
-  const [v, setV] = React.useState('');
-  const submit = (e) => {
-    e.preventDefault();
-    if (!v.trim()) return;
-    onSubmit(v.trim());
-  };
+function NotAuthorized({ reason }) {
   return (
     <main className="splash">
       <h1>admin</h1>
       <p className="muted">
-        Admin routes are gated by an out-of-band token.  Paste the value of
-        <code>admin_token</code> from the warden config to continue.
-      </p>
-      <form onSubmit={submit} className="form" style={{ width: 'min(420px, 90vw)' }}>
-        <label className="field">
-          <span>admin token</span>
-          <input
-            type="password"
-            value={v}
-            onChange={e => setV(e.target.value)}
-            autoFocus
-            required
-          />
-        </label>
-        <div className="modal-actions">
-          <button type="submit" className="btn btn-primary">use this token</button>
-        </div>
-      </form>
-      <p className="muted small">
-        Stored in sessionStorage; cleared on tab close or via "forget admin
-        token" once you're in.
+        {reason === 'forbidden'
+          ? 'Your account is signed in but does not have the admin permission. Ask your operator to assign it in the IdP.'
+          : 'Sign in is required to view admin tools.'}
       </p>
     </main>
   );
@@ -106,7 +85,7 @@ function UsersPanel({ client }) {
       const list = await client.adminListUsers();
       setRows(Array.isArray(list) ? list : []);
     } catch (e) {
-      setErr(e?.status === 401 ? 'admin token rejected' : (e?.message || 'list users failed'));
+      setErr(e?.message || 'list users failed');
     }
   }, [client]);
 
@@ -145,6 +124,48 @@ function UsersPanel({ client }) {
     }
   };
 
+  const setOrLimit = async (id, currentLimit) => {
+    const next = prompt(
+      `OpenRouter USD spend cap for this user (current: $${currentLimit}):`,
+      String(currentLimit ?? 10),
+    );
+    if (next == null) return;
+    const parsed = Number(next);
+    if (!Number.isFinite(parsed) || parsed < 0) {
+      setErr(`invalid limit "${next}" — must be a non-negative number`);
+      return;
+    }
+    setBusy(true); setErr(null);
+    try {
+      await client.adminSetOpenRouterLimit(id, parsed);
+      await refresh();
+    } catch (e) {
+      setErr(e?.detail || e?.message || 'set limit failed');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const forceMintOr = async (id) => {
+    if (!confirm(
+      'Force-mint a new OpenRouter key for this user? The current key (if any) is revoked upstream and the plaintext is shown only once.',
+    )) return;
+    setBusy(true); setErr(null);
+    try {
+      const r = await client.adminForceMintOpenRouterKey(id);
+      const tok = r?.token || null;
+      if (tok) {
+        setMintedFor(`${id} · openrouter`);
+        setMintedToken(tok);
+      }
+      await refresh();
+    } catch (e) {
+      setErr(e?.detail || e?.message || 'or mint failed');
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <section className="panel">
       <div className="panel-header">
@@ -161,7 +182,9 @@ function UsersPanel({ client }) {
       ) : (
         <table className="rows">
           <thead><tr>
-            <th>id</th><th>subject</th><th>email</th><th>status</th><th>created</th><th></th>
+            <th>id</th><th>subject</th><th>email</th><th>status</th>
+            <th>OR key</th><th>OR limit</th>
+            <th>created</th><th></th>
           </tr></thead>
           <tbody>
             {rows.map(u => (
@@ -170,6 +193,14 @@ function UsersPanel({ client }) {
                 <td><code className="mono-sm">{u.subject}</code></td>
                 <td className="muted small">{u.email || '—'}</td>
                 <td><UserStatusBadge status={u.status}/></td>
+                <td>
+                  {u.openrouter_key_present ? (
+                    <span className="badge badge-ok">present</span>
+                  ) : (
+                    <span className="badge badge-faint">none</span>
+                  )}
+                </td>
+                <td className="muted small">${(u.openrouter_key_limit_usd ?? 0).toFixed(2)}</td>
                 <td className="muted small">{fmtTime(u.created_at)}</td>
                 <td className="row-actions">
                   {u.status !== 'active' ? (
@@ -182,7 +213,23 @@ function UsersPanel({ client }) {
                     </button>
                   )}
                   <button className="btn btn-ghost btn-sm" onClick={() => mint(u.id)} disabled={busy}>
-                    mint key
+                    mint api key
+                  </button>
+                  <button
+                    className="btn btn-ghost btn-sm"
+                    onClick={() => setOrLimit(u.id, u.openrouter_key_limit_usd)}
+                    disabled={busy}
+                    title="set the user's OpenRouter USD spend cap"
+                  >
+                    OR limit
+                  </button>
+                  <button
+                    className="btn btn-ghost btn-sm"
+                    onClick={() => forceMintOr(u.id)}
+                    disabled={busy}
+                    title="rotate (or first-time mint) the user's OpenRouter key"
+                  >
+                    {u.openrouter_key_present ? 'rotate OR' : 'mint OR'}
                   </button>
                 </td>
               </tr>

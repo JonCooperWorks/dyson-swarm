@@ -18,6 +18,7 @@ pub mod auth_config;
 pub mod dyson_proxy;
 pub mod healthz;
 pub mod instances;
+pub mod models;
 pub mod proxy_admin;
 pub mod secrets;
 pub mod snapshots;
@@ -68,6 +69,21 @@ pub struct AppState {
     /// Shared `reqwest::Client` for the host-based reverse proxy.  One
     /// per process so connection pooling survives across requests.
     pub dyson_http: reqwest::Client,
+    /// Upstream URL (e.g. `https://openrouter.ai/api`) for the LLM
+    /// provider the agents talk through.  `GET /v1/models` proxies to
+    /// `<upstream>/v1/models` and exposes the catalogue to the SPA's
+    /// create-form picker. `None` disables the endpoint (returns 503).
+    pub models_upstream: Option<String>,
+    /// Per-process cache for `/v1/models`.  TTL'd inside the handler.
+    pub models_cache: models::ModelsCache,
+    /// OpenRouter Provisioning-API client.  Some when the operator
+    /// supplies a provisioning key (Stage 6); None disables per-user
+    /// minting.
+    pub openrouter_provisioning: Option<Arc<dyn crate::openrouter::Provisioning>>,
+    /// Resolves user_id → plaintext OR bearer.  Same as the proxy's,
+    /// surfaced here so admin endpoints can mint/rotate without
+    /// duplicating the lazy logic.
+    pub user_or_keys: Option<Arc<crate::openrouter::UserOrKeyResolver>>,
 }
 
 /// Build the public `Router`.
@@ -120,6 +136,7 @@ pub fn router(
         .merge(instances::router(state.clone()))
         .merge(snapshots::router(state.clone()))
         .merge(secrets::router(state.clone()))
+        .merge(models::router(state.clone()))
         .layer(middleware::from_fn_with_state(user_auth.clone(), user_middleware));
 
     // Static assets (SPA bundle) are merged last so the API routes win
@@ -253,6 +270,10 @@ mod tests {
             hostname: None,
             auth_config: Arc::new(auth_config::AuthConfig::none()),
             dyson_http: dyson_proxy::build_client().expect("dyson http client init"),
+            models_upstream: None,
+            models_cache: models::ModelsCache::new(),
+            openrouter_provisioning: None,
+            user_or_keys: None,
         };
         (state, users_store)
     }

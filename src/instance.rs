@@ -177,6 +177,11 @@ impl InstanceService {
             .update_status(&id, InstanceStatus::Live)
             .await?;
 
+        // Caddy's on_demand TLS for `<id>.<hostname>` is warmed by the
+        // SPA in the background (no-cors fetch + <link rel="preconnect">
+        // when the detail page mounts).  Doing it here would add 5–15s
+        // of synchronous wait to every create, which the user feels.
+
         Ok(CreatedInstance {
             id,
             url: info.url,

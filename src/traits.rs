@@ -49,6 +49,15 @@ pub struct UserRow {
     pub created_at: i64,
     pub activated_at: Option<i64>,
     pub last_seen_at: Option<i64>,
+    /// Stable OpenRouter Provisioning-API key id, or None before the
+    /// first lazy mint.  Set when the proxy mints a key for this
+    /// user; cleared when an admin suspends/deletes them and warden
+    /// revokes upstream.
+    pub openrouter_key_id: Option<String>,
+    /// USD spend cap on this user's OR key.  Default $10 (set by the
+    /// migration); admin can raise per-tenant.  Mirrored upstream on
+    /// every change so OR enforces it server-side.
+    pub openrouter_key_limit_usd: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -69,6 +78,23 @@ pub trait UserStore: Send + Sync {
     async fn list(&self) -> Result<Vec<UserRow>, StoreError>;
     async fn set_status(&self, id: &str, status: UserStatus) -> Result<(), StoreError>;
     async fn touch_last_seen(&self, id: &str) -> Result<(), StoreError>;
+
+    /// Persist (or clear) the OpenRouter Provisioning-API key id for
+    /// `user_id`.  Called after a successful POST /keys mint, and
+    /// again with `None` after an admin-triggered DELETE upstream.
+    async fn set_openrouter_key_id(
+        &self,
+        user_id: &str,
+        key_id: Option<&str>,
+    ) -> Result<(), StoreError>;
+    /// Update the per-user USD cap on the OR key.  The caller is
+    /// responsible for mirroring the change upstream via the
+    /// Provisioning API; this method only persists the local view.
+    async fn set_openrouter_limit(
+        &self,
+        user_id: &str,
+        limit_usd: f64,
+    ) -> Result<(), StoreError>;
 
     /// Mint an opaque bearer for `user_id`. Used by CI/admin paths that
     /// can't do an OIDC flow.

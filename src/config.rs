@@ -57,6 +57,37 @@ pub struct Config {
     pub backup: BackupConfig,
     #[serde(default)]
     pub oidc: Option<OidcConfigToml>,
+    /// OpenRouter Provisioning-API config (Stage 6 per-user keys).
+    /// When present, warden mints a unique OR key per tenant on first
+    /// `/llm/openrouter/...` call, capped at the user's
+    /// `openrouter_key_limit_usd`.  When absent the proxy falls back
+    /// to the global `[providers.openrouter].api_key`.
+    #[serde(default)]
+    pub openrouter: Option<OpenRouterConfig>,
+}
+
+/// OpenRouter Provisioning configuration.  The provisioning key is a
+/// separate credential from a regular OpenRouter API key — only it
+/// can mint/list/update/delete per-user keys.  Two ways to supply it:
+///
+/// - `provisioning_key_path` — absolute path to a file holding the
+///   plaintext key (`~/openrouter_management_key` is the default
+///   bring-up convention).  Read once at startup.
+/// - `provisioning_key` — the plaintext inline (TOML literal).  Only
+///   useful for local dev; in production prefer the path so the key
+///   isn't in the rendered config.
+///
+/// The `upstream` field defaults to `[providers.openrouter].upstream`
+/// when unset, so a deployment using a self-hosted OpenRouter mirror
+/// can override both at once.
+#[derive(Debug, Clone, Deserialize)]
+pub struct OpenRouterConfig {
+    #[serde(default)]
+    pub provisioning_key_path: Option<PathBuf>,
+    #[serde(default)]
+    pub provisioning_key: Option<String>,
+    #[serde(default)]
+    pub upstream: Option<String>,
 }
 
 /// OIDC issuer configuration, lifted out of [`crate::auth::oidc::OidcConfig`]
@@ -95,12 +126,22 @@ pub struct OidcConfigToml {
     pub roles: Option<OidcRoles>,
 }
 
-/// Where to find roles in an OIDC access token, and which role grants
-/// admin.  Auth0 / Okta / Keycloak all let operators inject a
-/// namespaced custom claim like
-/// `https://dyson.example.com/roles: ["rol_admin", "rol_free"]` via a
-/// post-login action.  We don't care which IdP — just which claim and
-/// which value.
+/// Where to find authorization data in an OIDC access token, and which
+/// value grants admin.
+///
+/// Recommended setup (Auth0 / Okta / Keycloak — anything that does
+/// API-level RBAC): enable "Add Permissions in the Access Token" on
+/// the API, define a permission named `admin`, and attach it to your
+/// admin role.  The IdP then emits a top-level `permissions` array on
+/// every access token; warden checks for the configured value in it.
+/// Config:
+///     claim = "permissions"
+///     admin = "admin"
+///
+/// Alternative for IdPs without per-API RBAC: inject a custom claim
+/// (e.g. `https://your-host/roles`) via a post-login hook and point
+/// `claim` at that URL.  warden doesn't care which path — just that
+/// `claims[claim]` is an array of strings containing `admin`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct OidcRoles {
     /// JWT claim name to inspect.  Must point at an array of strings.

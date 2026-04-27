@@ -130,7 +130,29 @@ async fn handle(
         Some(c) => c,
         None => return error_response(StatusCode::SERVICE_UNAVAILABLE, "provider not configured"),
     };
-    let real_key = provider_cfg.api_key.as_deref().unwrap_or("");
+    // Stage 6: when the per-user OR key resolver is wired in,
+    // /llm/openrouter/* swaps the global `[providers.openrouter]
+    // api_key` for the caller's own minted key.  Lazy-mint on first
+    // call.  Resolver failures fall back to the global key — this
+    // keeps the proxy serving even if the OR Provisioning API is
+    // temporarily unreachable, at the cost of attribution.
+    let real_key: String = if provider == "openrouter"
+        && let Some(resolver) = state.user_or_keys.as_ref()
+    {
+        match resolver.resolve_plaintext(&owner_id).await {
+            Ok(k) => k,
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    user = %owner_id,
+                    "openrouter per-user key resolve failed; falling back to global"
+                );
+                provider_cfg.api_key.clone().unwrap_or_default()
+            }
+        }
+    } else {
+        provider_cfg.api_key.clone().unwrap_or_default()
+    };
 
     let upstream_base = adapter.upstream_base_url(&provider_cfg);
     let rest_with_query = match parts.uri.query() {
@@ -150,7 +172,7 @@ async fn handle(
     // Hop-by-hop and proxy-internal headers are stripped before the adapter
     // gets to set its own.
     sanitize_request_headers(&mut parts.headers);
-    adapter.rewrite_auth(&mut parts.headers, &mut upstream_uri, real_key);
+    adapter.rewrite_auth(&mut parts.headers, &mut upstream_uri, &real_key);
     if provider == "anthropic" {
         anthropic_adapter::apply_version(&mut parts.headers, &provider_cfg);
     }

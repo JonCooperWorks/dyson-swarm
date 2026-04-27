@@ -227,7 +227,29 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         monthly_usd_budget: cfg.default_policy.monthly_usd_budget,
         rps_limit: cfg.default_policy.rps_limit,
     };
-    let proxy_svc = match ProxyService::new(
+    // Stage 6: OpenRouter Provisioning client + per-user key resolver.
+    // Optional — when [openrouter] isn't configured (or the key file
+    // is missing) the proxy falls back to the global
+    // `[providers.openrouter].api_key`.  Constructed up front so both
+    // the proxy and the admin endpoints share one resolver.
+    let or_provisioning: Option<Arc<dyn dyson_warden::openrouter::Provisioning>> =
+        match resolve_or_provisioning(&cfg) {
+            Ok(Some(client)) => Some(Arc::new(client) as Arc<dyn dyson_warden::openrouter::Provisioning>),
+            Ok(None) => None,
+            Err(err) => {
+                tracing::error!(error = %err, "openrouter provisioning init failed");
+                return ExitCode::from(2);
+            }
+        };
+    let user_or_keys = or_provisioning.as_ref().map(|prov| {
+        Arc::new(dyson_warden::openrouter::UserOrKeyResolver::new(
+            users_store.clone(),
+            user_secrets_svc.clone(),
+            prov.clone(),
+        ))
+    });
+
+    let mut proxy = match ProxyService::new(
         tokens_store.clone(),
         instances_store.clone(),
         policies_store,
@@ -235,12 +257,16 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         cfg.providers.clone(),
         default_policy,
     ) {
-        Ok(s) => Arc::new(s),
+        Ok(s) => s,
         Err(err) => {
             tracing::error!(error = %err, "proxy service init failed");
             return ExitCode::from(2);
         }
     };
+    if let Some(resolver) = &user_or_keys {
+        proxy = proxy.with_user_or_keys(resolver.clone());
+    }
+    let proxy_svc = Arc::new(proxy);
     let llm_router = proxy::http::router(proxy_svc);
 
     // Authenticator chain: bearer first (cheap, in-DB lookup), then OIDC if
@@ -288,6 +314,14 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
             cfg.default_models.clone(),
         )),
         dyson_http: http::dyson_proxy::build_client().expect("dyson http client init"),
+        models_upstream: cfg
+            .providers
+            .openrouter
+            .as_ref()
+            .map(|p| p.upstream.clone()),
+        models_cache: http::models::ModelsCache::new(),
+        openrouter_provisioning: or_provisioning,
+        user_or_keys,
     };
     let app = http::router(app_state, auth, user_auth, llm_router);
 
@@ -311,6 +345,39 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
 
     tracing::info!("warden stopped");
     ExitCode::SUCCESS
+}
+
+/// Build the OpenRouter Provisioning client from `[openrouter]` if
+/// configured.  Returns `Ok(None)` when the section is omitted or the
+/// key path/inline is empty — that's a valid deployment posture
+/// (Stage 6 disabled, fall back to global OR key).  Returns `Err` only
+/// when the operator clearly intended to enable it (path set) but the
+/// file is unreadable / empty.
+fn resolve_or_provisioning(
+    cfg: &config::Config,
+) -> Result<Option<dyson_warden::openrouter::OpenRouterProvisioning>, String> {
+    let Some(or_cfg) = &cfg.openrouter else { return Ok(None); };
+    let key = match (or_cfg.provisioning_key.as_deref(), or_cfg.provisioning_key_path.as_deref()) {
+        (Some(k), _) if !k.trim().is_empty() => k.trim().to_string(),
+        (_, Some(p)) => {
+            let raw = std::fs::read_to_string(p)
+                .map_err(|e| format!("read {}: {e}", p.display()))?;
+            let trimmed = raw.trim().to_string();
+            if trimmed.is_empty() {
+                return Err(format!("openrouter provisioning key file {} is empty", p.display()));
+            }
+            trimmed
+        }
+        _ => return Ok(None),
+    };
+    let upstream = or_cfg
+        .upstream
+        .clone()
+        .or_else(|| cfg.providers.openrouter.as_ref().map(|p| p.upstream.clone()))
+        .unwrap_or_else(|| "https://openrouter.ai/api".to_string());
+    dyson_warden::openrouter::OpenRouterProvisioning::new(upstream, key)
+        .map(Some)
+        .map_err(|e| format!("openrouter client build: {e}"))
 }
 
 fn build_api_client(cfg: &config::Config, dangerous_no_auth: bool) -> Option<ApiClient> {

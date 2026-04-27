@@ -432,6 +432,8 @@ mod tests {
                     created_at: 0,
                     activated_at: Some(0),
                     last_seen_at: None,
+                    openrouter_key_id: None,
+                    openrouter_key_limit_usd: 10.0,
                 })
                 .await
                 .unwrap();

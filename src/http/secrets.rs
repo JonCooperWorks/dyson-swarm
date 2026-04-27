@@ -282,6 +282,10 @@ mod tests {
             hostname: None,
             auth_config: Arc::new(crate::http::auth_config::AuthConfig::none()),
             dyson_http: crate::http::dyson_proxy::build_client().expect("dyson http client init"),
+            models_upstream: None,
+            models_cache: crate::http::models::ModelsCache::new(),
+            openrouter_provisioning: None,
+            user_or_keys: None,
         };
         (state, raw, user_auth, user_id)
     }

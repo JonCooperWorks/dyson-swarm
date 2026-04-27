@@ -112,13 +112,17 @@ function CreateModal({ onClose, onCreated }) {
   const { client, auth } = useApi();
   const [name, setName] = React.useState('');
   const [task, setTask] = React.useState('');
-  // Model id the agent talks to.  Operator-curated suggestions come
-  // from `default_models` in /etc/dyson-warden/config.toml, surfaced
-  // via /auth/config; the first one pre-fills the input.  Input is
-  // backed by a <datalist> so the user can still type any other id
-  // (OpenRouter has 200+ models and no client-side enum can keep up).
-  const modelSuggestions = auth?.config?.default_models || [];
-  const [model, setModel] = React.useState(modelSuggestions[0] || '');
+  // Model ids the agent can pick from.  One labelled suggestion
+  // group ("default", from operator-curated `default_models` in
+  // /etc/dyson-warden/config.toml via /auth/config) plus free-form
+  // text input for anything else (any OpenRouter id, comma- and
+  // space-tolerant).  First selected model becomes WARDEN_MODEL
+  // (legacy single-pick env); the full list is passed as
+  // WARDEN_MODELS (csv) for agents that support failover/rotation.
+  const defaultModels = auth?.config?.default_models || [];
+  const [models, setModels] = React.useState(
+    defaultModels.length ? [defaultModels[0]] : []
+  );
   // Operator-configured default from `default_template_id` in
   // /etc/dyson-warden/config.toml, surfaced via /auth/config.  Fall
   // back to a placeholder string only when the deployment hasn't
@@ -131,50 +135,62 @@ function CreateModal({ onClose, onCreated }) {
   const [showAdvanced, setShowAdvanced] = React.useState(false);
   const [submitting, setSubmitting] = React.useState(false);
   const [error, setError] = React.useState(null);
-  const [created, setCreated] = React.useState(null);
+
+  // Two-phase flow: 'form' (fill in) → 'provisioning' (POSTed; waiting
+  // on the server, which now also pre-warms Caddy's on_demand TLS
+  // before returning so the user's first "open ↗" click works).
+  const [phase, setPhase] = React.useState('form');
 
   const submit = async (e) => {
     e.preventDefault();
-    if (!templateId.trim() || !model.trim()) return;
+    if (!templateId.trim() || models.length === 0) return;
     setSubmitting(true);
     setError(null);
     try {
       const req = {
         template_id: templateId.trim(),
-        env: { WARDEN_MODEL: model.trim() },
+        env: {
+          // First-pick stays under the legacy single-model env so
+          // Dyson agents that read WARDEN_MODEL keep working.
+          WARDEN_MODEL: models[0],
+          // Full ordered list — Dyson agents that support multiple
+          // models (failover, A/B) split this on commas.
+          WARDEN_MODELS: models.join(','),
+        },
       };
       if (name.trim()) req.name = name.trim();
       if (task.trim()) req.task = task.trim();
       const ttl = ttlSeconds.trim() ? Number(ttlSeconds) : null;
       if (Number.isFinite(ttl) && ttl > 0) req.ttl_seconds = ttl;
+
+      setPhase('provisioning');
+      // Server blocks until the sandbox is Live AND Caddy's TLS cert
+      // is provisioned (pre-warmed inside instance.create()), so by
+      // the time this resolves the new dyson is fully reachable.
       const result = await client.createInstance(req);
-      setCreated(result);
       onCreated && onCreated();
+
+      if (result?.id) {
+        window.location.hash = `#/i/${encodeURIComponent(result.id)}`;
+      }
+      onClose && onClose();
+      return;
     } catch (err) {
       setError(err?.detail || err?.message || 'create failed');
+      setPhase('form');
     } finally {
       setSubmitting(false);
     }
   };
 
-  if (created) {
+  if (phase === 'provisioning') {
     return (
-      <ModalShell onClose={onClose} title="employee onboarded">
-        <p className="small">
-          Save these tokens now — they won't be shown again.  The proxy
-          token is what every <code>/llm/*</code> call from inside the
-          sandbox carries.
+      <ModalShell onClose={null} title="provisioning">
+        <p className="muted small">getting your dyson ready…</p>
+        <div className="progress-bar"><div className="progress-bar-indeterminate"/></div>
+        <p className="muted small" style={{ marginTop: 12 }}>
+          By the time this closes, your dyson is live and reachable.
         </p>
-        <KvField label="id" value={created.id}/>
-        <KvField label="sandbox url" value={created.url}/>
-        <KvField label="bearer token" value={created.bearer_token}/>
-        <KvField label="proxy token" value={created.proxy_token}/>
-        <div className="modal-actions">
-          <a className="btn btn-primary" href={`#/i/${encodeURIComponent(created.id)}`} onClick={onClose}>
-            open profile →
-          </a>
-          <button className="btn btn-ghost" onClick={onClose}>close</button>
-        </div>
       </ModalShell>
     );
   }
@@ -206,27 +222,11 @@ function CreateModal({ onClose, onCreated }) {
             running employee.
           </span>
         </label>
-        <label className="field">
-          <span>model</span>
-          <input
-            value={model}
-            onChange={e => setModel(e.target.value)}
-            placeholder={modelSuggestions[0] || 'anthropic/claude-sonnet-4-5'}
-            list="model-suggestions"
-            required
-          />
-          {modelSuggestions.length > 0 ? (
-            <datalist id="model-suggestions">
-              {modelSuggestions.map(m => <option key={m} value={m}/>)}
-            </datalist>
-          ) : null}
-          <span className="hint muted small">
-            OpenRouter model id. Suggestions come from your warden
-            config; type to override. See{' '}
-            <a href="https://openrouter.ai/models" target="_blank" rel="noopener noreferrer">openrouter.ai/models</a>{' '}
-            for the full list.
-          </span>
-        </label>
+        <ModelMultiPicker
+          defaultModels={defaultModels}
+          selected={models}
+          onChange={setModels}
+        />
         <button
           type="button"
           className="btn btn-ghost btn-sm"
@@ -258,13 +258,145 @@ function CreateModal({ onClose, onCreated }) {
         ) : null}
         {error ? <div className="error">{error}</div> : null}
         <div className="modal-actions">
-          <button type="submit" className="btn btn-primary" disabled={submitting}>
+          <button
+            type="submit"
+            className="btn btn-primary"
+            disabled={submitting || models.length === 0}
+            title={models.length === 0 ? 'pick at least one model' : ''}
+          >
             {submitting ? 'hiring…' : 'hire'}
           </button>
           <button type="button" className="btn btn-ghost" onClick={onClose}>cancel</button>
         </div>
       </form>
     </ModalShell>
+  );
+}
+
+// Multi-select with two labelled suggestion sources: the warden's
+// operator-curated `default_models` ("default") and the configured
+// upstream provider's full catalogue ("openrouter") fetched via
+// /v1/models — never directly from openrouter.ai.  Free-form text
+// input accepts any other id with Enter, comma, or space (when the
+// input contains "/"); selected models render as removable chips
+// above the input, ordered (first = primary).
+function ModelMultiPicker({ defaultModels, selected, onChange }) {
+  const { client } = useApi();
+  const [input, setInput] = React.useState('');
+  const [upstreamModels, setUpstreamModels] = React.useState(null); // null=loading, [] on err
+  const [upstreamError, setUpstreamError] = React.useState(null);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const body = await client.listProviderModels();
+        const ids = Array.isArray(body?.models) ? body.models.filter(Boolean) : [];
+        if (!cancelled) setUpstreamModels(ids);
+      } catch (e) {
+        if (!cancelled) {
+          setUpstreamModels([]);
+          setUpstreamError(
+            e?.status === 503
+              ? 'no upstream provider configured'
+              : (e?.message || 'fetch failed'),
+          );
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [client]);
+
+  const add = (id) => {
+    const v = id.trim();
+    if (!v) return;
+    if (selected.includes(v)) return;
+    onChange([...selected, v]);
+  };
+  const remove = (id) => onChange(selected.filter(m => m !== id));
+  const onKeyDown = (e) => {
+    if (e.key === 'Enter' || e.key === ',' || (e.key === ' ' && input.includes('/'))) {
+      e.preventDefault();
+      add(input);
+      setInput('');
+    } else if (e.key === 'Backspace' && !input && selected.length) {
+      remove(selected[selected.length - 1]);
+    }
+  };
+
+  const filter = input.trim().toLowerCase();
+  const matches = (id) =>
+    !selected.includes(id) && (!filter || id.toLowerCase().includes(filter));
+  const defaultMatches = defaultModels.filter(matches);
+  const upstreamMatches = (upstreamModels || []).filter(matches).slice(0, 12);
+
+  return (
+    <div className="field">
+      <span>models</span>
+      <div className="chip-input">
+        {selected.map((m, i) => (
+          <span key={m} className={`chip ${i === 0 ? 'chip-primary' : ''}`}>
+            <code className="mono-sm">{m}</code>
+            <button
+              type="button"
+              className="chip-x"
+              aria-label={`remove ${m}`}
+              onClick={() => remove(m)}
+            >×</button>
+          </span>
+        ))}
+        <input
+          className="chip-input-text"
+          value={input}
+          onChange={e => setInput(e.target.value)}
+          onKeyDown={onKeyDown}
+          placeholder={selected.length === 0 ? 'pick at least one model' : 'add another…'}
+        />
+      </div>
+      <div className="model-suggestions">
+        {defaultMatches.length > 0 ? (
+          <div className="model-suggestion-group">
+            <div className="model-suggestion-label">default</div>
+            <div className="model-suggestion-chips">
+              {defaultMatches.map(id => (
+                <button
+                  key={id}
+                  type="button"
+                  className="chip chip-add"
+                  onClick={() => add(id)}
+                >+ <code className="mono-sm">{id}</code></button>
+              ))}
+            </div>
+          </div>
+        ) : null}
+        <div className="model-suggestion-group">
+          <div className="model-suggestion-label">
+            openrouter
+            {upstreamModels === null ? <span className="muted small"> · loading…</span>
+             : upstreamError ? <span className="muted small"> · {upstreamError}</span>
+             : null}
+          </div>
+          <div className="model-suggestion-chips">
+            {upstreamMatches.map(id => (
+              <button
+                key={id}
+                type="button"
+                className="chip chip-add"
+                onClick={() => add(id)}
+              >+ <code className="mono-sm">{id}</code></button>
+            ))}
+            {upstreamModels !== null && upstreamMatches.length === 0 && filter ? (
+              <span className="muted small">no openrouter matches for "{filter}" — press Enter to add it as a custom id</span>
+            ) : null}
+          </div>
+        </div>
+      </div>
+      <span className="hint muted small">
+        First chip is the primary; agents that support multiple models
+        try the rest in order.  Type any model id and press Enter to
+        add a custom one.
+      </span>
+    </div>
   );
 }
 
@@ -334,6 +466,48 @@ function InstanceDetail({ id }) {
     });
     return () => { cancelled = true; };
   }, [client, id]);
+
+  // Background TLS warm-up for `<id>.<hostname>` whenever the detail
+  // page first appears for an instance.  Caddy fronts each Dyson with
+  // on_demand TLS, so the very first request to a fresh subdomain
+  // triggers a Let's Encrypt round-trip (~5–15s) — without warming
+  // the user's first "open ↗" click races the ACME flow and shows
+  // about:blank.
+  //
+  // Two complementary mechanisms:
+  //   1. `<link rel="preconnect">` injected into <head> — a strong
+  //      hint that tells modern browsers to do TCP + TLS handshake
+  //      against the origin in the background, before any nav.
+  //   2. A no-cors fetch — actually consummates the request even on
+  //      browsers that ignore the preconnect hint.  no-cors means we
+  //      don't read the body; the TLS handshake is the whole point.
+  //
+  // Both fire-and-forget; failures are expected (cold cert, network
+  // blip) and never surfaced to the user.
+  const openUrl = row?.open_url;
+  React.useEffect(() => {
+    if (!openUrl) return;
+    let origin;
+    try { origin = new URL(openUrl).origin; } catch { return; }
+
+    const link = document.createElement('link');
+    link.rel = 'preconnect';
+    link.href = origin;
+    link.crossOrigin = 'use-credentials';
+    document.head.appendChild(link);
+
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 20_000);
+    fetch(openUrl, { mode: 'no-cors', credentials: 'include', signal: ctrl.signal })
+      .catch(() => { /* expected for cold cert / network blips */ })
+      .finally(() => clearTimeout(t));
+
+    return () => {
+      clearTimeout(t);
+      ctrl.abort();
+      link.remove();
+    };
+  }, [openUrl]);
 
   if (!id) return <EmptyDetail/>;
   if (!row) return <main className="detail-pane"><p className="muted">loading…</p></main>;

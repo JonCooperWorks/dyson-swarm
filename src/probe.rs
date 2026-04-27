@@ -31,7 +31,29 @@ pub struct HttpHealthProber {
 
 impl HttpHealthProber {
     pub fn new(timeout: Duration, sandbox_domain: impl Into<String>) -> Result<Self, reqwest::Error> {
-        let http = Client::builder().timeout(timeout).build()?;
+        // Mirror dyson_proxy::build_client — cubeproxy's TLS uses an
+        // mkcert root that isn't in the default webpki bundle, so a
+        // vanilla reqwest::Client fails with "error sending request"
+        // (TLS handshake → unknown issuer) on every probe.
+        // WARDEN_CUBE_ROOT_CA points at the PEM the installer drops
+        // at /etc/dyson-warden/cube-root-ca.pem; trust it as an
+        // additional root.  Verification stays on.
+        let mut b = Client::builder().timeout(timeout);
+        if let Ok(path) = std::env::var("WARDEN_CUBE_ROOT_CA")
+            && !path.is_empty()
+        {
+            match std::fs::read(&path) {
+                Ok(pem) => match reqwest::Certificate::from_pem(&pem) {
+                    Ok(cert) => {
+                        tracing::info!(path = %path, "probe: trusting cube root CA");
+                        b = b.add_root_certificate(cert);
+                    }
+                    Err(e) => tracing::error!(path = %path, error = %e, "probe: WARDEN_CUBE_ROOT_CA: parse failed"),
+                },
+                Err(e) => tracing::error!(path = %path, error = %e, "probe: WARDEN_CUBE_ROOT_CA: read failed"),
+            }
+        }
+        let http = b.build()?;
         Ok(Self {
             http,
             sandbox_domain: sandbox_domain.into(),

@@ -148,6 +148,8 @@ async fn resolve_or_provision(
         created_at: now,
         activated_at: Some(now),
         last_seen_at: None,
+        openrouter_key_id: None,
+        openrouter_key_limit_usd: 10.0,
     };
     users.create(row.clone()).await?;
     Ok(row)
@@ -208,6 +210,8 @@ pub async fn fixed_user_auth_with_roles(
             created_at: 0,
             activated_at: Some(0),
             last_seen_at: None,
+            openrouter_key_id: None,
+            openrouter_key_limit_usd: 10.0,
         })
         .await
         .expect("create test user");
@@ -316,6 +320,8 @@ mod tests {
                 created_at: 0,
                 activated_at: Some(0),
                 last_seen_at: None,
+                openrouter_key_id: None,
+                openrouter_key_limit_usd: 10.0,
             })
             .await
             .unwrap();
@@ -342,6 +348,8 @@ mod tests {
                 created_at: 0,
                 activated_at: None,
                 last_seen_at: None,
+                openrouter_key_id: None,
+                openrouter_key_limit_usd: 10.0,
             })
             .await
             .unwrap();

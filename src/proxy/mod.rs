@@ -35,6 +35,13 @@ pub struct ProxyService {
     pub adapters: HashMap<&'static str, Arc<dyn ProviderAdapter>>,
     pub http: reqwest::Client,
     pub default_policy: InstancePolicy,
+    /// Optional Stage-6 per-user OpenRouter bearer resolver.  When
+    /// set, requests to `/llm/openrouter/...` substitute the user's
+    /// own minted OR key for the global `[providers.openrouter]
+    /// api_key`.  When `None` the proxy falls back to the global key
+    /// (used in tests + deployments without the OR Provisioning API
+    /// configured).
+    pub user_or_keys: Option<Arc<crate::openrouter::UserOrKeyResolver>>,
     rate: Arc<RateWindow>,
 }
 
@@ -59,8 +66,19 @@ impl ProxyService {
             adapters: adapters::registry(),
             http,
             default_policy,
+            user_or_keys: None,
             rate: Arc::new(RateWindow::default()),
         })
+    }
+
+    /// Builder-style setter so main.rs can plug in the resolver
+    /// without making it a constructor arg (tests stay clean).
+    pub fn with_user_or_keys(
+        mut self,
+        resolver: Arc<crate::openrouter::UserOrKeyResolver>,
+    ) -> Self {
+        self.user_or_keys = Some(resolver);
+        self
     }
 
     /// Resolve a provider name to its config. Returns an owned clone because

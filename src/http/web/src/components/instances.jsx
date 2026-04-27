@@ -312,15 +312,8 @@ function InstanceDetail({ id }) {
 
       {err ? <div className="error">{err}</div> : null}
 
-      <section className="panel placeholder">
-        <div className="panel-title">snapshots</div>
-        <p className="muted small">phase 4 — snapshot/backup/restore actions land here.</p>
-      </section>
-
-      <section className="panel placeholder">
-        <div className="panel-title">secrets</div>
-        <p className="muted small">phase 4 — per-instance secret editor lands here.</p>
-      </section>
+      <SnapshotsPanel instanceId={id} disabled={row.status === 'destroyed'}/>
+      <SecretsPanel instanceId={id}/>
     </main>
   );
 }
@@ -339,6 +332,255 @@ function KvRow({ label, value }) {
       <div className="kvrow-label">{label}</div>
       <div className="kvrow-value"><code>{value}</code></div>
     </div>
+  );
+}
+
+// ─── Snapshots panel ─────────────────────────────────────────────
+
+function SnapshotsPanel({ instanceId, disabled }) {
+  const { client } = useApi();
+  const [rows, setRows] = React.useState(null);
+  const [busy, setBusy] = React.useState(false);
+  const [err, setErr] = React.useState(null);
+
+  const refresh = React.useCallback(async () => {
+    try {
+      const list = await client.listSnapshotsForInstance(instanceId);
+      setRows(Array.isArray(list) ? list : []);
+    } catch (e) {
+      setErr(e?.message || 'list snapshots failed');
+    }
+  }, [client, instanceId]);
+
+  React.useEffect(() => { refresh(); }, [refresh]);
+
+  const take = async (mode) => {
+    setBusy(true); setErr(null);
+    try {
+      const fn = mode === 'backup' ? client.backupInstance : client.snapshotInstance;
+      await fn.call(client, instanceId);
+      await refresh();
+    } catch (e) {
+      setErr(e?.detail || e?.message || `${mode} failed`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const restore = async (snapshotId) => {
+    if (!confirm('Restoring forks a brand-new instance from this snapshot. Continue?')) return;
+    setBusy(true); setErr(null);
+    try {
+      const created = await client.restoreInstance({
+        instance_id: instanceId,
+        snapshot_id: snapshotId,
+      });
+      // Restore returns a CreatedInstance (new id, bearer, proxy_token).
+      // The bearer/proxy tokens are sensitive but already shown at create
+      // time; for restore we just navigate to the new detail page.
+      if (created?.id) {
+        window.location.hash = `#/i/${encodeURIComponent(created.id)}`;
+      }
+    } catch (e) {
+      setErr(e?.detail || e?.message || 'restore failed');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const pull = async (snapshotId) => {
+    setBusy(true); setErr(null);
+    try {
+      await client.pullSnapshot(snapshotId);
+      await refresh();
+    } catch (e) {
+      setErr(e?.detail || e?.message || 'pull failed');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="panel">
+      <div className="panel-header">
+        <div className="panel-title">snapshots</div>
+        <div className="panel-actions">
+          <button className="btn btn-sm" onClick={() => take('snapshot')} disabled={busy || disabled}>
+            snapshot
+          </button>
+          <button className="btn btn-sm" onClick={() => take('backup')} disabled={busy || disabled}
+                  title="snapshot then promote to the configured backup sink">
+            backup
+          </button>
+        </div>
+      </div>
+      {err ? <div className="error">{err}</div> : null}
+      {rows === null ? (
+        <p className="muted small">loading…</p>
+      ) : rows.length === 0 ? (
+        <p className="muted small">no snapshots yet.</p>
+      ) : (
+        <table className="rows">
+          <thead><tr>
+            <th>id</th><th>kind</th><th>created</th><th>remote</th><th></th>
+          </tr></thead>
+          <tbody>
+            {rows.map(r => (
+              <tr key={r.id}>
+                <td><code className="mono-sm">{r.id}</code></td>
+                <td><span className="badge badge-faint">{r.kind}</span></td>
+                <td className="muted">{fmtTime(r.created_at)}</td>
+                <td>
+                  {r.remote_uri ? (
+                    <span className="badge badge-info" title={r.remote_uri}>S3</span>
+                  ) : <span className="muted small">local</span>}
+                </td>
+                <td className="row-actions">
+                  {r.remote_uri ? (
+                    <button className="btn btn-ghost btn-sm" onClick={() => pull(r.id)} disabled={busy}>
+                      pull
+                    </button>
+                  ) : null}
+                  <button className="btn btn-ghost btn-sm" onClick={() => restore(r.id)} disabled={busy}>
+                    restore
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </section>
+  );
+}
+
+// ─── Secrets panel ───────────────────────────────────────────────
+
+function SecretsPanel({ instanceId }) {
+  const { client } = useApi();
+  const [names, setNames] = React.useState(null);
+  const [adding, setAdding] = React.useState(false);
+  const [err, setErr] = React.useState(null);
+  const [busy, setBusy] = React.useState(false);
+
+  const refresh = React.useCallback(async () => {
+    try {
+      const list = await client.listSecretNames(instanceId);
+      setNames(Array.isArray(list) ? list.map(r => r.name).sort() : []);
+    } catch (e) {
+      setErr(e?.message || 'list secrets failed');
+    }
+  }, [client, instanceId]);
+
+  React.useEffect(() => { refresh(); }, [refresh]);
+
+  const remove = async (name) => {
+    if (!confirm(`delete secret ${name}?`)) return;
+    setBusy(true); setErr(null);
+    try {
+      await client.deleteSecret(instanceId, name);
+      await refresh();
+    } catch (e) {
+      setErr(e?.detail || e?.message || 'delete failed');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="panel">
+      <div className="panel-header">
+        <div className="panel-title">secrets</div>
+        <div className="panel-actions">
+          <button className="btn btn-sm" onClick={() => setAdding(true)} disabled={busy}>
+            add
+          </button>
+        </div>
+      </div>
+      {err ? <div className="error">{err}</div> : null}
+      <p className="muted small">
+        Values are write-only — set here, read by the agent at runtime.  The
+        web UI lists names so existing secrets can be replaced or removed.
+      </p>
+      {names === null ? (
+        <p className="muted small">loading…</p>
+      ) : names.length === 0 ? (
+        <p className="muted small">no secrets set.</p>
+      ) : (
+        <ul className="secret-list">
+          {names.map(name => (
+            <li key={name}>
+              <code className="mono-sm">{name}</code>
+              <button className="btn btn-ghost btn-sm" onClick={() => remove(name)} disabled={busy}>
+                delete
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {adding ? (
+        <AddSecretModal
+          instanceId={instanceId}
+          onClose={() => setAdding(false)}
+          onAdded={() => { setAdding(false); refresh(); }}
+        />
+      ) : null}
+    </section>
+  );
+}
+
+function AddSecretModal({ instanceId, onClose, onAdded }) {
+  const { client } = useApi();
+  const [name, setName] = React.useState('');
+  const [value, setValue] = React.useState('');
+  const [submitting, setSubmitting] = React.useState(false);
+  const [error, setError] = React.useState(null);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (!name.trim() || !value) return;
+    setSubmitting(true); setError(null);
+    try {
+      await client.putSecret(instanceId, name.trim(), value);
+      onAdded && onAdded();
+    } catch (err) {
+      setError(err?.detail || err?.message || 'put failed');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <ModalShell onClose={onClose} title="add secret">
+      <form onSubmit={submit} className="form">
+        <label className="field">
+          <span>name</span>
+          <input
+            value={name}
+            onChange={e => setName(e.target.value)}
+            placeholder="ANTHROPIC_API_KEY"
+            autoFocus
+            required
+          />
+        </label>
+        <label className="field">
+          <span>value</span>
+          <input
+            type="password"
+            value={value}
+            onChange={e => setValue(e.target.value)}
+            required
+          />
+        </label>
+        {error ? <div className="error">{error}</div> : null}
+        <div className="modal-actions">
+          <button type="submit" className="btn btn-primary" disabled={submitting}>
+            {submitting ? 'saving…' : 'save'}
+          </button>
+          <button type="button" className="btn btn-ghost" onClick={onClose}>cancel</button>
+        </div>
+      </form>
+    </ModalShell>
   );
 }
 

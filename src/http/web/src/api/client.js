@@ -108,7 +108,22 @@ export class WardenClient {
     return this._json(`/v1/snapshots/${encodeURIComponent(id)}/pull`, { method: 'POST' });
   }
 
+  listSnapshotsForInstance(instanceId) {
+    return this._json(
+      `/v1/instances/${encodeURIComponent(instanceId)}/snapshots`,
+      { headers: { Accept: 'application/json' } },
+    );
+  }
+
   // ─── Per-instance secrets ───────────────────────────────────────
+
+  // Returns names only (the backend deliberately strips values).
+  listSecretNames(instanceId) {
+    return this._json(
+      `/v1/instances/${encodeURIComponent(instanceId)}/secrets`,
+      { headers: { Accept: 'application/json' } },
+    );
+  }
 
   putSecret(instanceId, name, value) {
     return this._json(

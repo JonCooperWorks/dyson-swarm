@@ -286,3 +286,56 @@
   border-radius: var(--radius);
   word-break: break-all;
 }
+
+/* ── Per-panel header row (title + actions) ─────────────────── */
+
+.panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.panel-actions { display: flex; gap: 6px; }
+
+/* ── Tables (snapshots, etc) ─────────────────────────────────── */
+
+.rows {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.rows th {
+  text-align: left;
+  font-weight: 500;
+  color: var(--fg-muted);
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-size: 10px;
+}
+.rows td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+.rows tr:last-child td { border-bottom: none; }
+.row-actions { text-align: right; }
+.row-actions .btn { margin-left: 4px; }
+.mono-sm { font-family: var(--mono); font-size: 11px; }
+
+/* ── Secret list ─────────────────────────────────────────────── */
+
+.secret-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+}
+.secret-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+}
+.secret-list li:last-child { border-bottom: none; }

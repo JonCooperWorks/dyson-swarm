@@ -1,15 +1,22 @@
+//! `GET /v1/instances/:id/secrets`         → list secret *names* (never values)
 //! `PUT/DELETE /v1/instances/:id/secrets/:name`.
 //!
-//! Per the brief these routes accept a JSON body `{"value": "<plaintext>"}`
+//! Per the brief PUT/DELETE accept a JSON body `{"value": "<plaintext>"}`
 //! on PUT and no body on DELETE. Both return 204 on success. PUT is
 //! idempotent (the underlying store upserts).
+//!
+//! GET deliberately strips the values: the SPA only needs the names to
+//! render a manage-secrets editor.  An operator who actually needs to
+//! read a value back has SQL access (warden's threat model trusts ops
+//! with shell on the host) — round-tripping plaintext through HTTP
+//! would broaden the attack surface for nothing.
 
 use axum::extract::{Extension, Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::routing::put;
+use axum::routing::{get, put};
 use axum::{Json, Router};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::auth::CallerIdentity;
 use crate::error::StoreError;
@@ -20,13 +27,33 @@ pub struct PutSecretBody {
     pub value: String,
 }
 
+#[derive(Debug, Serialize)]
+pub struct SecretNameView {
+    pub name: String,
+}
+
 pub fn router(state: AppState) -> Router {
     Router::new()
+        .route("/v1/instances/:id/secrets", get(list_secrets))
         .route(
             "/v1/instances/:id/secrets/:name",
             put(put_secret).delete(delete_secret),
         )
         .with_state(state)
+}
+
+async fn list_secrets(
+    State(state): State<AppState>,
+    Extension(caller): Extension<CallerIdentity>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<SecretNameView>>, StatusCode> {
+    ensure_owns_instance(&state, &caller.user_id, &id).await?;
+    match state.secrets.list(&id).await {
+        Ok(rows) => Ok(Json(
+            rows.into_iter().map(|(name, _)| SecretNameView { name }).collect(),
+        )),
+        Err(e) => Err(store_err_to_status(e)),
+    }
 }
 
 async fn put_secret(

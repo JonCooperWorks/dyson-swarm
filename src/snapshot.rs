@@ -97,6 +97,33 @@ impl SnapshotService {
         Ok(row)
     }
 
+    /// Owner-scoped list of snapshots for a single instance. The caller's
+    /// `owner_id` must own the instance (or be the system sentinel `"*"`);
+    /// otherwise we return `NotFound` so the existence of someone else's
+    /// instance isn't an oracle. Snapshots whose `owner_id` doesn't match
+    /// are filtered out — the store-level `list_for_instance` doesn't gate
+    /// on ownership and we don't want to leak rows that share an
+    /// `instance_id` after a restore-then-destroy.
+    pub async fn list_for_instance(
+        &self,
+        owner_id: &str,
+        instance_id: &str,
+    ) -> Result<Vec<SnapshotRow>, WardenError> {
+        // Confirm ownership of the instance up front. `get_for_owner`
+        // returns `None` either when the row doesn't exist or when it
+        // belongs to someone else — both surface as `NotFound`, which is
+        // what we want (no oracle for cross-tenant existence).
+        self.instances
+            .get_for_owner(owner_id, instance_id)
+            .await?
+            .ok_or(WardenError::NotFound)?;
+        let rows = self.snapshots.list_for_instance(instance_id).await?;
+        Ok(rows
+            .into_iter()
+            .filter(|r| owner_id == "*" || r.owner_id == owner_id)
+            .collect())
+    }
+
     /// Manual rehydration: ask the backup sink to download the snapshot
     /// bundle to its local cache, persist the new path on the row, and
     /// return the updated row. Idempotent — a sink whose `pull` is a no-op
@@ -368,6 +395,63 @@ mod tests {
         let from_db = snaps.get(&snap.id).await.unwrap().unwrap();
         assert_eq!(from_db.kind, SnapshotKind::Backup);
         assert!(from_db.remote_uri.is_none());
+    }
+
+    #[tokio::test]
+    async fn list_for_instance_returns_only_owners_rows() {
+        // Owner-isolation: tenant "alice" creates an instance and snaps it;
+        // tenant "bob" must 404 on the same instance id.  Both users have
+        // to exist in `users` for the FK on instances.owner_id; the
+        // legacy seeded user wouldn't suffice here because we need two.
+        use crate::traits::{UserRow, UserStatus};
+        let pool = open_in_memory().await.unwrap();
+        let users: Arc<dyn crate::traits::UserStore> =
+            Arc::new(crate::db::users::SqlxUserStore::new(pool.clone()));
+        for sub in ["alice", "bob"] {
+            users
+                .create(UserRow {
+                    id: sub.into(),
+                    subject: sub.into(),
+                    email: Some(format!("{sub}@test")),
+                    display_name: Some(sub.into()),
+                    status: UserStatus::Active,
+                    created_at: 0,
+                    activated_at: Some(0),
+                    last_seen_at: None,
+                })
+                .await
+                .unwrap();
+        }
+
+        let cube = MockCube::new();
+        let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(pool.clone()));
+        let secrets: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
+        let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(pool.clone()));
+        let snaps_store: Arc<dyn SnapshotStore> = Arc::new(SqliteSnapshotStore::new(pool.clone()));
+        let isvc = Arc::new(InstanceService::new(
+            cube.clone(), instances.clone(), secrets, tokens, "http://t/llm", 3600,
+        ));
+        let sink: Arc<dyn BackupSink> = Arc::new(LocalDiskBackupSink::new(cube.clone()));
+        let svc = SnapshotService::new(
+            cube, instances, snaps_store, sink, isvc.clone(),
+        );
+
+        let alice_inst = isvc
+            .create("alice", CreateRequest {
+                template_id: "t".into(),
+                env: BTreeMap::new(),
+                ttl_seconds: None,
+            })
+            .await
+            .unwrap();
+        let _alice_snap = svc.snapshot("alice", &alice_inst.id).await.unwrap();
+
+        let err = svc.list_for_instance("bob", &alice_inst.id).await.unwrap_err();
+        assert!(matches!(err, WardenError::NotFound));
+
+        let visible = svc.list_for_instance("alice", &alice_inst.id).await.unwrap();
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].owner_id, "alice");
     }
 
     #[tokio::test]

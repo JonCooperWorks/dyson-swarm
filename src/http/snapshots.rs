@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 
 use axum::extract::{Extension, Path, State};
 use axum::http::StatusCode;
-use axum::routing::post;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 
@@ -23,10 +23,25 @@ use crate::snapshot::SnapshotView;
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/v1/instances/:id/snapshot", post(snapshot))
+        .route(
+            "/v1/instances/:id/snapshots",
+            get(list_for_instance),
+        )
         .route("/v1/instances/:id/backup", post(backup))
         .route("/v1/instances/:id/restore", post(restore))
         .route("/v1/snapshots/:id/pull", post(pull))
         .with_state(state)
+}
+
+async fn list_for_instance(
+    State(state): State<AppState>,
+    Extension(caller): Extension<CallerIdentity>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<SnapshotView>>, StatusCode> {
+    match state.snapshots.list_for_instance(&caller.user_id, &id).await {
+        Ok(rows) => Ok(Json(rows.into_iter().map(SnapshotView::from).collect())),
+        Err(e) => Err(warden_err_to_status(e)),
+    }
 }
 
 #[derive(Debug, Deserialize)]

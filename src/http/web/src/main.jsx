@@ -22,6 +22,7 @@ import React from 'react';
 import { createRoot } from 'react-dom/client';
 import './styles/tokens.css';
 import './styles/layout.css';
+import './styles/panels.css';
 
 import { bootstrapAuth } from './api/auth.js';
 import { WardenClient } from './api/client.js';
@@ -30,18 +31,7 @@ import { ApiProvider } from './hooks/useApi.jsx';
 import {
   AuthDisabledSplash, InactiveAccountSplash, BootErrorSplash,
 } from './components/splash.jsx';
-
-function MountedSplash() {
-  // Phase 3 replaces this with <App/>.  Until then we render a quiet
-  // confirmation that the bootstrap pipeline made it through — anyone
-  // who sees this page knows the auth flow + cold-load worked.
-  return (
-    <main className="splash">
-      <h1>warden</h1>
-      <p className="muted">signed in. main UI lands in phase 3.</p>
-    </main>
-  );
-}
+import { App } from './components/app.jsx';
 
 async function start() {
   const root = document.getElementById('root');
@@ -75,7 +65,7 @@ async function start() {
 
   mount.render(
     <ApiProvider client={client} auth={auth}>
-      <MountedSplash/>
+      <App/>
     </ApiProvider>
   );
 }

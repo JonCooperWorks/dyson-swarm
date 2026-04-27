@@ -8,7 +8,7 @@ use reqwest::Method;
 use dyson_warden::{
     api_client::ApiClient,
     auth::AuthState,
-    backup::local::LocalDiskBackupSink,
+    backup::{local::LocalDiskBackupSink, s3::S3BackupSink},
     cli::{self, Command, SecretsAction},
     config, cube_client, db,
     db::{instances::SqlxInstanceStore, secrets::SqlxSecretStore, tokens::SqlxTokenStore},
@@ -116,8 +116,18 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     let backup_sink: Arc<dyn BackupSink> = match cfg.backup.sink {
         config::BackupSinkKind::Local => Arc::new(LocalDiskBackupSink::new(cube.clone())),
         config::BackupSinkKind::S3 => {
-            tracing::error!("s3 backup sink lands in step 9; not yet wired");
-            return ExitCode::from(2);
+            let s3cfg = cfg
+                .backup
+                .s3
+                .as_ref()
+                .expect("validated by Config::load");
+            match S3BackupSink::new(s3cfg, cfg.backup.local_cache_dir.clone(), cube.clone()) {
+                Ok(s) => Arc::new(s),
+                Err(err) => {
+                    tracing::error!(error = %err, "s3 backup sink init failed");
+                    return ExitCode::from(2);
+                }
+            }
         }
     };
     let snapshot_svc = Arc::new(SnapshotService::new(

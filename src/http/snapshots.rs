@@ -24,6 +24,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/instances/:id/snapshot", post(snapshot))
         .route("/v1/instances/:id/backup", post(backup))
         .route("/v1/instances/:id/restore", post(restore))
+        .route("/v1/snapshots/:id/pull", post(pull))
         .with_state(state)
 }
 
@@ -52,6 +53,16 @@ async fn backup(
 ) -> Result<(StatusCode, Json<SnapshotView>), StatusCode> {
     match state.snapshots.backup(&id).await {
         Ok(row) => Ok((StatusCode::CREATED, Json(SnapshotView::from(row)))),
+        Err(e) => Err(warden_err_to_status(e)),
+    }
+}
+
+async fn pull(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<SnapshotView>, StatusCode> {
+    match state.snapshots.pull(&id).await {
+        Ok(row) => Ok(Json(SnapshotView::from(row))),
         Err(e) => Err(warden_err_to_status(e)),
     }
 }

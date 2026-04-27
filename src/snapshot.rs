@@ -89,6 +89,23 @@ impl SnapshotService {
         Ok(row)
     }
 
+    /// Manual rehydration: ask the backup sink to download the snapshot
+    /// bundle to its local cache, persist the new path on the row, and
+    /// return the updated row. Idempotent — a sink whose `pull` is a no-op
+    /// (the local sink) will simply return the row unchanged.
+    pub async fn pull(&self, snapshot_id: &str) -> Result<SnapshotRow, WardenError> {
+        let mut row = snap_db::get(&self.pool, snapshot_id)
+            .await?
+            .ok_or(WardenError::NotFound)?;
+        let new_path = self.backup.pull(&row).await?;
+        let new_path_str = new_path.display().to_string();
+        if new_path_str != row.path {
+            snap_db::update_path(&self.pool, &row.id, &new_path_str).await?;
+            row.path = new_path_str;
+        }
+        Ok(row)
+    }
+
     /// Restore from a previously-taken snapshot. Returns a brand-new
     /// instance (with its own id, bearer, proxy_token). The row's `path`
     /// must be present locally on the Cube host; if it isn't and the row

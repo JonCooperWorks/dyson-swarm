@@ -109,10 +109,17 @@ function StatusBadge({ status }) {
 // bits (template, ttl) collapsed under "advanced".
 
 function CreateModal({ onClose, onCreated }) {
-  const { client } = useApi();
+  const { client, auth } = useApi();
   const [name, setName] = React.useState('');
   const [task, setTask] = React.useState('');
-  const [templateId, setTemplateId] = React.useState('dyson-default');
+  // Operator-configured default from `default_template_id` in
+  // /etc/dyson-warden/config.toml, surfaced via /auth/config.  Fall
+  // back to a placeholder string only when the deployment hasn't
+  // configured one — submit is gated on `templateId.trim()` so the
+  // user sees the field empty and is forced to fill it in.
+  const [templateId, setTemplateId] = React.useState(
+    auth?.config?.default_template_id || ''
+  );
   const [ttlSeconds, setTtlSeconds] = React.useState('');
   const [showAdvanced, setShowAdvanced] = React.useState(false);
   const [submitting, setSubmitting] = React.useState(false);
@@ -279,6 +286,12 @@ function InstanceDetail({ id }) {
   const row = useAppState(s => (id ? s.instances.byId[id] : null));
   const [busy, setBusy] = React.useState(false);
   const [err, setErr] = React.useState(null);
+  // Hoisted above the conditional returns so the hook order is stable
+  // across renders — otherwise React's useState slot count differs
+  // between the "no id / no row" early-return paths and the full
+  // render, which throws "rendered fewer hooks than expected" and
+  // leaves the pane blank.
+  const [editing, setEditing] = React.useState(false);
 
   // Pull fresh detail when selection changes (the list view's row is a
   // strict subset of the InstanceView shape, so re-fetching catches
@@ -327,7 +340,6 @@ function InstanceDetail({ id }) {
     }
   };
 
-  const [editing, setEditing] = React.useState(false);
   const displayName = row.name && row.name.trim() ? row.name : '(unnamed)';
   // open_url is computed by the backend from `[server] hostname` + the
   // instance id.  Null when warden has no hostname configured (the

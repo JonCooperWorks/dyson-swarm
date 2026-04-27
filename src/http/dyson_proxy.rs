@@ -24,6 +24,15 @@
 //!            for downstream handlers, but here there are no downstream
 //!            handlers, just the proxy.  Same `Authenticator` trait,
 //!            different invocation point.
+//!
+//!            Bearer source:  `Authorization: Bearer …` if present,
+//!            otherwise the `dyson_warden_session` cookie (the SPA
+//!            mirrors the OIDC access token there with
+//!            `Domain=<hostname>` so plain URL-bar navigation to a
+//!            Dyson subdomain — open-in-new-tab, image src, anchor
+//!            click — carries credentials.  No CSRF surface: there
+//!            are no state-changing cookie-only verbs on the proxy
+//!            target, and the cookie is `SameSite=Lax`.).
 //! - outbound `Authorization: Bearer <instance.bearer_token>`; cookies
 //!            and inbound auth headers are stripped (different security
 //!            boundary).
@@ -116,10 +125,18 @@ async fn forward(state: DispatchState, instance_id: String, req: Request) -> Res
     //    handler IS the terminal handler.  resolve_active_user shares
     //    its plumbing with user_middleware — JIT-create on first
     //    sighting, refuse non-Active accounts.
+    //
+    //    If the inbound request has no Authorization header but does
+    //    carry a `dyson_warden_session` cookie, synthesize the header
+    //    from the cookie value before authenticating.  This is what
+    //    makes the SPA's "open ↗" link work — a plain anchor click
+    //    can't set Authorization but it ships cookies for the parent
+    //    domain.
+    let auth_headers = ensure_authorization_from_cookie(req.headers());
     let caller_user_id = match resolve_active_user(
         state.authenticator.as_ref(),
         state.app.users.as_ref(),
-        req.headers(),
+        &auth_headers,
     )
     .await
     {
@@ -233,6 +250,44 @@ fn error_response(status: StatusCode, msg: &str) -> Response<Body> {
         .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
         .body(Body::from(msg.to_owned()))
         .unwrap_or_else(|_| Response::new(Body::empty()))
+}
+
+/// If the inbound headers already carry `Authorization`, return them
+/// as-is (cheaply — the caller borrows the result).  Otherwise, look
+/// for a `dyson_warden_session=<jwt>` cookie and, if found, return a
+/// new `HeaderMap` with a stamped-in `Authorization: Bearer <jwt>`.
+///
+/// The cookie name is intentionally specific so it can't collide with
+/// session cookies the upstream Dyson sets for itself.
+fn ensure_authorization_from_cookie(inbound: &HeaderMap) -> HeaderMap {
+    if inbound.get(header::AUTHORIZATION).is_some() {
+        return inbound.clone();
+    }
+    let Some(token) = read_cookie(inbound, "dyson_warden_session") else {
+        return inbound.clone();
+    };
+    let mut out = inbound.clone();
+    if let Ok(v) = HeaderValue::from_str(&format!("Bearer {token}")) {
+        out.insert(header::AUTHORIZATION, v);
+    }
+    out
+}
+
+/// Read a single cookie value out of the `Cookie` header.  Returns the
+/// first match; cookies are split on `; ` per RFC 6265.  Empty / missing
+/// header yields `None`.
+fn read_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
+    let raw = headers.get(header::COOKIE)?.to_str().ok()?;
+    for pair in raw.split(';') {
+        let pair = pair.trim();
+        if let Some((k, v)) = pair.split_once('=')
+            && k == name
+            && !v.is_empty()
+        {
+            return Some(v.to_owned());
+        }
+    }
+    None
 }
 
 fn is_hop_by_hop(name: &HeaderName) -> bool {

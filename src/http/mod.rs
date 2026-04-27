@@ -203,7 +203,7 @@ mod tests {
             users: users_store.clone(),
             sandbox_domain: "cube.test".into(),
             hostname: None,
-            auth_config: Arc::new(auth_config::AuthConfig::None),
+            auth_config: Arc::new(auth_config::AuthConfig::none()),
             dyson_http: dyson_proxy::build_client().expect("dyson http client init"),
         };
         (state, users_store)

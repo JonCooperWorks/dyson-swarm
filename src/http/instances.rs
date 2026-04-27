@@ -71,7 +71,18 @@ async fn create_instance(
     Json(req): Json<CreateRequest>,
 ) -> Result<(StatusCode, Json<CreatedInstance>), StatusCode> {
     match state.instances.create(&caller.user_id, req).await {
-        Ok(c) => Ok((StatusCode::CREATED, Json(c))),
+        Ok(mut c) => {
+            // The cube client returns the raw `<sandbox>.cube.app` URL,
+            // which a browser on the public internet can't resolve.  When
+            // a warden hostname is configured, rewrite to the
+            // `<id>.<hostname>` shape — same value the SPA gets back from
+            // GET /v1/instances/:id as `open_url`, so the modal's "open
+            // profile" link actually works.
+            if let Some(host) = state.hostname.as_deref().filter(|h| !h.is_empty()) {
+                c.url = format!("https://{}.{}/", c.id, host.trim_end_matches('/'));
+            }
+            Ok((StatusCode::CREATED, Json(c)))
+        }
         Err(e) => Err(warden_err_to_status(e)),
     }
 }

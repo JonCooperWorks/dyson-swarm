@@ -7,6 +7,10 @@
 //! `<issuer>/.well-known/openid-configuration` (a public, CORS-enabled
 //! endpoint at every modern IdP).
 //!
+//! The response also surfaces a few SPA-tunable defaults (e.g.
+//! `default_template_id`) so the React bundle doesn't need to be
+//! rebuilt per deployment to ship sensible form pre-fills.
+//!
 //! Three modes:
 //! - `none` — `[oidc]` not configured (or `spa_client_id` missing).  The
 //!   SPA renders a splash explaining the deployment is admin-bearer-only.
@@ -23,9 +27,11 @@ use serde::Serialize;
 
 use super::AppState;
 
+/// Auth flow descriptor.  Flattened into [`AuthConfig`] so `mode` lives
+/// at the top level alongside the SPA-tunable defaults.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "mode", rename_all = "lowercase")]
-pub enum AuthConfig {
+pub enum AuthMode {
     /// No browser-flow auth available; the SPA shows a "use the CLI"
     /// splash.
     None,
@@ -39,22 +45,45 @@ pub enum AuthConfig {
     },
 }
 
+/// Top-level shape returned by `GET /auth/config`.  `mode` is flattened
+/// in so the JSON looks like `{"mode": "oidc", "issuer": ..., "default_template_id": ...}`.
+#[derive(Debug, Clone, Serialize)]
+pub struct AuthConfig {
+    #[serde(flatten)]
+    pub mode: AuthMode,
+    /// Default cube template id the SPA's hire form pre-fills.  `None`
+    /// when the operator hasn't set `default_template_id` in config.toml,
+    /// in which case the SPA falls back to its own hardcoded default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_template_id: Option<String>,
+}
+
 impl AuthConfig {
-    /// Build from the parsed TOML.  Returns [`AuthConfig::None`] when
-    /// either OIDC isn't configured or `spa_client_id` is missing.
-    pub fn from_toml(oidc: Option<&crate::config::OidcConfigToml>) -> Self {
-        match oidc {
+    /// Build from the parsed TOML.  Returns mode `None` when either OIDC
+    /// isn't configured or `spa_client_id` is missing.
+    pub fn from_toml(
+        oidc: Option<&crate::config::OidcConfigToml>,
+        default_template_id: Option<String>,
+    ) -> Self {
+        let mode = match oidc {
             Some(o) => match &o.spa_client_id {
-                Some(id) if !id.trim().is_empty() => AuthConfig::Oidc {
+                Some(id) if !id.trim().is_empty() => AuthMode::Oidc {
                     issuer: o.issuer.clone(),
                     audience: o.audience.clone(),
                     client_id: id.clone(),
                     required_scopes: o.spa_scopes.clone(),
                 },
-                _ => AuthConfig::None,
+                _ => AuthMode::None,
             },
-            None => AuthConfig::None,
-        }
+            None => AuthMode::None,
+        };
+        Self { mode, default_template_id }
+    }
+
+    /// Convenience for tests / fallback paths that just need a "no auth"
+    /// descriptor with no SPA defaults.
+    pub fn none() -> Self {
+        Self { mode: AuthMode::None, default_template_id: None }
     }
 }
 
@@ -73,8 +102,8 @@ mod tests {
 
     #[test]
     fn no_oidc_block_yields_none() {
-        let cfg = AuthConfig::from_toml(None);
-        assert!(matches!(cfg, AuthConfig::None));
+        let cfg = AuthConfig::from_toml(None, None);
+        assert!(matches!(cfg.mode, AuthMode::None));
     }
 
     #[test]
@@ -87,8 +116,8 @@ mod tests {
             spa_client_id: None,
             spa_scopes: vec![],
         };
-        let cfg = AuthConfig::from_toml(Some(&oidc));
-        assert!(matches!(cfg, AuthConfig::None));
+        let cfg = AuthConfig::from_toml(Some(&oidc), None);
+        assert!(matches!(cfg.mode, AuthMode::None));
     }
 
     #[test]
@@ -101,9 +130,9 @@ mod tests {
             spa_client_id: Some("warden-spa".into()),
             spa_scopes: vec!["profile".into(), "email".into()],
         };
-        let cfg = AuthConfig::from_toml(Some(&oidc));
-        match cfg {
-            AuthConfig::Oidc { issuer, audience, client_id, required_scopes } => {
+        let cfg = AuthConfig::from_toml(Some(&oidc), None);
+        match cfg.mode {
+            AuthMode::Oidc { issuer, audience, client_id, required_scopes } => {
                 assert_eq!(issuer, "https://idp.example");
                 assert_eq!(audience, "warden");
                 assert_eq!(client_id, "warden-spa");
@@ -123,28 +152,33 @@ mod tests {
             spa_client_id: Some("   ".into()),
             spa_scopes: vec![],
         };
-        let cfg = AuthConfig::from_toml(Some(&oidc));
-        assert!(matches!(cfg, AuthConfig::None));
+        let cfg = AuthConfig::from_toml(Some(&oidc), None);
+        assert!(matches!(cfg.mode, AuthMode::None));
     }
 
     #[test]
     fn json_shape_for_none_mode() {
-        let json = serde_json::to_value(AuthConfig::None).unwrap();
+        let json = serde_json::to_value(AuthConfig::none()).unwrap();
         assert_eq!(json["mode"], "none");
+        assert!(json.get("default_template_id").is_none());
     }
 
     #[test]
     fn json_shape_for_oidc_mode() {
-        let cfg = AuthConfig::Oidc {
-            issuer: "https://idp.example".into(),
-            audience: "warden".into(),
-            client_id: "warden-spa".into(),
-            required_scopes: vec!["profile".into()],
+        let cfg = AuthConfig {
+            mode: AuthMode::Oidc {
+                issuer: "https://idp.example".into(),
+                audience: "warden".into(),
+                client_id: "warden-spa".into(),
+                required_scopes: vec!["profile".into()],
+            },
+            default_template_id: Some("tpl-abc".into()),
         };
         let json = serde_json::to_value(cfg).unwrap();
         assert_eq!(json["mode"], "oidc");
         assert_eq!(json["issuer"], "https://idp.example");
         assert_eq!(json["client_id"], "warden-spa");
         assert_eq!(json["required_scopes"], serde_json::json!(["profile"]));
+        assert_eq!(json["default_template_id"], "tpl-abc");
     }
 }

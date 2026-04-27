@@ -27,6 +27,12 @@ pub struct Config {
     #[serde(default = "default_probe_timeout")]
     pub health_probe_timeout_seconds: u64,
 
+    /// Default cube template id the SPA's hire form pre-fills. Surfaced
+    /// via `/auth/config` so the React bundle doesn't need to be
+    /// rebuilt per deployment.
+    #[serde(default)]
+    pub default_template_id: Option<String>,
+
     pub cube: CubeConfig,
     pub default_policy: DefaultPolicy,
     #[serde(default)]

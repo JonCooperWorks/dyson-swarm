@@ -46,8 +46,64 @@ function readTokens() {
 }
 
 function writeTokens(tokens) {
-  if (!tokens) sessionStorage.removeItem(STORAGE_KEY);
-  else sessionStorage.setItem(STORAGE_KEY, JSON.stringify(tokens));
+  if (!tokens) {
+    sessionStorage.removeItem(STORAGE_KEY);
+    clearSessionCookie();
+  } else {
+    sessionStorage.setItem(STORAGE_KEY, JSON.stringify(tokens));
+    setSessionCookie(tokens.access_token, tokens.expires_at);
+  }
+}
+
+// Mirror the access token into a Domain-scoped cookie so navigation to
+// `<id>.<hostname>` (the per-Dyson reverse proxy in dyson_proxy.rs) can
+// authenticate.  Anchor clicks, image loads, and URL-bar visits don't
+// carry Authorization headers; the proxy reads this cookie as a Bearer
+// fallback when the header is absent.
+//
+// Domain is derived from the apex hostname (everything after the first
+// label), so the cookie is sent for both `apex.example.com` and every
+// `<sub>.apex.example.com`.  SameSite=Lax keeps it off cross-site POSTs;
+// the proxy has no state-changing cookie-only verbs anyway.  Secure
+// gates it to HTTPS (the deployment is HTTPS-only via Caddy).
+const COOKIE_NAME = 'dyson_warden_session';
+function cookieDomain() {
+  const host = window.location.hostname;
+  // No-op when running on localhost / a single-label host (cookies work
+  // fine without an explicit Domain attribute in those cases).
+  if (!host.includes('.') || /^[\d.]+$/.test(host)) return null;
+  // Strip the leading label so the cookie covers parent + every sibling
+  // subdomain.  e.g. host="dyson.myprivate.network" -> ".myprivate.network".
+  // For a single-label-deep deployment ("foo.bar"), this yields ".bar"
+  // which is fine — browsers reject TLD-only cookies anyway.
+  const parts = host.split('.');
+  if (parts.length <= 2) return host;
+  return parts.slice(1).join('.');
+}
+function setSessionCookie(token, expiresAtMs) {
+  if (!token) return;
+  const parts = [
+    `${COOKIE_NAME}=${encodeURIComponent(token)}`,
+    'Path=/',
+    'SameSite=Lax',
+  ];
+  if (window.location.protocol === 'https:') parts.push('Secure');
+  const dom = cookieDomain();
+  if (dom) parts.push(`Domain=${dom}`);
+  if (expiresAtMs) parts.push(`Expires=${new Date(expiresAtMs).toUTCString()}`);
+  document.cookie = parts.join('; ');
+}
+function clearSessionCookie() {
+  const parts = [
+    `${COOKIE_NAME}=`,
+    'Path=/',
+    'SameSite=Lax',
+    'Expires=Thu, 01 Jan 1970 00:00:00 GMT',
+  ];
+  if (window.location.protocol === 'https:') parts.push('Secure');
+  const dom = cookieDomain();
+  if (dom) parts.push(`Domain=${dom}`);
+  document.cookie = parts.join('; ');
 }
 
 function readPending() {
@@ -258,7 +314,7 @@ export async function bootstrapAuth() {
   const cfg = await loadAuthConfig();
 
   if (cfg.mode === 'none') {
-    return { mode: 'none', getToken: () => null, logout: () => {} };
+    return { mode: 'none', config: cfg, getToken: () => null, logout: () => {} };
   }
   if (cfg.mode !== 'oidc') {
     throw new Error(`unknown auth mode: ${cfg.mode}`);
@@ -280,11 +336,19 @@ export async function bootstrapAuth() {
     return new Promise(() => {});
   }
 
+  // Every load — not just callback — re-stamps the parent-domain cookie
+  // dyson_proxy reads when no Authorization header is present.
+  // sessionStorage survives the redirect round-trip, but the cookie is
+  // only set inside writeTokens(); mirror it here so a plain refresh
+  // (where writeTokens never ran) still yields a usable cookie.
+  setSessionCookie(tokens.access_token, tokens.expires_at);
+
   const onRedirect = () => startAuthorizationFlow(cfg, discovery).catch(() => {});
   scheduleRefresh(cfg, discovery, onRedirect);
 
   return {
     mode: 'oidc',
+    config: cfg,
     getToken: () => readTokens()?.access_token || null,
     logout: () => {
       writeTokens(null);

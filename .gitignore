@@ -5,3 +5,9 @@
 *.db-wal
 *.db-shm
 .env
+
+# Frontend build artifacts.  package-lock.json is committed (build.rs
+# uses its hash to gate `npm ci`), but everything below is regenerated
+# by build.rs / vite on every `cargo build`.
+src/http/web/node_modules
+src/http/web/dist

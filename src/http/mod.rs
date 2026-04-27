@@ -6,16 +6,20 @@
 //!   admin-bearer middleware.
 //! - `/llm/*` (the LLM proxy, step 14) is mounted with its own
 //!   per-instance-bearer middleware in [`crate::proxy::http`].
+//! - `/` and other unmatched paths fall through to the embedded React
+//!   bundle (the SPA, served from [`static_assets`]).
 //!
 //! Each sub-module exports a `router(state)` factory; this module decides
 //! which auth layer wraps which subtree.
 
 pub mod admin_users;
+pub mod assets;
 pub mod healthz;
 pub mod instances;
 pub mod proxy_admin;
 pub mod secrets;
 pub mod snapshots;
+pub mod static_assets;
 
 use std::sync::Arc;
 
@@ -73,11 +77,15 @@ pub fn router(
         .merge(secrets::router(state))
         .layer(middleware::from_fn_with_state(user_auth, user_middleware));
 
+    // Static assets (SPA bundle) are merged last so the API routes win
+    // every match.  The static router owns the fallback, which serves
+    // `/`, `/assets/*`, and 404s anything else — no auth, no logging.
     Router::new()
         .merge(healthz::router())
         .merge(admin)
         .merge(tenant)
         .merge(extra)
+        .merge(static_assets::router())
 }
 
 #[cfg(test)]
@@ -276,6 +284,44 @@ mod tests {
             r.headers().get("x-warden-insecure").map(|v| v.to_str().unwrap()),
             Some("1")
         );
+    }
+
+    #[tokio::test]
+    async fn root_serves_embedded_spa_index_html() {
+        let (state, users) = build_state().await;
+        let base = spawn(
+            state,
+            AuthState::enforced("admin-token"),
+            deny_user_auth(users),
+        )
+        .await;
+        let r = reqwest::get(format!("{base}/")).await.unwrap();
+        assert_eq!(r.status(), 200);
+        let ct = r
+            .headers()
+            .get("content-type")
+            .map(|v| v.to_str().unwrap().to_string())
+            .unwrap_or_default();
+        assert!(ct.starts_with("text/html"), "content-type was {ct:?}");
+        let body = r.text().await.unwrap();
+        assert!(
+            body.contains("<div id=\"root\">"),
+            "expected SPA shell, got: {}",
+            body.chars().take(200).collect::<String>()
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_static_path_is_404() {
+        let (state, users) = build_state().await;
+        let base = spawn(
+            state,
+            AuthState::enforced("admin-token"),
+            deny_user_auth(users),
+        )
+        .await;
+        let r = reqwest::get(format!("{base}/no-such-asset")).await.unwrap();
+        assert_eq!(r.status(), 404);
     }
 
     #[tokio::test]

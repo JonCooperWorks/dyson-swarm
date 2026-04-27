@@ -1,0 +1,29 @@
+{
+  "name": "warden-web",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Web UI for dyson-warden. Bundled into the Rust binary by build.rs.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "vitest run && vite build",
+    "build:nocheck": "vite build",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "react": "^19.2.5",
+    "react-dom": "^19.2.5"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@vitejs/plugin-react": "^6.0.1",
+    "jsdom": "^29.0.2",
+    "vite": "^8.0.10",
+    "vitest": "^4.1.5"
+  }
+}

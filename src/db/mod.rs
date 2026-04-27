@@ -22,6 +22,9 @@ pub mod snapshots;
 pub mod tokens;
 pub mod users;
 
+#[cfg(feature = "postgres")]
+pub mod pg;
+
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations/sqlite");
 
 pub async fn open(path: &Path) -> Result<SqlitePool, sqlx::Error> {

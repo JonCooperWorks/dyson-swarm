@@ -35,6 +35,13 @@ async-trait = "0.1"
 futures = { version = "0.3", default-features = false, features = ["std"] }
 jsonwebtoken = { version = "9", default-features = false }
 
+[features]
+default = []
+# Postgres backend stub. Enable to compile the (currently empty) `db::pg`
+# module skeleton. The actual Pg store impls are deferred — phase 7 ships
+# the seam, not the implementation.
+postgres = ["sqlx/postgres"]
+
 [dev-dependencies]
 # Used only by the OIDC test to mint a fresh RSA keypair + sign mock JWTs.
 # Not a runtime dep — production OIDC verification only uses the public key

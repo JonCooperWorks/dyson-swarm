@@ -11,6 +11,21 @@ url = "http://localhost:3000"
 api_key = "CHANGE_ME"
 sandbox_domain = "cube.app"
 
+# OIDC user identity.
+# Optional — if omitted, /v1/* is reachable only via opaque api keys minted
+# through POST /v1/admin/users/:id/keys (CI/admin paths). Most production
+# deployments set this section to point at an OIDC issuer (Auth0, Okta,
+# Keycloak, Google, etc.).
+[oidc]
+issuer = "https://accounts.example.com"
+audience = "warden"
+# jwks_url override — usually omitted; warden discovers it from
+# <issuer>/.well-known/openid-configuration.
+# jwks_url = "https://accounts.example.com/.well-known/jwks.json"
+jwks_ttl_seconds = 86400
+
+# Per-user policy fallback. Applied to any user that doesn't have a row in
+# `user_policies`. Tighten via the (forthcoming) admin policy endpoint.
 [default_policy]
 allowed_providers = ["openrouter"]
 allowed_models = ["*"]

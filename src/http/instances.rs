@@ -60,7 +60,7 @@ async fn update_instance(
         .rename(&caller.user_id, &id, &new_name, &new_task)
         .await
     {
-        Ok(row) => Ok(Json(InstanceView::from(row))),
+        Ok(row) => Ok(Json(InstanceView::from_row(row, state.hostname.as_deref()))),
         Err(e) => Err(warden_err_to_status(e)),
     }
 }
@@ -98,7 +98,7 @@ async fn list_instances(
         include_destroyed,
     };
     match state.instances.list(&caller.user_id, filter).await {
-        Ok(rows) => Ok(Json(rows.into_iter().map(InstanceView::from).collect())),
+        Ok(rows) => Ok(Json(rows.into_iter().map(|r| InstanceView::from_row(r, state.hostname.as_deref())).collect())),
         Err(e) => Err(warden_err_to_status(e)),
     }
 }
@@ -122,7 +122,7 @@ async fn get_instance(
     Path(id): Path<String>,
 ) -> Result<Json<InstanceView>, StatusCode> {
     match state.instances.get(&caller.user_id, &id).await {
-        Ok(row) => Ok(Json(InstanceView::from(row))),
+        Ok(row) => Ok(Json(InstanceView::from_row(row, state.hostname.as_deref()))),
         Err(e) => Err(warden_err_to_status(e)),
     }
 }
@@ -177,6 +177,11 @@ async fn instance_url(
 
 /// Public view of an instance — strips the bearer token (returned only at
 /// create time) and serialises enums into stable strings.
+///
+/// `open_url` is the SPA's "open ↗" target.  Computed from the configured
+/// `hostname` plus the instance id; `None` when warden has no hostname
+/// configured (the host-based dispatcher is a no-op in that case, so the
+/// link can't actually reach the sandbox).
 #[derive(Debug, Serialize)]
 pub struct InstanceView {
     pub id: String,
@@ -192,10 +197,17 @@ pub struct InstanceView {
     pub last_probe_status: Option<ProbeResult>,
     pub created_at: i64,
     pub destroyed_at: Option<i64>,
+    pub open_url: Option<String>,
 }
 
-impl From<InstanceRow> for InstanceView {
-    fn from(r: InstanceRow) -> Self {
+impl InstanceView {
+    /// Build a view from a row.  The hostname is needed to compute
+    /// `open_url`; pass the value from `AppState::hostname`.  Empty /
+    /// missing hostname yields `open_url = None`.
+    pub fn from_row(r: InstanceRow, hostname: Option<&str>) -> Self {
+        let open_url = hostname
+            .filter(|h| !h.is_empty())
+            .map(|h| format!("https://{}.{}/", r.id, h.trim_end_matches('/')));
         Self {
             id: r.id,
             name: r.name,
@@ -210,6 +222,7 @@ impl From<InstanceRow> for InstanceView {
             last_probe_status: r.last_probe_status,
             created_at: r.created_at,
             destroyed_at: r.destroyed_at,
+            open_url,
         }
     }
 }

@@ -2,6 +2,19 @@ bind = "0.0.0.0:8080"
 admin_token = "CHANGE_ME"
 db_path = "/var/lib/dyson-warden/state.db"
 
+# Public hostname warden answers on. When set, every Dyson is reachable at
+# `<instance_id>.<hostname>` — the host-based dispatcher forwards those
+# requests to the matching CubeSandbox over warden's private network. The
+# SPA's "open ↗" button uses this URL.
+#
+# Production setup requires:
+#   - Wildcard DNS:    *.warden.example.com → warden's public IP
+#   - Wildcard TLS:    issued via Let's Encrypt DNS-01 (acme-dns, Caddy, etc)
+#
+# Leave unset to disable per-Dyson UI access; the rest of warden (API,
+# CLI, admin panel) works fine without it.
+hostname = "warden.example.com"
+
 default_ttl_seconds = 86400
 health_probe_interval_seconds = 60
 health_probe_timeout_seconds = 5

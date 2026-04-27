@@ -46,52 +46,80 @@ pub async fn user_middleware(
     mut req: Request<Body>,
     next: Next,
 ) -> Response {
-    let identity = match state.authenticator.authenticate(req.headers()).await {
+    match resolve_caller(
+        state.authenticator.as_ref(),
+        state.users.as_ref(),
+        req.headers(),
+    )
+    .await
+    {
+        Ok(caller) => {
+            req.extensions_mut().insert(caller);
+            next.run(req).await
+        }
+        Err(resp) => resp,
+    }
+}
+
+/// Resolve the caller's `users.id` directly — same auth + activation
+/// logic as [`user_middleware`], but for handlers that aren't part of
+/// the middleware chain (e.g. the host-based reverse proxy in
+/// [`crate::http::dyson_proxy`] which is the terminal handler, not a
+/// gate before downstream routes).  Returns the user's id on success
+/// or a ready-to-send error response.
+pub async fn resolve_active_user(
+    authenticator: &dyn Authenticator,
+    users: &dyn UserStore,
+    headers: &axum::http::HeaderMap,
+) -> Result<String, Response> {
+    resolve_caller(authenticator, users, headers).await.map(|c| c.user_id)
+}
+
+async fn resolve_caller(
+    authenticator: &dyn Authenticator,
+    users: &dyn UserStore,
+    headers: &axum::http::HeaderMap,
+) -> Result<CallerIdentity, Response> {
+    let identity = match authenticator.authenticate(headers).await {
         Ok(id) => id,
-        Err(AuthError::Missing) => return StatusCode::UNAUTHORIZED.into_response(),
-        Err(AuthError::Unsupported) => return StatusCode::UNAUTHORIZED.into_response(),
+        Err(AuthError::Missing) => return Err(StatusCode::UNAUTHORIZED.into_response()),
+        Err(AuthError::Unsupported) => return Err(StatusCode::UNAUTHORIZED.into_response()),
         Err(AuthError::Invalid(reason)) => {
             tracing::debug!(%reason, "auth invalid");
-            return StatusCode::UNAUTHORIZED.into_response();
+            return Err(StatusCode::UNAUTHORIZED.into_response());
         }
         Err(AuthError::Backend(e)) => {
             tracing::warn!(error = %e, "auth backend failure");
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            return Err(StatusCode::INTERNAL_SERVER_ERROR.into_response());
         }
     };
 
-    let user = match resolve_or_provision(&*state.users, &identity).await {
+    let user = match resolve_or_provision(users, &identity).await {
         Ok(u) => u,
         Err(e) => {
             tracing::warn!(error = %e, "user resolve/provision failed");
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            return Err(StatusCode::INTERNAL_SERVER_ERROR.into_response());
         }
     };
 
     match user.status {
         UserStatus::Active => {}
         UserStatus::Inactive => {
-            // Auto-created from a fresh OIDC sub but not yet approved.
-            // Distinct status code from "wrong credential" so the UI can
-            // show "your account is awaiting approval" rather than
-            // implying a credential error.
-            return (StatusCode::FORBIDDEN, "account inactive").into_response();
+            return Err((StatusCode::FORBIDDEN, "account inactive").into_response());
         }
         UserStatus::Suspended => {
-            return (StatusCode::FORBIDDEN, "account suspended").into_response();
+            return Err((StatusCode::FORBIDDEN, "account suspended").into_response());
         }
     }
 
-    // Best-effort touch — failure shouldn't block the request.
-    if let Err(e) = state.users.touch_last_seen(&user.id).await {
+    if let Err(e) = users.touch_last_seen(&user.id).await {
         tracing::debug!(error = %e, user = %user.id, "touch_last_seen failed");
     }
 
-    req.extensions_mut().insert(CallerIdentity {
+    Ok(CallerIdentity {
         user_id: user.id,
         identity,
-    });
-    next.run(req).await
+    })
 }
 
 async fn resolve_or_provision(

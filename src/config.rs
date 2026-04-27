@@ -9,6 +9,17 @@ pub struct Config {
     pub admin_token: String,
     pub db_path: PathBuf,
 
+    /// Public hostname warden answers on, e.g. `"warden.example.com"`.
+    /// When set, every Dyson is reachable at
+    /// `<instance_id>.<hostname>` — the host-based dispatcher in
+    /// [`crate::http::dyson_proxy`] forwards those requests to the
+    /// matching CubeSandbox.  Wildcard DNS (`*.<hostname>`) and a
+    /// wildcard TLS cert are required for this to work in production.
+    /// When unset, the dispatcher is a no-op and the per-Dyson UI is
+    /// unreachable from the browser (the rest of warden is unaffected).
+    #[serde(default)]
+    pub hostname: Option<String>,
+
     #[serde(default = "default_ttl")]
     pub default_ttl_seconds: i64,
     #[serde(default = "default_probe_interval")]
@@ -179,6 +190,9 @@ impl Config {
         }
         if let Some(v) = env.get("WARDEN_DB_PATH") {
             self.db_path = PathBuf::from(v);
+        }
+        if let Some(v) = env.get("WARDEN_HOSTNAME") {
+            self.hostname = if v.is_empty() { None } else { Some(v.clone()) };
         }
         if let Some(v) = env.get("WARDEN_CUBE_URL") {
             self.cube.url = v.clone();

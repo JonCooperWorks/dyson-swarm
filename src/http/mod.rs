@@ -44,11 +44,17 @@ pub struct AppState {
     pub tokens: Arc<dyn TokenStore>,
     pub users: Arc<dyn crate::traits::UserStore>,
     pub sandbox_domain: String,
+    /// Public hostname warden serves on, e.g. `"warden.example.com"`.
+    /// Drives the host-based dispatcher in
+    /// [`dyson_proxy`] (each Dyson is reachable at
+    /// `<instance_id>.<hostname>`) and `InstanceView::open_url` (the
+    /// SPA's "open ↗" link).  `None` disables the per-Dyson UI path.
+    pub hostname: Option<String>,
     /// Auth-mode descriptor surfaced via `GET /auth/config`. Built from
     /// [`crate::config::Config`] at startup; the SPA hits this endpoint
     /// before mounting React to decide whether to start a PKCE flow.
     pub auth_config: Arc<auth_config::AuthConfig>,
-    /// Shared `reqwest::Client` for the `/d/:id/*` reverse proxy.  One
+    /// Shared `reqwest::Client` for the host-based reverse proxy.  One
     /// per process so connection pooling survives across requests.
     pub dyson_http: reqwest::Client,
 }
@@ -80,25 +86,36 @@ pub fn router(
         .layer(middleware::from_fn_with_state(auth.clone(), admin_bearer));
 
     // Tenant routes — every request resolves to a CallerIdentity.
-    // The Dyson reverse proxy at /d/:id/* is also tenant-scoped; we
-    // owner-check the instance against the OIDC user before forwarding.
     let tenant = Router::new()
         .merge(instances::router(state.clone()))
         .merge(snapshots::router(state.clone()))
         .merge(secrets::router(state.clone()))
-        .merge(dyson_proxy::router(state.clone()))
-        .layer(middleware::from_fn_with_state(user_auth, user_middleware));
+        .layer(middleware::from_fn_with_state(user_auth.clone(), user_middleware));
 
     // Static assets (SPA bundle) are merged last so the API routes win
     // every match.  The static router owns the fallback, which serves
     // `/`, `/assets/*`, and 404s anything else — no auth, no logging.
-    Router::new()
+    let normal = Router::new()
         .merge(healthz::router())
-        .merge(auth_config::router(state))
+        .merge(auth_config::router(state.clone()))
         .merge(admin)
         .merge(tenant)
         .merge(extra)
-        .merge(static_assets::router())
+        .merge(static_assets::router());
+
+    // Outer layer: host-based dispatcher.  When a request's Host header
+    // is `<instance_id>.<hostname>`, forward to the matching Dyson
+    // sandbox.  Otherwise fall through to `normal`.  Hostname comes
+    // from config; when unset, the dispatcher is a pass-through.
+    let dispatch_state = dyson_proxy::DispatchState::new(
+        state.clone(),
+        user_auth.authenticator.clone(),
+        state.hostname.clone(),
+    );
+    normal.layer(middleware::from_fn_with_state(
+        dispatch_state,
+        dyson_proxy::dispatch,
+    ))
 }
 
 #[cfg(test)]
@@ -185,6 +202,7 @@ mod tests {
             tokens: tokens_store,
             users: users_store.clone(),
             sandbox_domain: "cube.test".into(),
+            hostname: None,
             auth_config: Arc::new(auth_config::AuthConfig::None),
             dyson_http: dyson_proxy::build_client().expect("dyson http client init"),
         };
@@ -287,6 +305,44 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn host_dispatcher_passes_through_when_host_does_not_match() {
+        // hostname configured, but request Host = base host (warden's
+        // own UI, not a sandbox subdomain).  The dispatcher must not
+        // intercept; the request flows through to the normal router
+        // and we get the regular 401 from user_middleware.
+        let (mut state, users) = build_state().await;
+        state.hostname = Some("warden.test".into());
+        let base = spawn(state, AuthState::enforced("admin-token"), deny_user_auth(users)).await;
+        let r = reqwest::Client::new()
+            .get(format!("{base}/v1/instances"))
+            .header("host", "warden.test")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 401);
+    }
+
+    #[tokio::test]
+    async fn host_dispatcher_404s_unknown_subdomain() {
+        // Sandbox subdomain shape, but no row with that id exists.
+        // The dispatcher authenticates the user (alice), looks up the
+        // instance, and returns 404.
+        let (mut state, _) = build_state().await;
+        state.hostname = Some("warden.test".into());
+        let users = state.users.clone();
+        let (alice_auth, _alice_id) =
+            crate::auth::user::fixed_user_auth(users, "alice").await;
+        let base = spawn(state, AuthState::enforced("admin-token"), alice_auth).await;
+        let r = reqwest::Client::new()
+            .get(format!("{base}/anything"))
+            .header("host", "no-such-id.warden.test")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 404);
     }
 
     #[tokio::test]

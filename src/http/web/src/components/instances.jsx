@@ -329,7 +329,12 @@ function InstanceDetail({ id }) {
 
   const [editing, setEditing] = React.useState(false);
   const displayName = row.name && row.name.trim() ? row.name : '(unnamed)';
-  const canOpen = row.status === 'live' && !!row.cube_sandbox_id;
+  // open_url is computed by the backend from `[server] hostname` + the
+  // instance id.  Null when warden has no hostname configured (the
+  // host-based proxy is a no-op in that case).  We additionally gate
+  // on status=live + cube_sandbox_id to avoid linking to a sandbox
+  // that hasn't booted yet.
+  const canOpen = !!row.open_url && row.status === 'live' && !!row.cube_sandbox_id;
 
   return (
     <main className="detail-pane">
@@ -355,12 +360,18 @@ function InstanceDetail({ id }) {
         <div className="detail-actions">
           <a
             className={`btn btn-primary ${canOpen ? '' : 'btn-disabled'}`}
-            href={canOpen ? `/d/${encodeURIComponent(id)}/` : undefined}
+            href={canOpen ? row.open_url : undefined}
             target="_blank"
             rel="noopener noreferrer"
             aria-disabled={!canOpen}
             onClick={(e) => { if (!canOpen) e.preventDefault(); }}
-            title={canOpen ? 'open this dyson in a new tab' : 'sandbox is not live'}
+            title={
+              !row.open_url
+                ? 'warden hostname is not configured — set [server] hostname in config.toml'
+                : !canOpen
+                  ? 'sandbox is not live'
+                  : 'open this dyson in a new tab'
+            }
           >
             open ↗
           </a>

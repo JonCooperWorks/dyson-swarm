@@ -238,6 +238,7 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         tokens: tokens_store,
         users: users_store,
         sandbox_domain: cfg.cube.sandbox_domain.clone(),
+        hostname: cfg.hostname.clone(),
         auth_config: Arc::new(http::auth_config::AuthConfig::from_toml(cfg.oidc.as_ref())),
         dyson_http: http::dyson_proxy::build_client().expect("dyson http client init"),
     };

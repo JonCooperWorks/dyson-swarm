@@ -76,7 +76,7 @@ pub trait Authenticator: Send + Sync {
     async fn authenticate(&self, headers: &HeaderMap) -> Result<UserIdentity, AuthError>;
 }
 
-pub use user::{user_middleware, CallerIdentity, UserAuthState};
+pub use user::{resolve_active_user, user_middleware, CallerIdentity, UserAuthState};
 
 /// Pull the resolved caller out of an `axum::http::Extensions` map. Routes
 /// receive this via the `Extension(CallerIdentity)` extractor, but we keep

@@ -27,7 +27,7 @@ use std::sync::Arc;
 
 use axum::{middleware, Router};
 
-use crate::auth::{admin_bearer, user_middleware, AuthState, UserAuthState};
+use crate::auth::{require_admin_role, user_middleware, AuthState, UserAuthState};
 use crate::instance::InstanceService;
 use crate::secrets::SecretsService;
 use crate::snapshot::SnapshotService;
@@ -90,11 +90,30 @@ pub fn router(
     user_auth: UserAuthState,
     extra: Router,
 ) -> Router {
-    // Admin-only routes — keep the admin-bearer layer and skip user_middleware
-    // so ops can manage users without an account themselves.
-    let admin = proxy_admin::router(state.clone())
-        .merge(crate::http::admin_users::router(state.clone()))
-        .layer(middleware::from_fn_with_state(auth.clone(), admin_bearer));
+    // Admin-only routes — Stage 5 layered:
+    // 1. user_middleware resolves the caller's CallerIdentity (OIDC
+    //    JWT or user api-key).  Stamps it on extensions.
+    // 2. require_admin_role inspects the caller's claims for the
+    //    configured admin role.  Bearer-only callers (no claims) and
+    //    OIDC users without the admin role get 403.
+    //
+    // Layers apply outside-in: the LAST `.layer()` runs FIRST.  So we
+    // add user_middleware last to make it the outermost.
+    //
+    // `--dangerous-no-auth` mode skips user_middleware entirely —
+    // require_admin_role's pass-through branch then stamps the
+    // X-Warden-Insecure header.  Otherwise local-dev would 401 on
+    // every admin endpoint and the marker header would never fire.
+    let admin_handlers =
+        proxy_admin::router(state.clone()).merge(crate::http::admin_users::router(state.clone()));
+    let admin = if auth.dangerous_no_auth {
+        admin_handlers
+            .layer(middleware::from_fn_with_state(auth.clone(), require_admin_role))
+    } else {
+        admin_handlers
+            .layer(middleware::from_fn_with_state(auth.clone(), require_admin_role))
+            .layer(middleware::from_fn_with_state(user_auth.clone(), user_middleware))
+    };
 
     // Tenant routes — every request resolves to a CallerIdentity.
     let tenant = Router::new()
@@ -275,7 +294,7 @@ mod tests {
         let (state, users) = build_state().await;
         let base = spawn(
             state,
-            AuthState::enforced("admin-token"),
+            AuthState::enforced(crate::config::OidcRoles { claim: "https://test/roles".into(), admin: "rol_admin".into() }),
             deny_user_auth(users),
         )
         .await;
@@ -289,7 +308,7 @@ mod tests {
         let (state, users) = build_state().await;
         let base = spawn(
             state,
-            AuthState::enforced("admin-token"),
+            AuthState::enforced(crate::config::OidcRoles { claim: "https://test/roles".into(), admin: "rol_admin".into() }),
             deny_user_auth(users),
         )
         .await;
@@ -300,7 +319,7 @@ mod tests {
     #[tokio::test]
     async fn tenant_route_with_active_user_is_200() {
         let (state, user_auth, _user_id) = build_with_user("alice").await;
-        let base = spawn(state, AuthState::enforced("admin-token"), user_auth).await;
+        let base = spawn(state, AuthState::enforced(crate::config::OidcRoles { claim: "https://test/roles".into(), admin: "rol_admin".into() }), user_auth).await;
         let r = reqwest::get(format!("{base}/v1/instances")).await.unwrap();
         assert_eq!(r.status(), 200);
     }
@@ -310,7 +329,7 @@ mod tests {
         let (state, users) = build_state().await;
         let base = spawn(
             state,
-            AuthState::enforced("admin-token"),
+            AuthState::enforced(crate::config::OidcRoles { claim: "https://test/roles".into(), admin: "rol_admin".into() }),
             deny_user_auth(users),
         )
         .await;
@@ -319,21 +338,62 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn admin_route_with_admin_bearer_is_200() {
+    async fn admin_route_with_admin_role_is_200() {
+        // Stage 5: admin gate is now an OIDC role check, not a shared
+        // bearer.  Construct a UserAuthState whose authenticator
+        // returns an identity carrying the admin role in the
+        // configured claim, then any Authorization header value will
+        // pass (the Fixed authenticator ignores header content).
         let (state, users) = build_state().await;
+        let (user_auth, _id) = crate::auth::user::fixed_user_auth_with_roles(
+            users,
+            "alice",
+            Some(("https://test/roles", &["rol_admin"])),
+        )
+        .await;
         let base = spawn(
             state,
-            AuthState::enforced("admin-token"),
-            deny_user_auth(users),
+            AuthState::enforced(crate::config::OidcRoles {
+                claim: "https://test/roles".into(),
+                admin: "rol_admin".into(),
+            }),
+            user_auth,
         )
         .await;
         let r = reqwest::Client::new()
             .get(format!("{base}/v1/admin/users"))
-            .bearer_auth("admin-token")
+            .bearer_auth("not-checked-by-fixed-authenticator")
             .send()
             .await
             .unwrap();
         assert_eq!(r.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn admin_route_with_non_admin_role_is_403() {
+        let (state, users) = build_state().await;
+        let (user_auth, _id) = crate::auth::user::fixed_user_auth_with_roles(
+            users,
+            "bob",
+            Some(("https://test/roles", &["rol_free"])),
+        )
+        .await;
+        let base = spawn(
+            state,
+            AuthState::enforced(crate::config::OidcRoles {
+                claim: "https://test/roles".into(),
+                admin: "rol_admin".into(),
+            }),
+            user_auth,
+        )
+        .await;
+        let r = reqwest::Client::new()
+            .get(format!("{base}/v1/admin/users"))
+            .bearer_auth("ignored")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 403);
     }
 
     #[tokio::test]
@@ -344,7 +404,7 @@ mod tests {
         // and we get the regular 401 from user_middleware.
         let (mut state, users) = build_state().await;
         state.hostname = Some("warden.test".into());
-        let base = spawn(state, AuthState::enforced("admin-token"), deny_user_auth(users)).await;
+        let base = spawn(state, AuthState::enforced(crate::config::OidcRoles { claim: "https://test/roles".into(), admin: "rol_admin".into() }), deny_user_auth(users)).await;
         let r = reqwest::Client::new()
             .get(format!("{base}/v1/instances"))
             .header("host", "warden.test")
@@ -364,7 +424,7 @@ mod tests {
         let users = state.users.clone();
         let (alice_auth, _alice_id) =
             crate::auth::user::fixed_user_auth(users, "alice").await;
-        let base = spawn(state, AuthState::enforced("admin-token"), alice_auth).await;
+        let base = spawn(state, AuthState::enforced(crate::config::OidcRoles { claim: "https://test/roles".into(), admin: "rol_admin".into() }), alice_auth).await;
         let r = reqwest::Client::new()
             .get(format!("{base}/anything"))
             .header("host", "no-such-id.warden.test")
@@ -391,7 +451,7 @@ mod tests {
         let (state, users) = build_state().await;
         let base = spawn(
             state,
-            AuthState::enforced("admin-token"),
+            AuthState::enforced(crate::config::OidcRoles { claim: "https://test/roles".into(), admin: "rol_admin".into() }),
             deny_user_auth(users),
         )
         .await;
@@ -407,7 +467,7 @@ mod tests {
         let (state, users) = build_state().await;
         let base = spawn(
             state,
-            AuthState::enforced("admin-token"),
+            AuthState::enforced(crate::config::OidcRoles { claim: "https://test/roles".into(), admin: "rol_admin".into() }),
             deny_user_auth(users),
         )
         .await;
@@ -432,7 +492,7 @@ mod tests {
         let (state, users) = build_state().await;
         let base = spawn(
             state,
-            AuthState::enforced("admin-token"),
+            AuthState::enforced(crate::config::OidcRoles { claim: "https://test/roles".into(), admin: "rol_admin".into() }),
             deny_user_auth(users),
         )
         .await;

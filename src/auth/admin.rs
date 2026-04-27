@@ -1,121 +1,200 @@
-//! Admin-bearer middleware for `/v1/*`.
+//! Admin gate for `/v1/admin/*`.
 //!
-//! Two modes:
-//! - `Some(token)`: require `Authorization: Bearer <token>`. Mismatch → 401.
-//! - `None` (i.e. `--dangerous-no-auth`): pass-through, but every response
-//!   carries an `X-Warden-Insecure: 1` header so callers cannot mistake an
-//!   unauthenticated environment for an authenticated one.
+//! Stage 5 replaced the legacy shared `admin_token` bearer with an
+//! OIDC role check.  The flow now layers as:
+//!
+//! 1. `user_middleware` resolves the inbound credential to a
+//!    `CallerIdentity` (OIDC JWT or user api-key).
+//! 2. [`require_admin_role`] (this module) reads the caller's claims,
+//!    checks for the configured admin role id, and 403s if missing.
+//!
+//! User api-key holders never have OIDC claims, so they're effectively
+//! locked out of admin endpoints by design — admin is an
+//! IdP-managed role, not a credential type.
+//!
+//! The `--dangerous-no-auth` flag bypasses both middlewares (set up
+//! at the router layer) and stamps an `X-Warden-Insecure: 1` header
+//! on every response so callers can't mistake the deployment posture.
 
 use axum::body::Body;
-use axum::extract::State;
-use axum::http::{HeaderValue, Request, StatusCode};
+use axum::extract::{Request, State};
+use axum::http::{HeaderValue, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 
+use crate::auth::CallerIdentity;
+use crate::config::OidcRoles;
+
+/// Admin-side state.  Two pieces:
+///
+/// - [`OidcRoles`] (cloned from config) — claim name + admin role id.
+/// - `dangerous_no_auth` — when true, every request passes and the
+///   response carries `X-Warden-Insecure: 1`.  Used by `--dangerous-no-auth`
+///   for local dev; never set in production.
 #[derive(Clone, Debug)]
 pub struct AuthState {
-    pub admin_token: Option<String>,
+    pub roles: Option<OidcRoles>,
+    pub dangerous_no_auth: bool,
 }
 
 impl AuthState {
-    pub fn enforced(token: impl Into<String>) -> Self {
-        Self { admin_token: Some(token.into()) }
+    pub fn enforced(roles: OidcRoles) -> Self {
+        Self {
+            roles: Some(roles),
+            dangerous_no_auth: false,
+        }
     }
 
     pub fn dangerous_no_auth() -> Self {
-        Self { admin_token: None }
+        Self {
+            roles: None,
+            dangerous_no_auth: true,
+        }
     }
 }
 
-pub async fn admin_bearer(
+/// Require the caller's JWT to carry the configured admin role.
+/// Expects `user_middleware` to have already stamped a [`CallerIdentity`]
+/// on the request extensions; absent → 401 (not 403, since the
+/// upstream layer should already have caught that).
+pub async fn require_admin_role(
     State(auth): State<AuthState>,
-    req: Request<Body>,
+    req: Request,
     next: Next,
 ) -> Response {
-    let Some(expected) = auth.admin_token.as_deref() else {
+    if auth.dangerous_no_auth {
         let mut resp = next.run(req).await;
         resp.headers_mut()
             .insert("X-Warden-Insecure", HeaderValue::from_static("1"));
         return resp;
+    }
+
+    let Some(roles) = auth.roles.as_ref() else {
+        // Production posture but no [oidc.roles] configured — admin
+        // is unreachable.  Fail closed.
+        tracing::warn!(
+            "admin route hit but [oidc.roles] not configured — denying"
+        );
+        return (StatusCode::FORBIDDEN, "admin role check not configured").into_response();
     };
 
-    let header = req.headers().get("authorization").and_then(|h| h.to_str().ok());
-    let supplied = header
-        .and_then(|h| h.strip_prefix("Bearer "))
-        .or_else(|| header.and_then(|h| h.strip_prefix("bearer ")));
-    if supplied == Some(expected) {
-        next.run(req).await
-    } else {
-        StatusCode::UNAUTHORIZED.into_response()
+    let Some(caller) = req.extensions().get::<CallerIdentity>() else {
+        // user_middleware didn't run, or the request bypassed it.
+        // Either way, no identity → 401.
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+
+    if !caller_has_role(caller, &roles.claim, &roles.admin) {
+        return (StatusCode::FORBIDDEN, "admin role required").into_response();
     }
+    next.run(req).await
+}
+
+/// Read `claims[claim_name]` as `Vec<&str>` and check if `wanted` is in
+/// it.  Tolerates missing claim, non-array shapes, and non-string
+/// elements — all return false.  Roles in opaque-bearer identities
+/// (where claims is `Null`) always return false; admin requires OIDC.
+pub fn caller_has_role(caller: &CallerIdentity, claim_name: &str, wanted: &str) -> bool {
+    let Some(arr) = caller.identity.claims.get(claim_name).and_then(|v| v.as_array())
+    else {
+        return false;
+    };
+    arr.iter().any(|v| v.as_str() == Some(wanted))
+}
+
+/// Body-less response that hooks for tests; kept private.
+#[allow(dead_code)]
+fn body_only(status: StatusCode) -> Response {
+    Response::builder()
+        .status(status)
+        .body(Body::empty())
+        .expect("static response build")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::routing::get;
-    use axum::Router;
+    use crate::auth::{AuthSource, UserIdentity};
 
-    async fn ok() -> &'static str {
-        "ok"
+    fn caller_with_roles(roles: serde_json::Value) -> CallerIdentity {
+        CallerIdentity {
+            user_id: "u1".into(),
+            identity: UserIdentity {
+                subject: "alice".into(),
+                email: None,
+                display_name: None,
+                source: AuthSource::Oidc,
+                claims: serde_json::json!({
+                    "https://dyson.example.com/roles": roles
+                }),
+            },
+        }
     }
 
-    fn app(state: AuthState) -> Router {
-        Router::new()
-            .route("/v1/x", get(ok))
-            .layer(axum::middleware::from_fn_with_state(state, admin_bearer))
+    fn caller_bearer() -> CallerIdentity {
+        CallerIdentity {
+            user_id: "u1".into(),
+            identity: UserIdentity {
+                subject: "ci-bot".into(),
+                email: None,
+                display_name: None,
+                source: AuthSource::Bearer,
+                claims: serde_json::Value::Null,
+            },
+        }
     }
 
-    async fn spawn(state: AuthState) -> String {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let r = app(state);
-        tokio::spawn(async move {
-            axum::serve(listener, r).await.unwrap();
+    #[test]
+    fn role_present_grants() {
+        let c = caller_with_roles(serde_json::json!(["rol_admin", "rol_free"]));
+        assert!(caller_has_role(
+            &c,
+            "https://dyson.example.com/roles",
+            "rol_admin"
+        ));
+    }
+
+    #[test]
+    fn role_absent_denies() {
+        let c = caller_with_roles(serde_json::json!(["rol_free"]));
+        assert!(!caller_has_role(
+            &c,
+            "https://dyson.example.com/roles",
+            "rol_admin"
+        ));
+    }
+
+    #[test]
+    fn bearer_caller_never_has_role() {
+        let c = caller_bearer();
+        assert!(!caller_has_role(
+            &c,
+            "https://dyson.example.com/roles",
+            "rol_admin"
+        ));
+    }
+
+    #[test]
+    fn missing_claim_denies() {
+        let mut c = caller_with_roles(serde_json::json!(["rol_admin"]));
+        c.identity.claims = serde_json::json!({});
+        assert!(!caller_has_role(
+            &c,
+            "https://dyson.example.com/roles",
+            "rol_admin"
+        ));
+    }
+
+    #[test]
+    fn non_array_claim_denies() {
+        let mut c = caller_with_roles(serde_json::json!(["rol_admin"]));
+        c.identity.claims = serde_json::json!({
+            "https://dyson.example.com/roles": "rol_admin"  // single string, not array
         });
-        format!("http://{addr}")
-    }
-
-    #[tokio::test]
-    async fn missing_bearer_is_401() {
-        let base = spawn(AuthState::enforced("s3cr3t")).await;
-        let r = reqwest::get(format!("{base}/v1/x")).await.unwrap();
-        assert_eq!(r.status(), 401);
-    }
-
-    #[tokio::test]
-    async fn bad_bearer_is_401() {
-        let base = spawn(AuthState::enforced("s3cr3t")).await;
-        let r = reqwest::Client::new()
-            .get(format!("{base}/v1/x"))
-            .bearer_auth("nope")
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(r.status(), 401);
-    }
-
-    #[tokio::test]
-    async fn good_bearer_passes() {
-        let base = spawn(AuthState::enforced("s3cr3t")).await;
-        let r = reqwest::Client::new()
-            .get(format!("{base}/v1/x"))
-            .bearer_auth("s3cr3t")
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(r.status(), 200);
-        assert!(r.headers().get("x-warden-insecure").is_none());
-    }
-
-    #[tokio::test]
-    async fn dangerous_no_auth_passes_with_marker_header() {
-        let base = spawn(AuthState::dangerous_no_auth()).await;
-        let r = reqwest::get(format!("{base}/v1/x")).await.unwrap();
-        assert_eq!(r.status(), 200);
-        assert_eq!(
-            r.headers().get("x-warden-insecure").map(|v| v.to_str().unwrap()),
-            Some("1")
-        );
+        assert!(!caller_has_role(
+            &c,
+            "https://dyson.example.com/roles",
+            "rol_admin"
+        ));
     }
 }

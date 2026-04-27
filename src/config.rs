@@ -6,7 +6,6 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     pub bind: String,
-    pub admin_token: String,
     pub db_path: PathBuf,
 
     /// Directory holding per-user age root keys
@@ -88,6 +87,26 @@ pub struct OidcConfigToml {
     /// `openid`).
     #[serde(default)]
     pub spa_scopes: Vec<String>,
+    /// Role-based admin gate.  When set, `/v1/admin/*` requires the
+    /// caller's JWT to carry an admin role in the configured custom
+    /// claim.  Unset = `/v1/admin/*` is unreachable in production
+    /// (only the `--dangerous-no-auth` mode bypasses this).
+    #[serde(default)]
+    pub roles: Option<OidcRoles>,
+}
+
+/// Where to find roles in an OIDC access token, and which role grants
+/// admin.  Auth0 / Okta / Keycloak all let operators inject a
+/// namespaced custom claim like
+/// `https://dyson.example.com/roles: ["rol_admin", "rol_free"]` via a
+/// post-login action.  We don't care which IdP — just which claim and
+/// which value.
+#[derive(Debug, Clone, Deserialize)]
+pub struct OidcRoles {
+    /// JWT claim name to inspect.  Must point at an array of strings.
+    pub claim: String,
+    /// Role id (or name — whatever the IdP emits) that grants admin.
+    pub admin: String,
 }
 
 fn default_jwks_ttl() -> u64 {
@@ -225,9 +244,6 @@ impl Config {
         if let Some(v) = env.get("WARDEN_BIND") {
             self.bind = v.clone();
         }
-        if let Some(v) = env.get("WARDEN_ADMIN_TOKEN") {
-            self.admin_token = v.clone();
-        }
         if let Some(v) = env.get("WARDEN_DB_PATH") {
             self.db_path = PathBuf::from(v);
         }
@@ -295,9 +311,10 @@ impl Config {
         if self.bind.trim().is_empty() {
             return Err(ConfigError::EmptyField("bind"));
         }
-        if !dangerous_no_auth && self.admin_token.trim().is_empty() {
-            return Err(ConfigError::EmptyField("admin_token"));
-        }
+        // admin_token went away in Stage 5 — admin gate is now a JWT
+        // role check, not a shared bearer.  `dangerous_no_auth` keeps
+        // working as the local-dev bypass; production requires OIDC.
+        let _ = dangerous_no_auth;
         if self.db_path.as_os_str().is_empty() {
             return Err(ConfigError::EmptyField("db_path"));
         }
@@ -346,7 +363,6 @@ mod tests {
     fn example_toml() -> &'static str {
         r#"
 bind = "0.0.0.0:8080"
-admin_token = "secret"
 db_path = "/tmp/state.db"
 
 [cube]
@@ -387,7 +403,6 @@ local_cache_dir = "/tmp/cache"
         let path = write_tmp("round_trip.toml", example_toml());
         let cfg = Config::load(&path, &BTreeMap::new(), false).expect("loads");
         assert_eq!(cfg.bind, "0.0.0.0:8080");
-        assert_eq!(cfg.admin_token, "secret");
         assert_eq!(cfg.cube.api_key, "k");
         assert_eq!(cfg.default_ttl_seconds, 86_400);
         assert_eq!(cfg.health_probe_interval_seconds, 60);
@@ -411,23 +426,10 @@ local_cache_dir = "/tmp/cache"
         std::fs::remove_file(&path).ok();
     }
 
-    #[test]
-    fn missing_admin_token_rejected() {
-        let toml = example_toml().replace(r#"admin_token = "secret""#, r#"admin_token = """#);
-        let path = write_tmp("no_admin.toml", &toml);
-        let err = Config::load(&path, &BTreeMap::new(), false).expect_err("rejects");
-        assert!(matches!(err, ConfigError::EmptyField("admin_token")));
-        std::fs::remove_file(&path).ok();
-    }
-
-    #[test]
-    fn dangerous_no_auth_allows_empty_admin_token() {
-        let toml = example_toml().replace(r#"admin_token = "secret""#, r#"admin_token = """#);
-        let path = write_tmp("no_admin_ok.toml", &toml);
-        let cfg = Config::load(&path, &BTreeMap::new(), true).expect("loads with dangerous flag");
-        assert!(cfg.admin_token.is_empty());
-        std::fs::remove_file(&path).ok();
-    }
+    // The legacy `admin_token` field is gone (Stage 5).  Admin gate
+    // is now an OIDC role check; `dangerous_no_auth` is the local-dev
+    // bypass.  Tests that used to assert on admin_token validation
+    // are obsolete.
 
     #[test]
     fn s3_sink_requires_section() {

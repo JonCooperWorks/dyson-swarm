@@ -121,6 +121,7 @@ mod tests {
             jwks_ttl_seconds: 86_400,
             spa_client_id: None,
             spa_scopes: vec![],
+            roles: None,
         };
         let cfg = AuthConfig::from_toml(Some(&oidc), None, vec![]);
         assert!(matches!(cfg.mode, AuthMode::None));
@@ -135,6 +136,7 @@ mod tests {
             jwks_ttl_seconds: 86_400,
             spa_client_id: Some("warden-spa".into()),
             spa_scopes: vec!["profile".into(), "email".into()],
+            roles: None,
         };
         let cfg = AuthConfig::from_toml(Some(&oidc), None, vec![]);
         match cfg.mode {
@@ -157,6 +159,7 @@ mod tests {
             jwks_ttl_seconds: 86_400,
             spa_client_id: Some("   ".into()),
             spa_scopes: vec![],
+            roles: None,
         };
         let cfg = AuthConfig::from_toml(Some(&oidc), None, vec![]);
         assert!(matches!(cfg.mode, AuthMode::None));

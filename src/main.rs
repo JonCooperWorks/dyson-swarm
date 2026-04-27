@@ -179,7 +179,24 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     let auth = if dangerous_no_auth {
         AuthState::dangerous_no_auth()
     } else {
-        AuthState::enforced(cfg.admin_token.clone())
+        match cfg.oidc.as_ref().and_then(|o| o.roles.clone()) {
+            Some(roles) => AuthState::enforced(roles),
+            None => {
+                tracing::warn!(
+                    "no [oidc.roles] in config — admin endpoints will return 403 \
+                     for everyone.  Set oidc.roles.{{claim,admin}} or pass \
+                     --dangerous-no-auth for local dev."
+                );
+                AuthState::enforced(crate::config::OidcRoles {
+                    // Sentinel that no real JWT carries → all admin
+                    // requests denied.  Using a placeholder rather
+                    // than a different code path keeps the layer
+                    // ordering uniform.
+                    claim: String::new(),
+                    admin: String::new(),
+                })
+            }
+        }
     };
 
     let prober: Arc<dyn HealthProber> = match HttpHealthProber::new(
@@ -297,10 +314,13 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
 }
 
 fn build_api_client(cfg: &config::Config, dangerous_no_auth: bool) -> Option<ApiClient> {
+    // Stage 5 retired the admin_token; CLI subcommands now read a
+    // user api-key from `WARDEN_API_KEY` (mint one via the SPA admin
+    // panel and export).  `--dangerous-no-auth` skips entirely.
     let token = if dangerous_no_auth {
         None
     } else {
-        Some(cfg.admin_token.clone())
+        std::env::var("WARDEN_API_KEY").ok()
     };
     match ApiClient::from_bind(&cfg.bind, token) {
         Ok(c) => Some(c),

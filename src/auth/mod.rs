@@ -29,7 +29,7 @@ use async_trait::async_trait;
 use axum::http::HeaderMap;
 use serde_json::Value as JsonValue;
 
-pub use admin::{admin_bearer, AuthState};
+pub use admin::{caller_has_role, require_admin_role, AuthState};
 
 /// Identity returned by an [`Authenticator`]. The `subject` is the IdP-stable
 /// id (OIDC `sub` for JWTs, the api_key's `user_id` for bearers).

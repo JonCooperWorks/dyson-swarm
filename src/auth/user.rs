@@ -129,8 +129,12 @@ async fn resolve_or_provision(
     if let Some(existing) = users.get_by_subject(&identity.subject).await? {
         return Ok(existing);
     }
-    // JIT: insert a new row in `inactive` status. An admin must activate
-    // it before the user can do anything.
+    // Stage 5: JIT-create as Active.  The IdP (Auth0) is the gate for
+    // who can sign in — anyone holding a valid JWT for our audience
+    // has already been registered + role-assigned upstream.  Pre-Stage-5
+    // the row was Inactive and an admin had to flip it; with no
+    // admin_token to bootstrap from, that loop deadlocks.  Admin
+    // suspend/reactivate via the SPA is still available for ops use.
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -140,9 +144,9 @@ async fn resolve_or_provision(
         subject: identity.subject.clone(),
         email: identity.email.clone(),
         display_name: identity.display_name.clone(),
-        status: UserStatus::Inactive,
+        status: UserStatus::Active,
         created_at: now,
-        activated_at: None,
+        activated_at: Some(now),
         last_seen_at: None,
     };
     users.create(row.clone()).await?;
@@ -153,11 +157,27 @@ async fn resolve_or_provision(
 /// identity, and seed an active user row with that subject. Returns the
 /// state and the user's `id` so tests can assert against it.
 ///
+/// `roles` lets a test inject custom claims that look like an OIDC
+/// access token's role array.  Pass `None` for an opaque-bearer-style
+/// identity (no claims).  When `Some(("claim", &["rol_admin", ...]))`,
+/// `caller.identity.claims` becomes `{"<claim>": [...]}`, which is
+/// exactly what the OIDC authenticator stamps in production.
+///
 /// Test/integration helper. Production builds should use the OIDC + bearer
 /// chain assembled in `main.rs`.
 pub async fn fixed_user_auth(
     users: Arc<dyn UserStore>,
     subject: &str,
+) -> (UserAuthState, String) {
+    fixed_user_auth_with_roles(users, subject, None).await
+}
+
+/// Variant of [`fixed_user_auth`] that injects roles into the
+/// caller's claims.  Useful for testing the admin role check.
+pub async fn fixed_user_auth_with_roles(
+    users: Arc<dyn UserStore>,
+    subject: &str,
+    roles: Option<(&str, &[&str])>,
 ) -> (UserAuthState, String) {
     use crate::auth::{AuthSource, UserIdentity};
 
@@ -191,12 +211,21 @@ pub async fn fixed_user_auth(
         })
         .await
         .expect("create test user");
+    let (source, claims) = match roles {
+        Some((claim, vals)) => (
+            AuthSource::Oidc,
+            serde_json::json!({
+                claim: vals.iter().map(|v| (*v).to_owned()).collect::<Vec<_>>()
+            }),
+        ),
+        None => (AuthSource::Bearer, serde_json::Value::Null),
+    };
     let identity = UserIdentity {
         subject: subject.into(),
         email: None,
         display_name: None,
-        source: AuthSource::Bearer,
-        claims: serde_json::Value::Null,
+        source,
+        claims,
     };
     let auth = UserAuthState::new(Arc::new(Fixed(identity)), users);
     (auth, id)
@@ -255,17 +284,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn jit_inactive_user_is_403() {
+    async fn jit_creates_active_user_and_passes() {
+        // Stage 5: JIT-created users land Active because the IdP is
+        // the gate (anyone with a valid JWT for our audience already
+        // passed the upstream signup flow).  Suspended/Inactive are
+        // now ops-only states an admin can flip via the SPA.
         let pool = open_in_memory().await.unwrap();
         let users: Arc<dyn UserStore> = Arc::new(SqlxUserStore::new(pool.clone()));
         let auth: Arc<dyn Authenticator> = Arc::new(FixedIdentity(id("alice")));
         let state = UserAuthState::new(auth, users.clone());
         let base = spawn(state).await;
         let r = reqwest::get(format!("{base}/v1/x")).await.unwrap();
-        assert_eq!(r.status(), 403);
-        // Row was created but inactive.
+        assert_eq!(r.status(), 200);
         let row = users.get_by_subject("alice").await.unwrap().unwrap();
-        assert_eq!(row.status, UserStatus::Inactive);
+        assert_eq!(row.status, UserStatus::Active);
+        assert!(row.activated_at.is_some());
     }
 
     #[tokio::test]

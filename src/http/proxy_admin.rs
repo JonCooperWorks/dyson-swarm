@@ -148,6 +148,7 @@ mod tests {
             prober: Arc::new(StubProber),
             tokens: tokens_store.clone(),
             sandbox_domain: "cube.test".into(),
+            auth_config: Arc::new(crate::http::auth_config::AuthConfig::None),
         };
         (state, tokens_store, token)
     }

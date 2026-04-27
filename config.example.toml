@@ -24,6 +24,17 @@ audience = "warden"
 # jwks_url = "https://accounts.example.com/.well-known/jwks.json"
 jwks_ttl_seconds = 86400
 
+# Web-UI (SPA) PKCE client. Register `spa_client_id` at the IdP as a
+# public client with PKCE enabled and the redirect URI set to wherever
+# warden serves the bundle (typically `https://<warden-host>/`). The
+# SPA discovers authorization_endpoint/token_endpoint by hitting
+# `<issuer>/.well-known/openid-configuration` directly.
+#
+# Leave `spa_client_id` unset to disable the browser flow — admin
+# bearers and opaque api keys still work.
+spa_client_id = "warden-spa"
+spa_scopes = ["profile", "email"]
+
 # Per-user policy fallback. Applied to any user that doesn't have a row in
 # `user_policies`. Tighten via the (forthcoming) admin policy endpoint.
 [default_policy]

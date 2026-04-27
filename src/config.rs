@@ -28,6 +28,11 @@ pub struct Config {
 /// OIDC issuer configuration, lifted out of [`crate::auth::oidc::OidcConfig`]
 /// so the TOML schema is stable independent of the auth module's internal
 /// types. Mirrors the runtime config 1:1.
+///
+/// `spa_client_id` and `spa_scopes` are SPA-only — they're surfaced via
+/// the unauthenticated `GET /auth/config` endpoint so the React bundle
+/// can run an Authorization Code + PKCE flow against the same IdP.
+/// Backend JWT verification doesn't need them.
 #[derive(Debug, Clone, Deserialize)]
 pub struct OidcConfigToml {
     pub issuer: String,
@@ -37,6 +42,17 @@ pub struct OidcConfigToml {
     /// Default 24h.
     #[serde(default = "default_jwks_ttl")]
     pub jwks_ttl_seconds: u64,
+    /// Public OAuth client_id for the web UI's PKCE flow. When unset, the
+    /// SPA reports `mode: "none"` and renders a "use the CLI" splash —
+    /// admin-bearer / opaque api keys still work, just not the browser
+    /// flow.
+    #[serde(default)]
+    pub spa_client_id: Option<String>,
+    /// Extra scopes beyond `openid` to request from the IdP. Most
+    /// deployments want at least `profile email`. Default: `[]` (just
+    /// `openid`).
+    #[serde(default)]
+    pub spa_scopes: Vec<String>,
 }
 
 fn default_jwks_ttl() -> u64 {

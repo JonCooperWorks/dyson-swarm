@@ -14,6 +14,7 @@
 
 pub mod admin_users;
 pub mod assets;
+pub mod auth_config;
 pub mod healthz;
 pub mod instances;
 pub mod proxy_admin;
@@ -42,6 +43,10 @@ pub struct AppState {
     pub tokens: Arc<dyn TokenStore>,
     pub users: Arc<dyn crate::traits::UserStore>,
     pub sandbox_domain: String,
+    /// Auth-mode descriptor surfaced via `GET /auth/config`. Built from
+    /// [`crate::config::Config`] at startup; the SPA hits this endpoint
+    /// before mounting React to decide whether to start a PKCE flow.
+    pub auth_config: Arc<auth_config::AuthConfig>,
 }
 
 /// Build the public `Router`.
@@ -74,7 +79,7 @@ pub fn router(
     let tenant = Router::new()
         .merge(instances::router(state.clone()))
         .merge(snapshots::router(state.clone()))
-        .merge(secrets::router(state))
+        .merge(secrets::router(state.clone()))
         .layer(middleware::from_fn_with_state(user_auth, user_middleware));
 
     // Static assets (SPA bundle) are merged last so the API routes win
@@ -82,6 +87,7 @@ pub fn router(
     // `/`, `/assets/*`, and 404s anything else — no auth, no logging.
     Router::new()
         .merge(healthz::router())
+        .merge(auth_config::router(state))
         .merge(admin)
         .merge(tenant)
         .merge(extra)
@@ -172,6 +178,7 @@ mod tests {
             tokens: tokens_store,
             users: users_store.clone(),
             sandbox_domain: "cube.test".into(),
+            auth_config: Arc::new(auth_config::AuthConfig::None),
         };
         (state, users_store)
     }
@@ -284,6 +291,22 @@ mod tests {
             r.headers().get("x-warden-insecure").map(|v| v.to_str().unwrap()),
             Some("1")
         );
+    }
+
+    #[tokio::test]
+    async fn auth_config_is_unauthenticated_and_reports_none_by_default() {
+        let (state, users) = build_state().await;
+        let base = spawn(
+            state,
+            AuthState::enforced("admin-token"),
+            deny_user_auth(users),
+        )
+        .await;
+        // No bearer — must succeed.
+        let r = reqwest::get(format!("{base}/auth/config")).await.unwrap();
+        assert_eq!(r.status(), 200);
+        let body: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(body["mode"], "none");
     }
 
     #[tokio::test]

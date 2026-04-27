@@ -219,6 +219,7 @@ mod tests {
             tokens: tokens_store,
             users: users_store,
             sandbox_domain: "cube.test".into(),
+            auth_config: Arc::new(crate::http::auth_config::AuthConfig::None),
         };
         (state, raw, user_auth, user_id)
     }

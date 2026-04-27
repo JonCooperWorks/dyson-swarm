@@ -23,6 +23,7 @@ html, body {
   height: 100vh;
   text-align: center;
   padding: 16px;
+  gap: 8px;
 }
 
 .splash h1 {
@@ -32,5 +33,27 @@ html, body {
   margin: 0 0 8px;
 }
 
+.splash code {
+  font-family: var(--mono);
+  background: var(--bg-2);
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
 .muted { color: var(--fg-muted); margin: 4px 0; }
 .small { font-size: 12px; }
+
+.btn {
+  display: inline-block;
+  margin-top: 12px;
+  padding: 6px 14px;
+  border: 1px solid var(--border);
+  background: var(--bg-1);
+  color: var(--fg);
+  border-radius: var(--radius);
+  font-family: var(--sans);
+  font-size: 13px;
+  cursor: pointer;
+}
+.btn:hover { background: var(--bg-2); }

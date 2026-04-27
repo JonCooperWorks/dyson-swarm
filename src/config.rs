@@ -33,6 +33,14 @@ pub struct Config {
     #[serde(default)]
     pub default_template_id: Option<String>,
 
+    /// Suggested model ids the SPA offers in the hire form, e.g.
+    /// `["deepseek/deepseek-v4-pro", "moonshotai/kimi-k2.6"]`. First
+    /// entry is pre-selected. Surfaced via `/auth/config`; the input
+    /// is a datalist so the user can still type any other id. Empty
+    /// list → free-text only.
+    #[serde(default)]
+    pub default_models: Vec<String>,
+
     pub cube: CubeConfig,
     pub default_policy: DefaultPolicy,
     #[serde(default)]

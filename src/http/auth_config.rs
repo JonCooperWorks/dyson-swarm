@@ -56,6 +56,11 @@ pub struct AuthConfig {
     /// in which case the SPA falls back to its own hardcoded default.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_template_id: Option<String>,
+    /// Suggested model ids for the SPA's hire-form datalist.  First
+    /// entry pre-selected; the input still accepts any other value.
+    /// Empty array when the operator hasn't configured any.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub default_models: Vec<String>,
 }
 
 impl AuthConfig {
@@ -64,6 +69,7 @@ impl AuthConfig {
     pub fn from_toml(
         oidc: Option<&crate::config::OidcConfigToml>,
         default_template_id: Option<String>,
+        default_models: Vec<String>,
     ) -> Self {
         let mode = match oidc {
             Some(o) => match &o.spa_client_id {
@@ -77,13 +83,13 @@ impl AuthConfig {
             },
             None => AuthMode::None,
         };
-        Self { mode, default_template_id }
+        Self { mode, default_template_id, default_models }
     }
 
     /// Convenience for tests / fallback paths that just need a "no auth"
     /// descriptor with no SPA defaults.
     pub fn none() -> Self {
-        Self { mode: AuthMode::None, default_template_id: None }
+        Self { mode: AuthMode::None, default_template_id: None, default_models: vec![] }
     }
 }
 
@@ -102,7 +108,7 @@ mod tests {
 
     #[test]
     fn no_oidc_block_yields_none() {
-        let cfg = AuthConfig::from_toml(None, None);
+        let cfg = AuthConfig::from_toml(None, None, vec![]);
         assert!(matches!(cfg.mode, AuthMode::None));
     }
 
@@ -116,7 +122,7 @@ mod tests {
             spa_client_id: None,
             spa_scopes: vec![],
         };
-        let cfg = AuthConfig::from_toml(Some(&oidc), None);
+        let cfg = AuthConfig::from_toml(Some(&oidc), None, vec![]);
         assert!(matches!(cfg.mode, AuthMode::None));
     }
 
@@ -130,7 +136,7 @@ mod tests {
             spa_client_id: Some("warden-spa".into()),
             spa_scopes: vec!["profile".into(), "email".into()],
         };
-        let cfg = AuthConfig::from_toml(Some(&oidc), None);
+        let cfg = AuthConfig::from_toml(Some(&oidc), None, vec![]);
         match cfg.mode {
             AuthMode::Oidc { issuer, audience, client_id, required_scopes } => {
                 assert_eq!(issuer, "https://idp.example");
@@ -152,7 +158,7 @@ mod tests {
             spa_client_id: Some("   ".into()),
             spa_scopes: vec![],
         };
-        let cfg = AuthConfig::from_toml(Some(&oidc), None);
+        let cfg = AuthConfig::from_toml(Some(&oidc), None, vec![]);
         assert!(matches!(cfg.mode, AuthMode::None));
     }
 

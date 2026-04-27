@@ -242,6 +242,7 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         auth_config: Arc::new(http::auth_config::AuthConfig::from_toml(
             cfg.oidc.as_ref(),
             cfg.default_template_id.clone(),
+            cfg.default_models.clone(),
         )),
         dyson_http: http::dyson_proxy::build_client().expect("dyson http client init"),
     };

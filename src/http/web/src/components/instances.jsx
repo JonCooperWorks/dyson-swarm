@@ -112,12 +112,13 @@ function CreateModal({ onClose, onCreated }) {
   const { client, auth } = useApi();
   const [name, setName] = React.useState('');
   const [task, setTask] = React.useState('');
-  // Model id the agent talks to, e.g. "anthropic/claude-sonnet-4-5",
-  // "openai/gpt-4o", "deepseek/deepseek-chat".  No default — warden
-  // refuses the create otherwise, since a stale default leaks long
-  // past when it was the right call.  Free-text because OpenRouter
-  // alone exposes 200+ ids and no client-side enum can keep up.
-  const [model, setModel] = React.useState('');
+  // Model id the agent talks to.  Operator-curated suggestions come
+  // from `default_models` in /etc/dyson-warden/config.toml, surfaced
+  // via /auth/config; the first one pre-fills the input.  Input is
+  // backed by a <datalist> so the user can still type any other id
+  // (OpenRouter has 200+ models and no client-side enum can keep up).
+  const modelSuggestions = auth?.config?.default_models || [];
+  const [model, setModel] = React.useState(modelSuggestions[0] || '');
   // Operator-configured default from `default_template_id` in
   // /etc/dyson-warden/config.toml, surfaced via /auth/config.  Fall
   // back to a placeholder string only when the deployment hasn't
@@ -210,11 +211,18 @@ function CreateModal({ onClose, onCreated }) {
           <input
             value={model}
             onChange={e => setModel(e.target.value)}
-            placeholder="anthropic/claude-sonnet-4-5"
+            placeholder={modelSuggestions[0] || 'anthropic/claude-sonnet-4-5'}
+            list="model-suggestions"
             required
           />
+          {modelSuggestions.length > 0 ? (
+            <datalist id="model-suggestions">
+              {modelSuggestions.map(m => <option key={m} value={m}/>)}
+            </datalist>
+          ) : null}
           <span className="hint muted small">
-            OpenRouter model id. Free-text — see{' '}
+            OpenRouter model id. Suggestions come from your warden
+            config; type to override. See{' '}
             <a href="https://openrouter.ai/models" target="_blank" rel="noopener noreferrer">openrouter.ai/models</a>{' '}
             for the full list.
           </span>

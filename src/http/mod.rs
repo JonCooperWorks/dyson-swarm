@@ -66,7 +66,7 @@ mod tests {
     use crate::db::tokens::SqlxTokenStore;
     use crate::traits::{
         BackupSink, CreateSandboxArgs, CubeClient, HealthProber, InstanceRow, InstanceStore,
-        ProbeResult, SandboxInfo, SecretStore, SnapshotInfo, TokenStore,
+        ProbeResult, SandboxInfo, SecretStore, SnapshotInfo, SnapshotStore, TokenStore,
     };
 
     struct StubProber;
@@ -120,12 +120,14 @@ mod tests {
             3600,
         ));
         let backup: Arc<dyn BackupSink> = Arc::new(LocalDiskBackupSink::new(cube.clone()));
+        let snapshots_store: Arc<dyn SnapshotStore> =
+            Arc::new(crate::db::snapshots::SqliteSnapshotStore::new(pool));
         let snapshot_svc = Arc::new(SnapshotService::new(
             cube,
             instances_store,
+            snapshots_store,
             backup,
             instance_svc.clone(),
-            pool,
         ));
         AppState {
             secrets: svc,

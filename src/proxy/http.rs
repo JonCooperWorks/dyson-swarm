@@ -23,13 +23,11 @@ use axum::Router;
 use futures::TryStreamExt;
 use serde::Serialize;
 
-use crate::db::audit::{self, AuditRow};
-use crate::db::policies as policy_db;
 use crate::policy::PolicyDenial;
 use crate::proxy::adapters::anthropic as anthropic_adapter;
 use crate::proxy::policy_check::{enforce, EnforceContext};
 use crate::proxy::ProxyService;
-use crate::traits::TokenRecord;
+use crate::traits::{AuditEntry, TokenRecord};
 
 /// Build the `/llm/*` router. Carries its own state and per-instance-bearer
 /// middleware — the admin auth layer does not apply here.
@@ -77,7 +75,7 @@ async fn handle(
     };
 
     // 3. Policy.
-    let policy = match policy_db::get(&state.pool, &record.instance_id).await {
+    let policy = match state.policies.get(&record.instance_id).await {
         Ok(Some(p)) => p,
         Ok(None) => state.default_policy.clone(),
         Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "policy load error"),
@@ -95,7 +93,7 @@ async fn handle(
             .map(str::to_owned);
         write_audit(
             &state,
-            AuditRow {
+            AuditEntry {
                 instance_id: record.instance_id.clone(),
                 provider: provider.clone(),
                 model,
@@ -160,7 +158,7 @@ async fn handle(
         Err(e) => {
             write_audit(
                 &state,
-                AuditRow {
+                AuditEntry {
                     instance_id: record.instance_id.clone(),
                     provider: provider.clone(),
                     model: body_json.get("model").and_then(|v| v.as_str()).map(str::to_owned),
@@ -201,7 +199,7 @@ async fn handle(
     // the row on close. For step 14 we record what we know.
     write_audit(
         &state,
-        AuditRow {
+        AuditEntry {
             instance_id: record.instance_id.clone(),
             provider: provider.clone(),
             model: body_json.get("model").and_then(|v| v.as_str()).map(str::to_owned),
@@ -284,8 +282,8 @@ fn error_response(status: StatusCode, msg: &str) -> Response<Body> {
         .unwrap()
 }
 
-async fn write_audit(state: &ProxyService, row: AuditRow) {
-    if let Err(e) = audit::insert(&state.pool, &row).await {
+async fn write_audit(state: &ProxyService, entry: AuditEntry) {
+    if let Err(e) = state.audit.insert(&entry).await {
         tracing::warn!(error = %e, "llm_audit insert failed");
     }
 }
@@ -427,8 +425,12 @@ mod tests {
             ollama: None,
         };
         let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(pool.clone()));
+        let policies: Arc<dyn crate::traits::PolicyStore> =
+            Arc::new(crate::db::policies::SqlitePolicyStore::new(pool.clone()));
+        let audit: Arc<dyn crate::traits::AuditStore> =
+            Arc::new(crate::db::audit::SqliteAuditStore::new(pool));
         Arc::new(
-            ProxyService::new(pool, tokens, providers, policy)
+            ProxyService::new(tokens, policies, audit, providers, policy)
                 .expect("build proxy"),
         )
     }

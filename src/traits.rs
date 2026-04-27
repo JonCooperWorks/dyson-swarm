@@ -186,6 +186,54 @@ pub trait HealthProber: Send + Sync {
     async fn probe(&self, instance: &InstanceRow) -> ProbeResult;
 }
 
+#[derive(Debug, Clone)]
+pub struct AuditEntry {
+    pub instance_id: String,
+    pub provider: String,
+    pub model: Option<String>,
+    pub prompt_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    pub status_code: i64,
+    pub duration_ms: i64,
+    pub occurred_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PolicyRecord {
+    pub allowed_providers: Vec<String>,
+    pub allowed_models: Vec<String>,
+    pub daily_token_budget: Option<u64>,
+    pub monthly_usd_budget: Option<f64>,
+    pub rps_limit: Option<u32>,
+}
+
+#[async_trait]
+pub trait SnapshotStore: Send + Sync {
+    async fn insert(&self, row: &SnapshotRow) -> Result<(), StoreError>;
+    async fn get(&self, id: &str) -> Result<Option<SnapshotRow>, StoreError>;
+    async fn list_for_instance(&self, instance_id: &str) -> Result<Vec<SnapshotRow>, StoreError>;
+    async fn update_remote_uri(&self, id: &str, uri: &str) -> Result<(), StoreError>;
+    async fn update_path(&self, id: &str, path: &str) -> Result<(), StoreError>;
+    async fn mark_deleted(&self, id: &str, when: i64) -> Result<(), StoreError>;
+}
+
+#[async_trait]
+pub trait PolicyStore: Send + Sync {
+    /// Look up a policy by *subject* — for the multi-tenant build this is a
+    /// `user_id`. The pre-tenancy build keyed on `instance_id`; the trait
+    /// stays opaque so phase 2 can swap the meaning without re-plumbing.
+    async fn get(&self, subject: &str) -> Result<Option<PolicyRecord>, StoreError>;
+    async fn put(&self, subject: &str, policy: &PolicyRecord) -> Result<(), StoreError>;
+}
+
+#[async_trait]
+pub trait AuditStore: Send + Sync {
+    async fn insert(&self, entry: &AuditEntry) -> Result<(), StoreError>;
+    /// Sum prompt+output tokens for `subject` (instance_id today, owner_id
+    /// after phase 6) over the past 24h.
+    async fn daily_tokens(&self, subject: &str, now: i64) -> Result<u64, StoreError>;
+}
+
 #[async_trait]
 pub trait BackupSink: Send + Sync {
     /// Tag a snapshot as backup-class and (for remote sinks) copy its bytes

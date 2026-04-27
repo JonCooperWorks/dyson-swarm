@@ -1,12 +1,13 @@
-//! Snapshot CRUD. There is no `SnapshotStore` trait — the brief lists
-//! `SqlxInstanceStore`, `SqlxSecretStore`, and `SqlxTokenStore` as the
-//! store impls, and snapshot rows are managed via these plain functions
-//! by the snapshot module (step 8) and the BackupSink impls.
+//! Snapshot CRUD. Plain functions historically; now also exposed as
+//! [`SqliteSnapshotStore`] implementing [`SnapshotStore`] so services hold a
+//! trait object instead of a `SqlitePool` and a Postgres impl can slot in
+//! without touching the service layer.
 
+use async_trait::async_trait;
 use sqlx::{Row, SqlitePool};
 
 use crate::error::StoreError;
-use crate::traits::{SnapshotKind, SnapshotRow};
+use crate::traits::{SnapshotKind, SnapshotRow, SnapshotStore};
 
 fn map_sqlx(e: sqlx::Error) -> StoreError {
     match e {
@@ -36,95 +37,102 @@ fn row_to_snapshot(row: &sqlx::sqlite::SqliteRow) -> Result<SnapshotRow, StoreEr
     })
 }
 
-pub async fn insert(pool: &SqlitePool, row: &SnapshotRow) -> Result<(), StoreError> {
-    sqlx::query(
-        "INSERT INTO snapshots \
-         (id, source_instance_id, parent_snapshot_id, kind, path, host_ip, remote_uri, size_bytes, created_at, deleted_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-    )
-    .bind(&row.id)
-    .bind(&row.source_instance_id)
-    .bind(&row.parent_snapshot_id)
-    .bind(row.kind.as_str())
-    .bind(&row.path)
-    .bind(&row.host_ip)
-    .bind(&row.remote_uri)
-    .bind(row.size_bytes)
-    .bind(row.created_at)
-    .bind(row.deleted_at)
-    .execute(pool)
-    .await
-    .map_err(map_sqlx)?;
-    Ok(())
+#[derive(Debug, Clone)]
+pub struct SqliteSnapshotStore {
+    pool: SqlitePool,
 }
 
-pub async fn get(pool: &SqlitePool, id: &str) -> Result<Option<SnapshotRow>, StoreError> {
-    let row = sqlx::query("SELECT * FROM snapshots WHERE id = ?")
-        .bind(id)
-        .fetch_optional(pool)
-        .await
-        .map_err(map_sqlx)?;
-    match row {
-        Some(r) => Ok(Some(row_to_snapshot(&r)?)),
-        None => Ok(None),
+impl SqliteSnapshotStore {
+    pub fn new(pool: SqlitePool) -> Self {
+        Self { pool }
     }
 }
 
-pub async fn list_for_instance(
-    pool: &SqlitePool,
-    instance_id: &str,
-) -> Result<Vec<SnapshotRow>, StoreError> {
-    let rows = sqlx::query(
-        "SELECT * FROM snapshots WHERE source_instance_id = ? AND deleted_at IS NULL ORDER BY created_at DESC",
-    )
-    .bind(instance_id)
-    .fetch_all(pool)
-    .await
-    .map_err(map_sqlx)?;
-    rows.iter().map(row_to_snapshot).collect()
-}
-
-pub async fn update_remote_uri(
-    pool: &SqlitePool,
-    id: &str,
-    uri: &str,
-) -> Result<(), StoreError> {
-    let r = sqlx::query("UPDATE snapshots SET remote_uri = ? WHERE id = ?")
-        .bind(uri)
-        .bind(id)
-        .execute(pool)
+#[async_trait]
+impl SnapshotStore for SqliteSnapshotStore {
+    async fn insert(&self, row: &SnapshotRow) -> Result<(), StoreError> {
+        sqlx::query(
+            "INSERT INTO snapshots \
+             (id, source_instance_id, parent_snapshot_id, kind, path, host_ip, remote_uri, size_bytes, created_at, deleted_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&row.id)
+        .bind(&row.source_instance_id)
+        .bind(&row.parent_snapshot_id)
+        .bind(row.kind.as_str())
+        .bind(&row.path)
+        .bind(&row.host_ip)
+        .bind(&row.remote_uri)
+        .bind(row.size_bytes)
+        .bind(row.created_at)
+        .bind(row.deleted_at)
+        .execute(&self.pool)
         .await
         .map_err(map_sqlx)?;
-    if r.rows_affected() == 0 {
-        return Err(StoreError::NotFound);
+        Ok(())
     }
-    Ok(())
-}
 
-pub async fn update_path(pool: &SqlitePool, id: &str, path: &str) -> Result<(), StoreError> {
-    let r = sqlx::query("UPDATE snapshots SET path = ? WHERE id = ?")
-        .bind(path)
-        .bind(id)
-        .execute(pool)
+    async fn get(&self, id: &str) -> Result<Option<SnapshotRow>, StoreError> {
+        let row = sqlx::query("SELECT * FROM snapshots WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+        match row {
+            Some(r) => Ok(Some(row_to_snapshot(&r)?)),
+            None => Ok(None),
+        }
+    }
+
+    async fn list_for_instance(&self, instance_id: &str) -> Result<Vec<SnapshotRow>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT * FROM snapshots WHERE source_instance_id = ? AND deleted_at IS NULL ORDER BY created_at DESC",
+        )
+        .bind(instance_id)
+        .fetch_all(&self.pool)
         .await
         .map_err(map_sqlx)?;
-    if r.rows_affected() == 0 {
-        return Err(StoreError::NotFound);
+        rows.iter().map(row_to_snapshot).collect()
     }
-    Ok(())
-}
 
-pub async fn mark_deleted(pool: &SqlitePool, id: &str, when: i64) -> Result<(), StoreError> {
-    let r = sqlx::query("UPDATE snapshots SET deleted_at = ? WHERE id = ?")
-        .bind(when)
-        .bind(id)
-        .execute(pool)
-        .await
-        .map_err(map_sqlx)?;
-    if r.rows_affected() == 0 {
-        return Err(StoreError::NotFound);
+    async fn update_remote_uri(&self, id: &str, uri: &str) -> Result<(), StoreError> {
+        let r = sqlx::query("UPDATE snapshots SET remote_uri = ? WHERE id = ?")
+            .bind(uri)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+        if r.rows_affected() == 0 {
+            return Err(StoreError::NotFound);
+        }
+        Ok(())
     }
-    Ok(())
+
+    async fn update_path(&self, id: &str, path: &str) -> Result<(), StoreError> {
+        let r = sqlx::query("UPDATE snapshots SET path = ? WHERE id = ?")
+            .bind(path)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+        if r.rows_affected() == 0 {
+            return Err(StoreError::NotFound);
+        }
+        Ok(())
+    }
+
+    async fn mark_deleted(&self, id: &str, when: i64) -> Result<(), StoreError> {
+        let r = sqlx::query("UPDATE snapshots SET deleted_at = ? WHERE id = ?")
+            .bind(when)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+        if r.rows_affected() == 0 {
+            return Err(StoreError::NotFound);
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -174,12 +182,11 @@ mod tests {
     async fn insert_get_with_parent_and_remote_uri() {
         let pool = open_in_memory().await.unwrap();
         seed(&pool, "i1").await;
-        insert(&pool, &snap("s1", None, "i1")).await.unwrap();
-        insert(&pool, &snap("s2", Some("s1"), "i1")).await.unwrap();
-        update_remote_uri(&pool, "s2", "s3://bucket/key/s2/")
-            .await
-            .unwrap();
-        let g = get(&pool, "s2").await.unwrap().unwrap();
+        let store = SqliteSnapshotStore::new(pool);
+        store.insert(&snap("s1", None, "i1")).await.unwrap();
+        store.insert(&snap("s2", Some("s1"), "i1")).await.unwrap();
+        store.update_remote_uri("s2", "s3://bucket/key/s2/").await.unwrap();
+        let g = store.get("s2").await.unwrap().unwrap();
         assert_eq!(g.parent_snapshot_id.as_deref(), Some("s1"));
         assert_eq!(g.remote_uri.as_deref(), Some("s3://bucket/key/s2/"));
         assert_eq!(g.kind, SnapshotKind::Manual);
@@ -189,10 +196,11 @@ mod tests {
     async fn list_excludes_deleted() {
         let pool = open_in_memory().await.unwrap();
         seed(&pool, "i1").await;
-        insert(&pool, &snap("s1", None, "i1")).await.unwrap();
-        insert(&pool, &snap("s2", None, "i1")).await.unwrap();
-        mark_deleted(&pool, "s1", 200).await.unwrap();
-        let listed = list_for_instance(&pool, "i1").await.unwrap();
+        let store = SqliteSnapshotStore::new(pool);
+        store.insert(&snap("s1", None, "i1")).await.unwrap();
+        store.insert(&snap("s2", None, "i1")).await.unwrap();
+        store.mark_deleted("s1", 200).await.unwrap();
+        let listed = store.list_for_instance("i1").await.unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].id, "s2");
     }
@@ -201,9 +209,10 @@ mod tests {
     async fn update_path_after_pull() {
         let pool = open_in_memory().await.unwrap();
         seed(&pool, "i1").await;
-        insert(&pool, &snap("s1", None, "i1")).await.unwrap();
-        update_path(&pool, "s1", "/var/cache/s1").await.unwrap();
-        let g = get(&pool, "s1").await.unwrap().unwrap();
+        let store = SqliteSnapshotStore::new(pool);
+        store.insert(&snap("s1", None, "i1")).await.unwrap();
+        store.update_path("s1", "/var/cache/s1").await.unwrap();
+        let g = store.get("s1").await.unwrap().unwrap();
         assert_eq!(g.path, "/var/cache/s1");
     }
 
@@ -211,10 +220,11 @@ mod tests {
     async fn kind_round_trip() {
         let pool = open_in_memory().await.unwrap();
         seed(&pool, "i1").await;
+        let store = SqliteSnapshotStore::new(pool);
         let mut s = snap("s1", None, "i1");
         s.kind = SnapshotKind::Backup;
-        insert(&pool, &s).await.unwrap();
-        let g = get(&pool, "s1").await.unwrap().unwrap();
+        store.insert(&s).await.unwrap();
+        let g = store.get("s1").await.unwrap().unwrap();
         assert_eq!(g.kind, SnapshotKind::Backup);
     }
 }

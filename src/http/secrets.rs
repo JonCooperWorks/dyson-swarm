@@ -158,12 +158,14 @@ mod tests {
             3600,
         ));
         let backup: Arc<dyn BackupSink> = Arc::new(LocalDiskBackupSink::new(cube.clone()));
+        let snapshots_store: Arc<dyn crate::traits::SnapshotStore> =
+            Arc::new(crate::db::snapshots::SqliteSnapshotStore::new(pool));
         let snapshot_svc = Arc::new(SnapshotService::new(
             cube,
             instances_store,
+            snapshots_store,
             backup,
             instance_svc.clone(),
-            pool,
         ));
         let state = AppState {
             secrets: svc,

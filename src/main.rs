@@ -20,7 +20,10 @@ use dyson_warden::{
     proxy::{self, policy_check::InstancePolicy, ProxyService},
     secrets::SecretsService,
     snapshot::SnapshotService,
-    traits::{BackupSink, CubeClient, HealthProber, InstanceStore, SecretStore, TokenStore},
+    traits::{
+        AuditStore, BackupSink, CubeClient, HealthProber, InstanceStore, PolicyStore, SecretStore,
+        SnapshotStore, TokenStore,
+    },
     ttl,
 };
 
@@ -105,6 +108,12 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     let instances_store: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(pool.clone()));
     let secrets_store: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
     let tokens_store: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(pool.clone()));
+    let snapshots_store: Arc<dyn SnapshotStore> =
+        Arc::new(db::snapshots::SqliteSnapshotStore::new(pool.clone()));
+    let policies_store: Arc<dyn PolicyStore> =
+        Arc::new(db::policies::SqlitePolicyStore::new(pool.clone()));
+    let audit_store: Arc<dyn AuditStore> =
+        Arc::new(db::audit::SqliteAuditStore::new(pool.clone()));
 
     let proxy_base = format!("http://{}/llm", cfg.bind);
     let instance_svc = Arc::new(InstanceService::new(
@@ -137,9 +146,9 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     let snapshot_svc = Arc::new(SnapshotService::new(
         cube,
         instances_store.clone(),
+        snapshots_store,
         backup_sink,
         instance_svc.clone(),
-        pool.clone(),
     ));
 
     let auth = if dangerous_no_auth {
@@ -177,8 +186,9 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         rps_limit: cfg.default_policy.rps_limit,
     };
     let proxy_svc = match ProxyService::new(
-        pool.clone(),
         tokens_store.clone(),
+        policies_store,
+        audit_store,
         cfg.providers.clone(),
         default_policy,
     ) {

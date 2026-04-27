@@ -39,8 +39,8 @@ use dyson_warden::{
     secrets::SecretsService,
     snapshot::SnapshotService,
     traits::{
-        BackupSink, CubeClient, HealthProber, InstanceRow, InstanceStore, ProbeResult, SecretStore,
-        TokenStore,
+        AuditStore, BackupSink, CubeClient, HealthProber, InstanceRow, InstanceStore, PolicyStore,
+        ProbeResult, SecretStore, SnapshotStore, TokenStore,
     },
 };
 
@@ -189,12 +189,18 @@ async fn full_walkthrough() {
     ));
     let secrets_svc = Arc::new(SecretsService::new(secrets_store.clone()));
     let backup: Arc<dyn BackupSink> = Arc::new(LocalDiskBackupSink::new(cube.clone()));
+    let snapshots_store: Arc<dyn SnapshotStore> =
+        Arc::new(dyson_warden::db::snapshots::SqliteSnapshotStore::new(pool.clone()));
+    let policies_store: Arc<dyn PolicyStore> =
+        Arc::new(dyson_warden::db::policies::SqlitePolicyStore::new(pool.clone()));
+    let audit_store: Arc<dyn AuditStore> =
+        Arc::new(dyson_warden::db::audit::SqliteAuditStore::new(pool.clone()));
     let snapshot_svc = Arc::new(SnapshotService::new(
         cube.clone(),
         instances_store.clone(),
+        snapshots_store,
         backup,
         instance_svc.clone(),
-        pool.clone(),
     ));
 
     // Default policy: permissive on providers, restrictive on models so the
@@ -219,8 +225,9 @@ async fn full_walkthrough() {
     };
     let proxy_svc = Arc::new(
         ProxyService::new(
-            pool.clone(),
             tokens_store.clone(),
+            policies_store,
+            audit_store,
             providers,
             default_policy,
         )

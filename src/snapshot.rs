@@ -8,20 +8,20 @@
 use std::sync::Arc;
 
 use serde::Serialize;
-use sqlx::SqlitePool;
 
-use crate::db::snapshots as snap_db;
 use crate::error::WardenError;
 use crate::instance::{CreatedInstance, InstanceService, RestoreRequest};
-use crate::traits::{BackupSink, CubeClient, InstanceStore, SnapshotKind, SnapshotRow};
+use crate::traits::{
+    BackupSink, CubeClient, InstanceStore, SnapshotKind, SnapshotRow, SnapshotStore,
+};
 
 #[derive(Clone)]
 pub struct SnapshotService {
     cube: Arc<dyn CubeClient>,
     instances: Arc<dyn InstanceStore>,
+    snapshots: Arc<dyn SnapshotStore>,
     backup: Arc<dyn BackupSink>,
     instance_svc: Arc<InstanceService>,
-    pool: SqlitePool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -57,16 +57,16 @@ impl SnapshotService {
     pub fn new(
         cube: Arc<dyn CubeClient>,
         instances: Arc<dyn InstanceStore>,
+        snapshots: Arc<dyn SnapshotStore>,
         backup: Arc<dyn BackupSink>,
         instance_svc: Arc<InstanceService>,
-        pool: SqlitePool,
     ) -> Self {
         Self {
             cube,
             instances,
+            snapshots,
             backup,
             instance_svc,
-            pool,
         }
     }
 
@@ -83,7 +83,7 @@ impl SnapshotService {
             .snapshot_with_kind(instance_id, SnapshotKind::Backup, None)
             .await?;
         if let Some(uri) = self.backup.promote(&row).await? {
-            snap_db::update_remote_uri(&self.pool, &row.id, &uri).await?;
+            self.snapshots.update_remote_uri(&row.id, &uri).await?;
             row.remote_uri = Some(uri);
         }
         Ok(row)
@@ -94,13 +94,13 @@ impl SnapshotService {
     /// return the updated row. Idempotent — a sink whose `pull` is a no-op
     /// (the local sink) will simply return the row unchanged.
     pub async fn pull(&self, snapshot_id: &str) -> Result<SnapshotRow, WardenError> {
-        let mut row = snap_db::get(&self.pool, snapshot_id)
+        let mut row = self.snapshots.get(snapshot_id)
             .await?
             .ok_or(WardenError::NotFound)?;
         let new_path = self.backup.pull(&row).await?;
         let new_path_str = new_path.display().to_string();
         if new_path_str != row.path {
-            snap_db::update_path(&self.pool, &row.id, &new_path_str).await?;
+            self.snapshots.update_path(&row.id, &new_path_str).await?;
             row.path = new_path_str;
         }
         Ok(row)
@@ -116,7 +116,7 @@ impl SnapshotService {
         ttl_seconds: Option<i64>,
         env: std::collections::BTreeMap<String, String>,
     ) -> Result<CreatedInstance, WardenError> {
-        let mut row = snap_db::get(&self.pool, snapshot_id)
+        let mut row = self.snapshots.get(snapshot_id)
             .await?
             .ok_or(WardenError::NotFound)?;
 
@@ -127,7 +127,7 @@ impl SnapshotService {
         if needs_pull {
             let new_path = self.backup.pull(&row).await?;
             let new_path_str = new_path.display().to_string();
-            snap_db::update_path(&self.pool, &row.id, &new_path_str).await?;
+            self.snapshots.update_path(&row.id, &new_path_str).await?;
             row.path = new_path_str;
         }
 
@@ -178,7 +178,7 @@ impl SnapshotService {
             created_at: now_secs(),
             deleted_at: None,
         };
-        snap_db::insert(&self.pool, &row).await?;
+        self.snapshots.insert(&row).await?;
         Ok(row)
     }
 }
@@ -202,6 +202,7 @@ mod tests {
     use crate::db::instances::SqlxInstanceStore;
     use crate::db::open_in_memory;
     use crate::db::secrets::SqlxSecretStore;
+    use crate::db::snapshots::SqliteSnapshotStore;
     use crate::db::tokens::SqlxTokenStore;
     use crate::error::CubeError;
     use crate::instance::CreateRequest;
@@ -270,13 +271,14 @@ mod tests {
         Arc<MockCube>,
         Arc<dyn SecretStore>,
         Arc<dyn InstanceStore>,
-        SqlitePool,
+        Arc<dyn SnapshotStore>,
     ) {
         let pool = open_in_memory().await.unwrap();
         let cube = MockCube::new();
         let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(pool.clone()));
         let secrets: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
         let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(pool.clone()));
+        let snaps: Arc<dyn SnapshotStore> = Arc::new(SqliteSnapshotStore::new(pool.clone()));
         let isvc = Arc::new(InstanceService::new(
             cube.clone(),
             instances.clone(),
@@ -286,13 +288,19 @@ mod tests {
             3600,
         ));
         let sink: Arc<dyn BackupSink> = Arc::new(LocalDiskBackupSink::new(cube.clone()));
-        let svc = SnapshotService::new(cube.clone(), instances.clone(), sink, isvc.clone(), pool.clone());
-        (svc, isvc, cube, secrets, instances, pool)
+        let svc = SnapshotService::new(
+            cube.clone(),
+            instances.clone(),
+            snaps.clone(),
+            sink,
+            isvc.clone(),
+        );
+        (svc, isvc, cube, secrets, instances, snaps)
     }
 
     #[tokio::test]
     async fn snapshot_writes_manual_row_with_cube_id() {
-        let (svc, isvc, _cube, _secrets, _instances, pool) = build().await;
+        let (svc, isvc, _cube, _secrets, _instances, snaps) = build().await;
         let created = isvc
             .create(CreateRequest {
                 template_id: "t".into(),
@@ -305,14 +313,14 @@ mod tests {
         assert!(snap.id.starts_with("snap-sb-1-"));
         assert_eq!(snap.kind, SnapshotKind::Manual);
         assert_eq!(snap.source_instance_id, created.id);
-        let from_db = snap_db::get(&pool, &snap.id).await.unwrap().unwrap();
+        let from_db = snaps.get(&snap.id).await.unwrap().unwrap();
         assert_eq!(from_db.kind, SnapshotKind::Manual);
         assert_eq!(from_db.path, snap.path);
     }
 
     #[tokio::test]
     async fn backup_writes_backup_row_local_sink_no_remote_uri() {
-        let (svc, isvc, _cube, _secrets, _instances, pool) = build().await;
+        let (svc, isvc, _cube, _secrets, _instances, snaps) = build().await;
         let created = isvc
             .create(CreateRequest {
                 template_id: "t".into(),
@@ -325,14 +333,14 @@ mod tests {
         assert_eq!(snap.kind, SnapshotKind::Backup);
         // Local sink: promote returns None, so no remote_uri.
         assert!(snap.remote_uri.is_none());
-        let from_db = snap_db::get(&pool, &snap.id).await.unwrap().unwrap();
+        let from_db = snaps.get(&snap.id).await.unwrap().unwrap();
         assert_eq!(from_db.kind, SnapshotKind::Backup);
         assert!(from_db.remote_uri.is_none());
     }
 
     #[tokio::test]
     async fn restore_creates_new_instance_with_carried_secrets() {
-        let (svc, isvc, _cube, secrets, _instances, _pool) = build().await;
+        let (svc, isvc, _cube, secrets, _instances, _snaps) = build().await;
         let src = isvc
             .create(CreateRequest {
                 template_id: "t".into(),

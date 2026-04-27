@@ -6,23 +6,16 @@
 //! `EnforceContext` to bundle them. The proxy router wires the async loads
 //! that materialise the context, then this function decides yes/no.
 
-use serde::Serialize;
-
 use crate::policy::{
     model_allowed, provider_allowed, within_daily_token_budget, within_monthly_usd_budget,
     within_rps, PolicyDenial,
 };
 use crate::traits::TokenRecord;
 
-/// Per-instance policy as stored in `instance_policies`.
-#[derive(Debug, Clone, Serialize)]
-pub struct InstancePolicy {
-    pub allowed_providers: Vec<String>,
-    pub allowed_models: Vec<String>,
-    pub daily_token_budget: Option<u64>,
-    pub monthly_usd_budget: Option<f64>,
-    pub rps_limit: Option<u32>,
-}
+/// Re-export of the canonical policy record. Predates the multi-tenant
+/// schema; the trait-level type now lives in [`crate::traits`] so
+/// [`crate::traits::PolicyStore`] impls don't need to convert.
+pub use crate::traits::PolicyRecord as InstancePolicy;
 
 /// Live counters the caller pre-computes from `llm_audit` (and an in-memory
 /// rate window). Passing them in keeps this function pure and trivially

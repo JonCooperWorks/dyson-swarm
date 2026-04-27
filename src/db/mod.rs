@@ -21,7 +21,7 @@ pub mod secrets;
 pub mod snapshots;
 pub mod tokens;
 
-pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations/sqlite");
 
 pub async fn open(path: &Path) -> Result<SqlitePool, sqlx::Error> {
     if let Some(parent) = path.parent() {

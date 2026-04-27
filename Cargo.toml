@@ -1,8 +1,8 @@
 [package]
 name = "dyson-warden"
 version = "0.1.0"
-edition = "2021"
-rust-version = "1.94"
+edition = "2024"
+rust-version = "1.85"
 description = "Orchestration server for Dyson agents in CubeSandbox MicroVMs"
 license = "MIT"
 publish = false

@@ -144,6 +144,10 @@ async fn forward(state: DispatchState, instance_id: String, req: Request) -> Res
 
     // 3. Build upstream URL.  No path manipulation needed — host-based
     //    routing means the request path IS the path the sandbox sees.
+    //    CubeProxy expects the e2b-style hostname `<port>-<sandbox_id>.<domain>`
+    //    so the leading port label tells nginx which container port to
+    //    map to. Dyson always listens on 80 inside its VM, matching the
+    //    template's `--expose-port 80 --probe 80`.
     let method = req.method().clone();
     let (parts, body) = req.into_parts();
     let path = parts.uri.path();
@@ -151,8 +155,13 @@ async fn forward(state: DispatchState, instance_id: String, req: Request) -> Res
         Some(q) if !q.is_empty() => format!("{path}?{q}"),
         _ => path.to_string(),
     };
+    let cube_port = std::env::var("WARDEN_CUBE_INTERNAL_PORT")
+        .ok()
+        .and_then(|p| p.parse::<u16>().ok())
+        .unwrap_or(80);
     let upstream_url = format!(
-        "https://{}.{}{}",
+        "https://{}-{}.{}{}",
+        cube_port,
         sandbox_id,
         state.app.sandbox_domain.trim_end_matches('/'),
         path_with_query
@@ -241,11 +250,33 @@ fn is_hop_by_hop(name: &HeaderName) -> bool {
 }
 
 /// Build the shared reqwest::Client used by the dyson proxy.
+///
+/// CubeSandbox's cubeproxy serves `*.cube.app` with TLS issued by a
+/// per-host mkcert root that isn't in reqwest's webpki bundle. Set
+/// `WARDEN_CUBE_ROOT_CA` to the absolute path of that PEM (the
+/// installer drops it at `/etc/dyson-warden/cube-root-ca.pem`) and
+/// the proxy will trust it as an additional root. Verification stays
+/// on; the only thing changing is which CAs the client treats as
+/// authoritative for cubeproxy's hostnames.
 pub fn build_client() -> Result<reqwest::Client, reqwest::Error> {
-    reqwest::Client::builder()
+    let mut b = reqwest::Client::builder()
         .timeout(Duration::from_secs(30 * 60))
-        .pool_idle_timeout(Duration::from_secs(60))
-        .build()
+        .pool_idle_timeout(Duration::from_secs(60));
+    if let Ok(path) = std::env::var("WARDEN_CUBE_ROOT_CA")
+        && !path.is_empty()
+    {
+        match std::fs::read(&path) {
+            Ok(pem) => match reqwest::Certificate::from_pem(&pem) {
+                Ok(cert) => {
+                    tracing::info!(path = %path, "dyson_proxy: trusting cube root CA");
+                    b = b.add_root_certificate(cert);
+                }
+                Err(e) => tracing::error!(path = %path, error = %e, "WARDEN_CUBE_ROOT_CA: failed to parse PEM"),
+            },
+            Err(e) => tracing::error!(path = %path, error = %e, "WARDEN_CUBE_ROOT_CA: failed to read"),
+        }
+    }
+    b.build()
 }
 
 #[cfg(test)]

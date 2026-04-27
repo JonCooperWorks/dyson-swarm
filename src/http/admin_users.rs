@@ -18,12 +18,57 @@ use crate::traits::{UserRow, UserStatus};
 
 pub fn router(state: AppState) -> Router {
     Router::new()
-        .route("/v1/admin/users", get(list_users))
+        .route("/v1/admin/users", get(list_users).post(create_user))
         .route("/v1/admin/users/:id/activate", post(activate))
         .route("/v1/admin/users/:id/suspend", post(suspend))
         .route("/v1/admin/users/:id/keys", post(mint_key))
         .route("/v1/admin/users/keys/:token", delete(revoke_key))
         .with_state(state)
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateUserBody {
+    /// Stable identity string. With OIDC this is the `sub` claim; for
+    /// admin-bootstrapped users it can be anything unique (e.g. an
+    /// email or a label).
+    subject: String,
+    #[serde(default)]
+    email: Option<String>,
+    #[serde(default)]
+    display_name: Option<String>,
+    /// Skip the inactive->active step when true. Equivalent to posting
+    /// `/v1/admin/users/:id/activate` immediately after.
+    #[serde(default)]
+    activate: bool,
+}
+
+async fn create_user(
+    State(state): State<AppState>,
+    Json(body): Json<CreateUserBody>,
+) -> Result<(StatusCode, Json<UserView>), StatusCode> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let initial_status = if body.activate {
+        UserStatus::Active
+    } else {
+        UserStatus::Inactive
+    };
+    let row = UserRow {
+        id: uuid::Uuid::new_v4().simple().to_string(),
+        subject: body.subject,
+        email: body.email,
+        display_name: body.display_name,
+        status: initial_status,
+        created_at: now,
+        activated_at: if body.activate { Some(now) } else { None },
+        last_seen_at: None,
+    };
+    match state.users.create(row.clone()).await {
+        Ok(()) => Ok((StatusCode::CREATED, Json(UserView::from(row)))),
+        Err(e) => Err(store_err_to_status(e)),
+    }
 }
 
 #[derive(Debug, Serialize)]

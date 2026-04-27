@@ -6,6 +6,7 @@
 //! No retry loops anywhere else in the codebase; this is the single seam
 //! where Cube flakiness is absorbed.
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -58,8 +59,12 @@ impl HttpCubeClient {
 
 #[derive(Debug, Serialize)]
 struct CreateBody<'a> {
+    #[serde(rename = "templateID")]
     template_id: &'a str,
-    env: &'a std::collections::BTreeMap<String, String>,
+    /// Renamed to envVars to match CubeAPI's E2B-style schema. Skipped
+    /// when empty so the validator doesn't trip on a `{}` payload.
+    #[serde(rename = "envVars", skip_serializing_if = "BTreeMap::is_empty")]
+    env: &'a BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Option::is_none", rename = "fromSnapshot")]
     from_snapshot: Option<FromSnapshot<'a>>,
 }
@@ -73,7 +78,11 @@ struct FromSnapshot<'a> {
 struct CreateResp {
     #[serde(rename = "sandboxID")]
     sandbox_id: String,
-    #[serde(rename = "hostIP")]
+    /// CubeAPI's create response doesn't carry hostIP (single-host
+    /// model). Snapshot create still does — that's the host the snapshot
+    /// blob lives on, supplied back on delete. Default here keeps the
+    /// SandboxInfo shape stable.
+    #[serde(rename = "hostIP", default)]
     host_ip: String,
 }
 
@@ -87,7 +96,7 @@ struct SnapshotResp {
     #[serde(rename = "snapshotID")]
     snapshot_id: String,
     path: String,
-    #[serde(rename = "hostIP")]
+    #[serde(rename = "hostIP", default)]
     host_ip: String,
 }
 
@@ -103,7 +112,7 @@ impl CubeClient for HttpCubeClient {
             env: &args.env,
             from_snapshot: from_snap_path.as_deref().map(|path| FromSnapshot { path }),
         };
-        let url = self.url("/v1/sandboxes");
+        let url = self.url("/sandboxes");
         let resp: CreateResp = with_retry(MAX_ATTEMPTS, || async {
             send_json(&self.http, reqwest::Method::POST, &url, &self.api_key, Some(&body)).await
         })
@@ -117,7 +126,7 @@ impl CubeClient for HttpCubeClient {
     }
 
     async fn destroy_sandbox(&self, sandbox_id: &str) -> Result<(), CubeError> {
-        let url = self.url(&format!("/v1/sandboxes/{sandbox_id}"));
+        let url = self.url(&format!("/sandboxes/{sandbox_id}"));
         let _: serde_json::Value = with_retry(MAX_ATTEMPTS, || async {
             send_json::<()>(&self.http, reqwest::Method::DELETE, &url, &self.api_key, None).await
         })
@@ -130,7 +139,7 @@ impl CubeClient for HttpCubeClient {
         sandbox_id: &str,
         name: &str,
     ) -> Result<SnapshotInfo, CubeError> {
-        let url = self.url(&format!("/v1/sandboxes/{sandbox_id}/snapshots"));
+        let url = self.url(&format!("/sandboxes/{sandbox_id}/snapshots"));
         let body = SnapshotBody { name };
         let resp: SnapshotResp = with_retry(MAX_ATTEMPTS, || async {
             send_json(&self.http, reqwest::Method::POST, &url, &self.api_key, Some(&body)).await
@@ -144,7 +153,10 @@ impl CubeClient for HttpCubeClient {
     }
 
     async fn delete_snapshot(&self, snapshot_id: &str, host_ip: &str) -> Result<(), CubeError> {
-        let url = self.url(&format!("/v1/snapshots/{snapshot_id}?hostIP={host_ip}"));
+        // The fork's delete route is /sandboxes/snapshots/{snapshotID}
+        // with hostIP as a required query string — single-host installs
+        // use whatever host_ip the snapshot create response carried.
+        let url = self.url(&format!("/sandboxes/snapshots/{snapshot_id}?hostIP={host_ip}"));
         let _: serde_json::Value = with_retry(MAX_ATTEMPTS, || async {
             send_json::<()>(&self.http, reqwest::Method::DELETE, &url, &self.api_key, None).await
         })

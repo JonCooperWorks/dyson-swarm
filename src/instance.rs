@@ -31,6 +31,11 @@ pub const SHARED_PROVIDER: &str = "*";
 pub const ENV_PROXY_URL: &str = "WARDEN_PROXY_URL";
 pub const ENV_PROXY_TOKEN: &str = "WARDEN_PROXY_TOKEN";
 pub const ENV_INSTANCE_ID: &str = "WARDEN_INSTANCE_ID";
+/// Bearer token the agent's HTTP server must accept. The host-based
+/// dyson_proxy stamps `Authorization: Bearer <bearer_token>` on every
+/// forwarded request — without this env, the agent has no way to know
+/// the secret it's being challenged with.
+pub const ENV_BEARER_TOKEN: &str = "WARDEN_BEARER_TOKEN";
 /// Human-readable label, e.g. "PR reviewer for foo/bar".
 pub const ENV_NAME: &str = "WARDEN_NAME";
 /// Free-text mission statement. The agent reads this on first boot to
@@ -115,6 +120,7 @@ impl InstanceService {
         managed.insert(ENV_PROXY_URL.into(), self.proxy_base.clone());
         managed.insert(ENV_PROXY_TOKEN.into(), proxy_token.clone());
         managed.insert(ENV_INSTANCE_ID.into(), id.clone());
+        managed.insert(ENV_BEARER_TOKEN.into(), bearer.clone());
         // Identity envelope. The agent reads these on first boot to seed
         // its own self-knowledge files (SOUL.md and friends in Dyson's
         // case); subsequent edits to the warden row don't propagate to a
@@ -286,6 +292,7 @@ impl InstanceService {
         managed.insert(ENV_PROXY_URL.into(), self.proxy_base.clone());
         managed.insert(ENV_PROXY_TOKEN.into(), proxy_token.clone());
         managed.insert(ENV_INSTANCE_ID.into(), id.clone());
+        managed.insert(ENV_BEARER_TOKEN.into(), bearer.clone());
         // Identity envelope. Re-injected on restore so a fresh sandbox
         // (no SOUL.md) can seed itself; an inherited image with prior
         // self-knowledge will simply ignore them.

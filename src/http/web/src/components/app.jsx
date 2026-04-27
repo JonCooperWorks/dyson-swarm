@@ -11,6 +11,7 @@ import { useAppState } from '../hooks/useAppState.js';
 import { setView, parseHashView } from '../store/app.js';
 import { TopBar } from './topbar.jsx';
 import { InstancesView } from './instances.jsx';
+import { AdminView } from './admin.jsx';
 
 export function App() {
   const view = useAppState(s => s.meta.view);
@@ -40,13 +41,7 @@ function renderView(view) {
     case 'instance':
       return <InstancesView view={view}/>;
     case 'admin':
-      // Phase 5.
-      return (
-        <main className="splash">
-          <h1>admin</h1>
-          <p className="muted">phase 5 — users + proxy-token revocation lands here.</p>
-        </main>
-      );
+      return <AdminView/>;
     default:
       return <InstancesView view={{ name: 'instances', id: null }}/>;
   }

@@ -10,10 +10,15 @@ import { useApi } from '../hooks/useApi.jsx';
 
 export function TopBar({ view }) {
   const { auth } = useApi();
+  const isAdmin = view?.name === 'admin';
   return (
     <header className="topbar">
       <div className="topbar-brand">warden</div>
-      <div className="topbar-view">{viewLabel(view)}</div>
+      <nav className="topbar-nav">
+        <a className={!isAdmin ? 'active' : ''} href="#/">instances</a>
+        <a className={isAdmin ? 'active' : ''} href="#/admin">admin</a>
+        <span className="topbar-view">· {viewLabel(view)}</span>
+      </nav>
       <div className="topbar-actions">
         {auth.mode === 'oidc' ? (
           <button className="btn btn-ghost" onClick={auth.logout}>sign out</button>

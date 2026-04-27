@@ -150,7 +150,7 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         snapshots: snapshot_svc,
         sandbox_domain: cfg.cube.sandbox_domain.clone(),
     };
-    let app = http::router(app_state, auth);
+    let app = http::router(app_state, auth, axum::Router::new());
 
     let listener = match tokio::net::TcpListener::bind(&cfg.bind).await {
         Ok(l) => l,

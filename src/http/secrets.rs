@@ -249,6 +249,7 @@ mod tests {
             users: users_store,
             sandbox_domain: "cube.test".into(),
             auth_config: Arc::new(crate::http::auth_config::AuthConfig::None),
+            dyson_http: crate::http::dyson_proxy::build_client().expect("dyson http client init"),
         };
         (state, raw, user_auth, user_id)
     }

@@ -151,6 +151,7 @@ mod tests {
             tokens: tokens_store.clone(),
             sandbox_domain: "cube.test".into(),
             auth_config: Arc::new(crate::http::auth_config::AuthConfig::None),
+            dyson_http: crate::http::dyson_proxy::build_client().expect("dyson http client init"),
         };
         (state, tokens_store, token)
     }

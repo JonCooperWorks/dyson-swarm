@@ -15,6 +15,7 @@
 pub mod admin_users;
 pub mod assets;
 pub mod auth_config;
+pub mod dyson_proxy;
 pub mod healthz;
 pub mod instances;
 pub mod proxy_admin;
@@ -47,6 +48,9 @@ pub struct AppState {
     /// [`crate::config::Config`] at startup; the SPA hits this endpoint
     /// before mounting React to decide whether to start a PKCE flow.
     pub auth_config: Arc<auth_config::AuthConfig>,
+    /// Shared `reqwest::Client` for the `/d/:id/*` reverse proxy.  One
+    /// per process so connection pooling survives across requests.
+    pub dyson_http: reqwest::Client,
 }
 
 /// Build the public `Router`.
@@ -76,10 +80,13 @@ pub fn router(
         .layer(middleware::from_fn_with_state(auth.clone(), admin_bearer));
 
     // Tenant routes — every request resolves to a CallerIdentity.
+    // The Dyson reverse proxy at /d/:id/* is also tenant-scoped; we
+    // owner-check the instance against the OIDC user before forwarding.
     let tenant = Router::new()
         .merge(instances::router(state.clone()))
         .merge(snapshots::router(state.clone()))
         .merge(secrets::router(state.clone()))
+        .merge(dyson_proxy::router(state.clone()))
         .layer(middleware::from_fn_with_state(user_auth, user_middleware));
 
     // Static assets (SPA bundle) are merged last so the API routes win
@@ -179,6 +186,7 @@ mod tests {
             users: users_store.clone(),
             sandbox_domain: "cube.test".into(),
             auth_config: Arc::new(auth_config::AuthConfig::None),
+            dyson_http: dyson_proxy::build_client().expect("dyson http client init"),
         };
         (state, users_store)
     }

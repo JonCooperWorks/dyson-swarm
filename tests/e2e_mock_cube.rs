@@ -250,6 +250,7 @@ async fn full_walkthrough() {
         users: users_store,
         sandbox_domain: "cube.test".into(),
         auth_config: std::sync::Arc::new(http::auth_config::AuthConfig::None),
+        dyson_http: http::dyson_proxy::build_client().expect("dyson http client init"),
     };
     let app = http::router(
         app_state,

@@ -15,9 +15,13 @@
 //! sentinel user id [`SYSTEM_KEY_ID`] which gets the same treatment —
 //! one keypair, separate from any human user.
 //!
-//! Layout on disk: `<keys_dir>/<user_id>.age`, file mode 0400.  Keys
-//! are created lazily on first access via [`CipherDirectory::for_user`]
-//! so a user's row exists before their key file does, and so destroyed
+//! Layout on disk: `<keys_dir>/<user_id>.age`, file mode 0600 (owner
+//! read+write, no group/world).  We chose 0600 over the stricter 0400
+//! to allow in-place rotation without permission gymnastics — a
+//! process that owns the file can `fchmod` it anyway, so the "no
+//! write" property of 0400 is mostly theatrical.  Keys are created
+//! lazily on first access via [`CipherDirectory::for_user`] so a
+//! user's row exists before their key file does, and so destroyed
 //! users leave no key behind.
 //!
 //! ## Why two traits

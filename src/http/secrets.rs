@@ -7,7 +7,7 @@
 //!
 //! GET deliberately strips the values: the SPA only needs the names to
 //! render a manage-secrets editor.  An operator who actually needs to
-//! read a value back has SQL access (warden's threat model trusts ops
+//! read a value back has SQL access (swarm's threat model trusts ops
 //! with shell on the host) — round-tripping plaintext through HTTP
 //! would broaden the attack surface for nothing.
 
@@ -97,7 +97,7 @@ async fn ensure_owns_instance(
 ) -> Result<(), StatusCode> {
     match state.instances.get(user_id, instance_id).await {
         Ok(_) => Ok(()),
-        Err(crate::error::WardenError::NotFound) => Err(StatusCode::NOT_FOUND),
+        Err(crate::error::SwarmError::NotFound) => Err(StatusCode::NOT_FOUND),
         Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
 }

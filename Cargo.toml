@@ -1,5 +1,5 @@
 [package]
-name = "dyson-warden"
+name = "dyson-swarm"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
@@ -8,11 +8,11 @@ license = "MIT"
 publish = false
 
 [lib]
-name = "dyson_warden"
+name = "dyson_swarm"
 path = "src/lib.rs"
 
 [[bin]]
-name = "warden"
+name = "swarm"
 path = "src/main.rs"
 
 [dependencies]
@@ -33,7 +33,7 @@ async-trait = "0.1"
 futures = { version = "0.3", default-features = false, features = ["std"] }
 jsonwebtoken = { version = "9", default-features = false }
 age = { version = "0.10", default-features = false, features = ["armor"] }
-# argon2id for the per-instance configure secret (Stage 8) — warden
+# argon2id for the per-instance configure secret (Stage 8) — swarm
 # generates a plaintext on instance create, sends it to dyson on every
 # /api/admin/configure call; dyson stores the argon2id hash on its
 # disk on first call (TOFU) and verifies on subsequent calls.  Same

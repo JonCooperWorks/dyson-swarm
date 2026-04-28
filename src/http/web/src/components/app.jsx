@@ -1,4 +1,4 @@
-/* warden — top-level shell.
+/* swarm — top-level shell.
  *
  * Owns the hash-router subscription and renders the right view for
  * the current hash.  Hash routing (rather than HTML5 History) keeps

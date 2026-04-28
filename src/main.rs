@@ -6,7 +6,7 @@ use std::time::Duration;
 use clap::Parser;
 use reqwest::Method;
 
-use dyson_warden::{
+use dyson_swarm::{
     api_client::ApiClient,
     auth::AuthState,
     backup::{local::LocalDiskBackupSink, s3::S3BackupSink},
@@ -30,7 +30,7 @@ use dyson_warden::{
 
 fn collect_env() -> BTreeMap<String, String> {
     std::env::vars()
-        .filter(|(k, _)| k.starts_with("WARDEN_"))
+        .filter(|(k, _)| k.starts_with("SWARM_"))
         .collect()
 }
 
@@ -108,16 +108,16 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     };
     let instances_store: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(pool.clone()));
     let secrets_store: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
-    let user_secrets_store: Arc<dyn dyson_warden::traits::UserSecretStore> =
-        Arc::new(dyson_warden::db::secrets::SqlxUserSecretStore::new(pool.clone()));
-    let system_secrets_store: Arc<dyn dyson_warden::traits::SystemSecretStore> =
-        Arc::new(dyson_warden::db::secrets::SqlxSystemSecretStore::new(pool.clone()));
+    let user_secrets_store: Arc<dyn dyson_swarm::traits::UserSecretStore> =
+        Arc::new(dyson_swarm::db::secrets::SqlxUserSecretStore::new(pool.clone()));
+    let system_secrets_store: Arc<dyn dyson_swarm::traits::SystemSecretStore> =
+        Arc::new(dyson_swarm::db::secrets::SqlxSystemSecretStore::new(pool.clone()));
     let tokens_store: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(pool.clone()));
 
     // Per-user envelope encryption directory.  Lazy-creates an age
     // identity per user inside `keys_dir` on first secret seal/open.
-    let cipher_dir: Arc<dyn dyson_warden::envelope::CipherDirectory> =
-        match dyson_warden::envelope::AgeCipherDirectory::new(cfg.resolved_keys_dir()) {
+    let cipher_dir: Arc<dyn dyson_swarm::envelope::CipherDirectory> =
+        match dyson_swarm::envelope::AgeCipherDirectory::new(cfg.resolved_keys_dir()) {
             Ok(d) => Arc::new(d),
             Err(err) => {
                 tracing::error!(error = %err, "envelope key directory init failed");
@@ -133,7 +133,7 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     let users_store: Arc<dyn UserStore> =
         Arc::new(db::users::SqlxUserStore::new(pool.clone(), cipher_dir.clone()));
 
-    // Dyson agents inside cube sandboxes can't reach warden's bind
+    // Dyson agents inside cube sandboxes can't reach swarm's bind
     // (which is loopback 127.0.0.1:8080 by design — Caddy is the only
     // public-facing listener).  Cube's default outbound policy also
     // blocks RFC1918 + CGNAT (`100.64.0.0/10`, the tailnet range), so
@@ -159,11 +159,11 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         cfg.default_ttl_seconds,
     );
     let secrets_svc = Arc::new(SecretsService::new(secrets_store, cipher_dir.clone()));
-    let user_secrets_svc = Arc::new(dyson_warden::secrets::UserSecretsService::new(
+    let user_secrets_svc = Arc::new(dyson_swarm::secrets::UserSecretsService::new(
         user_secrets_store,
         cipher_dir.clone(),
     ));
-    let system_secrets_svc = Arc::new(dyson_warden::secrets::SystemSecretsService::new(
+    let system_secrets_svc = Arc::new(dyson_swarm::secrets::SystemSecretsService::new(
         system_secrets_store,
         cipher_dir.clone(),
     ));
@@ -171,12 +171,12 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     // Stage 8: dyson runtime reconfigurer.  Pushes
     // {name, task, models} into the sandbox's
     // /api/admin/configure after create/restore/edit.  Only set
-    // when warden has both a hostname (so dyson is reachable at
+    // when swarm has both a hostname (so dyson is reachable at
     // all) and a sandbox_domain (cubeproxy is the dispatch
     // target).  We thread it into InstanceService so create()
     // and restore() both push automatically.
-    let reconfigurer: Option<Arc<dyn dyson_warden::instance::DysonReconfigurer>> =
-        match dyson_warden::dyson_reconfig::DysonReconfigurerHttp::new(
+    let reconfigurer: Option<Arc<dyn dyson_swarm::instance::DysonReconfigurer>> =
+        match dyson_swarm::dyson_reconfig::DysonReconfigurerHttp::new(
             cfg.cube.sandbox_domain.clone(),
             system_secrets_svc.clone(),
         ) {
@@ -272,9 +272,9 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     // is missing) the proxy falls back to the global
     // `[providers.openrouter].api_key`.  Constructed up front so both
     // the proxy and the admin endpoints share one resolver.
-    let or_provisioning: Option<Arc<dyn dyson_warden::openrouter::Provisioning>> =
+    let or_provisioning: Option<Arc<dyn dyson_swarm::openrouter::Provisioning>> =
         match resolve_or_provisioning_async(&cfg, system_secrets_svc.as_ref()).await {
-            Ok(Some(client)) => Some(Arc::new(client) as Arc<dyn dyson_warden::openrouter::Provisioning>),
+            Ok(Some(client)) => Some(Arc::new(client) as Arc<dyn dyson_swarm::openrouter::Provisioning>),
             Ok(None) => None,
             Err(err) => {
                 tracing::error!(error = %err, "openrouter provisioning init failed");
@@ -282,7 +282,7 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
             }
         };
     let user_or_keys = or_provisioning.as_ref().map(|prov| {
-        Arc::new(dyson_warden::openrouter::UserOrKeyResolver::new(
+        Arc::new(dyson_swarm::openrouter::UserOrKeyResolver::new(
             users_store.clone(),
             user_secrets_svc.clone(),
             prov.clone(),
@@ -294,7 +294,7 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     // [providers.*] config at startup; the system_secrets value wins
     // when set, the TOML value remains as a fallback for un-migrated
     // deployments.  Read once at startup — rotating an api key
-    // requires a warden restart, which is fine for v1.
+    // requires a swarm restart, which is fine for v1.
     let providers_resolved = match overlay_provider_keys(
         cfg.providers.clone(),
         system_secrets_svc.as_ref(),
@@ -391,7 +391,7 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    tracing::info!(bind = %cfg.bind, db = %cfg.db_path.display(), "warden started");
+    tracing::info!(bind = %cfg.bind, db = %cfg.db_path.display(), "swarm started");
 
     let server = axum::serve(listener, app)
         .with_graceful_shutdown(async {
@@ -402,7 +402,7 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    tracing::info!("warden stopped");
+    tracing::info!("swarm stopped");
     ExitCode::SUCCESS
 }
 
@@ -413,10 +413,10 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
 ///
 /// Naming convention is fixed: `provider.<name>.api_key` (e.g.
 /// `provider.openrouter.api_key`).  Operators set these via
-/// `warden secrets system-set provider.openrouter.api_key <value>`.
+/// `swarm secrets system-set provider.openrouter.api_key <value>`.
 async fn overlay_provider_keys(
     mut providers: config::Providers,
-    secrets: &dyson_warden::secrets::SystemSecretsService,
+    secrets: &dyson_swarm::secrets::SystemSecretsService,
 ) -> Result<config::Providers, String> {
     for (name, slot) in [
         ("anthropic", &mut providers.anthropic),
@@ -448,15 +448,15 @@ async fn overlay_provider_keys(
 
 /// Stage 3 sibling: the OpenRouter Provisioning key.  Same secret-
 /// store-first pattern as `overlay_provider_keys`, but for the secret
-/// warden uses to mint per-user OR bearers via /api/v1/keys.
+/// swarm uses to mint per-user OR bearers via /api/v1/keys.
 ///
 /// Lookup name: `openrouter.provisioning_key`.  Operators set it via
-/// `warden secrets system-set openrouter.provisioning_key <value>`.
+/// `swarm secrets system-set openrouter.provisioning_key <value>`.
 /// Returns the resolved plaintext (or None if neither system_secrets
 /// nor the legacy [openrouter] block carry one).
 async fn resolve_or_provisioning_secret(
     cfg: &config::Config,
-    secrets: &dyson_warden::secrets::SystemSecretsService,
+    secrets: &dyson_swarm::secrets::SystemSecretsService,
 ) -> Result<Option<String>, String> {
     if let Some(value) = secrets
         .get_str("openrouter.provisioning_key")
@@ -489,8 +489,8 @@ async fn resolve_or_provisioning_secret(
 /// hasn't enabled Stage 6.
 async fn resolve_or_provisioning_async(
     cfg: &config::Config,
-    secrets: &dyson_warden::secrets::SystemSecretsService,
-) -> Result<Option<dyson_warden::openrouter::OpenRouterProvisioning>, String> {
+    secrets: &dyson_swarm::secrets::SystemSecretsService,
+) -> Result<Option<dyson_swarm::openrouter::OpenRouterProvisioning>, String> {
     let Some(key) = resolve_or_provisioning_secret(cfg, secrets).await? else {
         return Ok(None);
     };
@@ -500,19 +500,19 @@ async fn resolve_or_provisioning_async(
         .and_then(|o| o.upstream.clone())
         .or_else(|| cfg.providers.openrouter.as_ref().map(|p| p.upstream.clone()))
         .unwrap_or_else(|| "https://openrouter.ai/api".to_string());
-    dyson_warden::openrouter::OpenRouterProvisioning::new(upstream, key)
+    dyson_swarm::openrouter::OpenRouterProvisioning::new(upstream, key)
         .map(Some)
         .map_err(|e| format!("openrouter client build: {e}"))
 }
 
 fn build_api_client(cfg: &config::Config, dangerous_no_auth: bool) -> Option<ApiClient> {
     // Stage 5 retired the admin_token; CLI subcommands now read a
-    // user api-key from `WARDEN_API_KEY` (mint one via the SPA admin
+    // user api-key from `SWARM_API_KEY` (mint one via the SPA admin
     // panel and export).  `--dangerous-no-auth` skips entirely.
     let token = if dangerous_no_auth {
         None
     } else {
-        std::env::var("WARDEN_API_KEY").ok()
+        std::env::var("SWARM_API_KEY").ok()
     };
     match ApiClient::from_bind(&cfg.bind, token) {
         Ok(c) => Some(c),
@@ -530,9 +530,9 @@ async fn run_secrets(
 ) -> ExitCode {
     // System-scope variants bypass HTTP and operate on the DB + key
     // dir directly.  This is intentional: provider api_keys are a
-    // bootstrap concern (the warden HTTP server may not be running
+    // bootstrap concern (the swarm HTTP server may not be running
     // yet, and there's no admin user to mint a bearer for in a fresh
-    // deployment) and the operator running this CLI on the warden
+    // deployment) and the operator running this CLI on the swarm
     // host already has filesystem access to both pieces.
     if let SecretsAction::SystemSet { .. }
     | SecretsAction::SystemClear { .. }
@@ -584,18 +584,18 @@ async fn run_system_secret(cfg: &config::Config, action: SecretsAction) -> ExitC
             return ExitCode::FAILURE;
         }
     };
-    let cipher_dir: Arc<dyn dyson_warden::envelope::CipherDirectory> =
-        match dyson_warden::envelope::AgeCipherDirectory::new(cfg.resolved_keys_dir()) {
+    let cipher_dir: Arc<dyn dyson_swarm::envelope::CipherDirectory> =
+        match dyson_swarm::envelope::AgeCipherDirectory::new(cfg.resolved_keys_dir()) {
             Ok(d) => Arc::new(d),
             Err(err) => {
                 eprintln!("error: envelope key dir init failed: {err:#}");
                 return ExitCode::FAILURE;
             }
         };
-    let store: Arc<dyn dyson_warden::traits::SystemSecretStore> = Arc::new(
-        dyson_warden::db::secrets::SqlxSystemSecretStore::new(pool.clone()),
+    let store: Arc<dyn dyson_swarm::traits::SystemSecretStore> = Arc::new(
+        dyson_swarm::db::secrets::SqlxSystemSecretStore::new(pool.clone()),
     );
-    let svc = dyson_warden::secrets::SystemSecretsService::new(store, cipher_dir);
+    let svc = dyson_swarm::secrets::SystemSecretsService::new(store, cipher_dir);
 
     match action {
         SecretsAction::SystemSet { name, value } => match svc.put(&name, value.as_bytes()).await {

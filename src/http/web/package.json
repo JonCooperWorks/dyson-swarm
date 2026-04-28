@@ -1,8 +1,8 @@
 {
-  "name": "warden-web",
+  "name": "swarm-web",
   "version": "0.1.0",
   "private": true,
-  "description": "Web UI for dyson-warden. Bundled into the Rust binary by build.rs.",
+  "description": "Web UI for dyson-swarm. Bundled into the Rust binary by build.rs.",
   "type": "module",
   "engines": {
     "node": ">=20"

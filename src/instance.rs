@@ -15,7 +15,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::error::WardenError;
+use crate::error::SwarmError;
 use crate::now_secs;
 use crate::secrets::compose_env;
 use crate::traits::{
@@ -29,32 +29,32 @@ use crate::traits::{
 pub const SHARED_PROVIDER: &str = "*";
 
 /// Env-var names injected by the orchestrator into every sandbox.
-pub const ENV_PROXY_URL: &str = "WARDEN_PROXY_URL";
-pub const ENV_PROXY_TOKEN: &str = "WARDEN_PROXY_TOKEN";
-pub const ENV_INSTANCE_ID: &str = "WARDEN_INSTANCE_ID";
+pub const ENV_PROXY_URL: &str = "SWARM_PROXY_URL";
+pub const ENV_PROXY_TOKEN: &str = "SWARM_PROXY_TOKEN";
+pub const ENV_INSTANCE_ID: &str = "SWARM_INSTANCE_ID";
 /// Bearer token the agent's HTTP server must accept. The host-based
 /// dyson_proxy stamps `Authorization: Bearer <bearer_token>` on every
 /// forwarded request — without this env, the agent has no way to know
 /// the secret it's being challenged with.
-pub const ENV_BEARER_TOKEN: &str = "WARDEN_BEARER_TOKEN";
+pub const ENV_BEARER_TOKEN: &str = "SWARM_BEARER_TOKEN";
 /// Human-readable label, e.g. "PR reviewer for foo/bar".
-pub const ENV_NAME: &str = "WARDEN_NAME";
+pub const ENV_NAME: &str = "SWARM_NAME";
 /// Free-text mission statement. The agent reads this on first boot to
-/// seed its self-knowledge files; warden does not push subsequent
+/// seed its self-knowledge files; swarm does not push subsequent
 /// edits to a running sandbox.
-pub const ENV_TASK: &str = "WARDEN_TASK";
-/// LLM model id the agent talks to via warden's `/llm` proxy
+pub const ENV_TASK: &str = "SWARM_TASK";
+/// LLM model id the agent talks to via swarm's `/llm` proxy
 /// (e.g. `"anthropic/claude-sonnet-4-5"`, `"openai/gpt-4o"`). Required
 /// at create time — there is intentionally no server-side default,
 /// since the right model is task-specific and a stale default leaks
 /// into deployments long after it was the right call.
-pub const ENV_MODEL: &str = "WARDEN_MODEL";
+pub const ENV_MODEL: &str = "SWARM_MODEL";
 
 /// Comma-separated ordered fallback list of model ids.  First entry
-/// matches `WARDEN_MODEL`; trailing entries let agents that support
+/// matches `SWARM_MODEL`; trailing entries let agents that support
 /// failover/rotation try alternate models in order.  Optional —
-/// agents that only read `WARDEN_MODEL` ignore this.
-pub const ENV_MODELS: &str = "WARDEN_MODELS";
+/// agents that only read `SWARM_MODEL` ignore this.
+pub const ENV_MODELS: &str = "SWARM_MODELS";
 
 /// Sentinel `owner_id` used by system-internal flows (TTL sweeper, probe
 /// loop, proxy resolving via `proxy_token`) to bypass tenant filtering.
@@ -72,9 +72,21 @@ pub fn configure_secret_name(instance_id: &str) -> String {
 
 /// Retry the dyson reconfigure call with exponential-ish backoff —
 /// the sandbox is `Live` by the time this fires, but the dyson HTTP
-/// server inside can take a beat to settle (especially when cubeproxy
-/// is itself cold-starting).  Total budget: ~15s.  Backoff: 0.5s,
-/// 1s, 2s, 4s, 8s.
+/// server inside (and the cubeproxy nginx in front of it) can take a
+/// beat to settle, especially right after a fresh template is
+/// registered: cubeproxy's per-sandbox upstream routing is lazily
+/// populated and the first POST through can land before nginx has
+/// the route, surfacing as a 502 Bad Gateway.
+///
+/// Total budget: ~75s.  Backoff: 0.5s, 1s, 2s, 4s, 8s, 8s, 8s, 8s, 8s,
+/// 8s, 8s, 8s — caps at 8s once we're past the cube cold-start window.
+/// The previous 15s budget routinely lost the race for new instances on
+/// freshly-promoted templates: every push got 502 Bad Gateway, the
+/// dyson kept its warmup-placeholder dyson.json, and the first turn
+/// 401'd against `api.openai.com`.  See the regression test in
+/// `controller::http::routes::turns` (dyson side) that ensures the
+/// per-chat reloader picks up dyson.json on the next turn even after
+/// a delayed reconfigure success.
 pub async fn push_with_retry(
     r: &dyn DysonReconfigurer,
     instance_id: &str,
@@ -83,7 +95,7 @@ pub async fn push_with_retry(
 ) -> Result<(), String> {
     let mut delay = std::time::Duration::from_millis(500);
     let mut last_err = String::new();
-    for attempt in 0..5 {
+    for attempt in 0..12 {
         match r.push(instance_id, sandbox_id, body).await {
             Ok(()) => return Ok(()),
             Err(e) => {
@@ -108,20 +120,20 @@ pub struct InstanceService {
     instances: Arc<dyn InstanceStore>,
     secrets: Arc<dyn SecretStore>,
     tokens: Arc<dyn TokenStore>,
-    /// Public base URL of the warden's `/llm/` proxy mount, e.g.
-    /// `http://warden:8080/llm`.
+    /// Public base URL of the swarm's `/llm/` proxy mount, e.g.
+    /// `http://swarm:8080/llm`.
     proxy_base: String,
     default_ttl_seconds: i64,
-    /// Dyson reconfigurer — lets us push WARDEN_MODEL / WARDEN_TASK /
-    /// WARDEN_NAME into a freshly-created sandbox via Dyson's
+    /// Dyson reconfigurer — lets us push SWARM_MODEL / SWARM_TASK /
+    /// SWARM_NAME into a freshly-created sandbox via Dyson's
     /// `/api/admin/configure` endpoint.  Stage 8 fix for cube's
     /// snapshot/restore freezing the dyson process's env at warmup
-    /// time (when WARDEN_* are unset → "warmup-placeholder" model).
+    /// time (when SWARM_* are unset → "warmup-placeholder" model).
     /// `None` skips reconfigure entirely (test/local-dev).
     reconfigurer: Option<Arc<dyn DysonReconfigurer>>,
 }
 
-/// Anything that can push warden-side identity/task/model state to a
+/// Anything that can push swarm-side identity/task/model state to a
 /// running dyson sandbox via dyson's `/api/admin/configure` runtime
 /// endpoint.  Trait so tests can substitute a recorder without
 /// standing up an HTTP server.
@@ -165,7 +177,7 @@ fn managed_env(
 
 /// Body sent to dyson's `/api/admin/configure`.  Mirrors the dyson
 /// side's `ConfigureBody` — the two structs are intentionally
-/// duplicated rather than shared because warden + dyson are two
+/// duplicated rather than shared because swarm + dyson are two
 /// separate crates and a shared crate just for this would be
 /// significant churn for a 4-field struct.
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -178,20 +190,20 @@ pub struct ReconfigureBody {
     pub models: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub instance_id: Option<String>,
-    /// The per-instance proxy_token warden minted at create-time.
+    /// The per-instance proxy_token swarm minted at create-time.
     /// Becomes the value of `providers.<agent.provider>.api_key` in
     /// the running dyson's `dyson.json` — the agent uses this as its
-    /// bearer when calling warden's `/llm/...` endpoints.  Without
+    /// bearer when calling swarm's `/llm/...` endpoints.  Without
     /// this push the api_key stays at the boot-time `warmup-placeholder`
     /// (cube's snapshot/restore freezes `/proc/self/environ`, so the
-    /// `WARDEN_PROXY_TOKEN` warden injects on create never reaches
+    /// `SWARM_PROXY_TOKEN` swarm injects on create never reaches
     /// the dyson process — same root cause as the missing `models`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proxy_token: Option<String>,
     /// The /llm proxy URL (`https://<hostname>/llm`).  Patched into
     /// `providers.<agent.provider>.base_url` so the dyson's api client
-    /// hits Caddy → warden instead of the loopback URL frozen at
-    /// warmup.  Skipped when None (warden runs without a hostname).
+    /// hits Caddy → swarm instead of the loopback URL frozen at
+    /// warmup.  Skipped when None (swarm runs without a hostname).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proxy_base: Option<String>,
 }
@@ -227,13 +239,13 @@ impl InstanceService {
         &self,
         owner_id: &str,
         req: CreateRequest,
-    ) -> Result<CreatedInstance, WardenError> {
+    ) -> Result<CreatedInstance, SwarmError> {
         // The agent boot config refuses to start without a model id, so
         // catch the missing-model case here with a clean error instead
         // of letting the cube start a doomed sandbox we then have to
         // garbage-collect. Trim-empty counts as missing.
         if !req.env.get(ENV_MODEL).is_some_and(|s| !s.trim().is_empty()) {
-            return Err(WardenError::PolicyDenied(format!(
+            return Err(SwarmError::PolicyDenied(format!(
                 "{ENV_MODEL} is required in the create request's `env` \
                  (e.g. \"anthropic/claude-sonnet-4-5\"); there is no default"
             )));
@@ -272,11 +284,11 @@ impl InstanceService {
 
         // Identity envelope. The agent reads these on first boot to seed
         // its own self-knowledge files (SOUL.md and friends in Dyson's
-        // case); subsequent edits to the warden row don't propagate to a
+        // case); subsequent edits to the swarm row don't propagate to a
         // running sandbox, by design.
         let managed = managed_env(&self.proxy_base, &proxy_token, &id, &bearer, &name, &task);
 
-        // Templates aren't materialised inside warden — they live in Cube.
+        // Templates aren't materialised inside swarm — they live in Cube.
         // The "template" half of the merge is empty here; operators set per-
         // instance values via PUT /secrets and they win as `existing`.
         let env = compose_env(&BTreeMap::new(), &managed, &req.env, &[]);
@@ -325,7 +337,7 @@ impl InstanceService {
                 .get(ENV_MODELS)
                 .map(|s| s.split(',').map(|m| m.trim().to_owned()).filter(|m| !m.is_empty()).collect())
                 .unwrap_or_default();
-            // Fall back to the single WARDEN_MODEL if WARDEN_MODELS
+            // Fall back to the single SWARM_MODEL if SWARM_MODELS
             // wasn't supplied — older clients might still only pass
             // the legacy env.
             if models.is_empty()
@@ -343,7 +355,7 @@ impl InstanceService {
                 // /llm base URL into the running dyson's dyson.json so
                 // the agent stops trying to call upstream with the
                 // boot-time `warmup-placeholder` api_key.  The
-                // `/openrouter` suffix matches what `dyson warden`'s
+                // `/openrouter` suffix matches what `dyson swarm`'s
                 // warmup config writer constructs — keeps dyson's admin
                 // handler agnostic to which provider the agent fronts.
                 proxy_token: Some(proxy_token.clone()),
@@ -389,11 +401,11 @@ impl InstanceService {
     }
 
     /// Owner-scoped lookup: returns NotFound for rows the user doesn't own.
-    pub async fn get(&self, owner_id: &str, id: &str) -> Result<InstanceRow, WardenError> {
+    pub async fn get(&self, owner_id: &str, id: &str) -> Result<InstanceRow, SwarmError> {
         self.instances
             .get_for_owner(owner_id, id)
             .await?
-            .ok_or(WardenError::NotFound)
+            .ok_or(SwarmError::NotFound)
     }
 
     /// System lookup: returns the row regardless of owner.  Used by
@@ -402,15 +414,15 @@ impl InstanceService {
     /// like the TTL loop.  Caller is responsible for not exposing the
     /// row across tenant boundaries — this skips the normal
     /// owner-filter that the per-handler `get` enforces.
-    pub async fn get_unscoped(&self, id: &str) -> Result<InstanceRow, WardenError> {
-        self.instances.get(id).await?.ok_or(WardenError::NotFound)
+    pub async fn get_unscoped(&self, id: &str) -> Result<InstanceRow, SwarmError> {
+        self.instances.get(id).await?.ok_or(SwarmError::NotFound)
     }
 
     pub async fn list(
         &self,
         owner_id: &str,
         filter: ListFilter,
-    ) -> Result<Vec<InstanceRow>, WardenError> {
+    ) -> Result<Vec<InstanceRow>, SwarmError> {
         Ok(self.instances.list(owner_id, filter).await?)
     }
 
@@ -421,18 +433,18 @@ impl InstanceService {
         owner_id: &str,
         prober: &dyn HealthProber,
         id: &str,
-    ) -> Result<ProbeResult, WardenError> {
+    ) -> Result<ProbeResult, SwarmError> {
         let row = self
             .instances
             .get_for_owner(owner_id, id)
             .await?
-            .ok_or(WardenError::NotFound)?;
+            .ok_or(SwarmError::NotFound)?;
         let result = prober.probe(&row).await;
         self.instances.record_probe(id, result.clone()).await?;
         Ok(result)
     }
 
-    /// Owner-scoped identity update.  Updates warden's row AND pushes
+    /// Owner-scoped identity update.  Updates swarm's row AND pushes
     /// the new identity into the running dyson via /api/admin/configure
     /// so IDENTITY.md (and the agent's system prompt on the next turn)
     /// reflects the change.  Returns `NotFound` if the row isn't owned
@@ -444,13 +456,13 @@ impl InstanceService {
         id: &str,
         name: &str,
         task: &str,
-    ) -> Result<InstanceRow, WardenError> {
+    ) -> Result<InstanceRow, SwarmError> {
         self.instances.update_identity(owner_id, id, name, task).await?;
         let row = self
             .instances
             .get_for_owner(owner_id, id)
             .await?
-            .ok_or(WardenError::NotFound)?;
+            .ok_or(SwarmError::NotFound)?;
         if let (Some(r), Some(sb)) = (
             self.reconfigurer.as_ref(),
             row.cube_sandbox_id.as_deref().filter(|s| !s.is_empty()),
@@ -491,9 +503,9 @@ impl InstanceService {
         owner_id: &str,
         id: &str,
         models: Vec<String>,
-    ) -> Result<(), WardenError> {
+    ) -> Result<(), SwarmError> {
         if models.is_empty() {
-            return Err(WardenError::PolicyDenied(
+            return Err(SwarmError::PolicyDenied(
                 "models list must contain at least one entry".into(),
             ));
         }
@@ -501,16 +513,16 @@ impl InstanceService {
             .instances
             .get_for_owner(owner_id, id)
             .await?
-            .ok_or(WardenError::NotFound)?;
+            .ok_or(SwarmError::NotFound)?;
         let sandbox_id = row
             .cube_sandbox_id
             .as_deref()
             .filter(|s| !s.is_empty())
             .ok_or_else(|| {
-                WardenError::PolicyDenied("instance has no live sandbox to reconfigure".into())
+                SwarmError::PolicyDenied("instance has no live sandbox to reconfigure".into())
             })?;
         let r = self.reconfigurer.as_ref().ok_or_else(|| {
-            WardenError::PolicyDenied("dyson reconfigurer not configured".into())
+            SwarmError::PolicyDenied("dyson reconfigurer not configured".into())
         })?;
         let body = ReconfigureBody {
             name: None,
@@ -523,16 +535,16 @@ impl InstanceService {
         };
         push_with_retry(&**r, id, sandbox_id, &body)
             .await
-            .map_err(WardenError::PolicyDenied)?;
+            .map_err(SwarmError::PolicyDenied)?;
         Ok(())
     }
 
-    pub async fn destroy(&self, owner_id: &str, id: &str) -> Result<(), WardenError> {
+    pub async fn destroy(&self, owner_id: &str, id: &str) -> Result<(), SwarmError> {
         let row = self
             .instances
             .get_for_owner(owner_id, id)
             .await?
-            .ok_or(WardenError::NotFound)?;
+            .ok_or(SwarmError::NotFound)?;
         if let Some(sb) = &row.cube_sandbox_id {
             self.cube.destroy_sandbox(sb).await?;
         }
@@ -551,7 +563,7 @@ impl InstanceService {
         &self,
         owner_id: &str,
         req: RestoreRequest,
-    ) -> Result<CreatedInstance, WardenError> {
+    ) -> Result<CreatedInstance, SwarmError> {
         let id = Uuid::new_v4().simple().to_string();
         let bearer = Uuid::new_v4().simple().to_string();
         let now = now_secs();
@@ -647,11 +659,11 @@ impl InstanceService {
 pub struct CreateRequest {
     pub template_id: String,
     /// Human-readable label for the employee. Optional — defaults to the
-    /// short id when unset. Surfaced as `WARDEN_NAME` in the sandbox env.
+    /// short id when unset. Surfaced as `SWARM_NAME` in the sandbox env.
     #[serde(default)]
     pub name: Option<String>,
     /// Free-text task / mission. Optional but strongly recommended;
-    /// surfaced as `WARDEN_TASK` so the agent reads its job description
+    /// surfaced as `SWARM_TASK` so the agent reads its job description
     /// at boot.
     #[serde(default)]
     pub task: Option<String>,
@@ -781,13 +793,13 @@ mod tests {
             instances.clone(),
             secrets.clone(),
             tokens.clone(),
-            "http://warden.test:8080/llm",
+            "http://swarm.test:8080/llm",
             3600,
         );
         (svc, cube, tokens, secrets, instances)
     }
 
-    /// Tests share this helper so the WARDEN_MODEL requirement isn't
+    /// Tests share this helper so the SWARM_MODEL requirement isn't
     /// re-stated everywhere. Returns an env map with just the model set
     /// to a placeholder; callers add their own keys on top.
     fn env_with_model() -> BTreeMap<String, String> {
@@ -821,7 +833,7 @@ mod tests {
 
     #[tokio::test]
     async fn rename_updates_row_but_does_not_re_emit_env() {
-        // Per the design, edits in warden don't propagate to a running
+        // Per the design, edits in swarm don't propagate to a running
         // sandbox.  This test is the contract: rename mutates the row,
         // but the cube was only invoked at create time, so its captured
         // env snapshot still has the original (empty) values.
@@ -869,7 +881,7 @@ mod tests {
 
         let captured = cube.last_create();
         assert_eq!(captured.template_id, "tpl-x");
-        assert_eq!(captured.env[ENV_PROXY_URL], "http://warden.test:8080/llm");
+        assert_eq!(captured.env[ENV_PROXY_URL], "http://swarm.test:8080/llm");
         assert_eq!(captured.env[ENV_PROXY_TOKEN], created.proxy_token);
         assert_eq!(captured.env[ENV_INSTANCE_ID], created.id);
         assert_eq!(captured.env["EXTRA"], "yes");
@@ -937,7 +949,7 @@ mod tests {
     async fn destroy_unknown_returns_not_found() {
         let (svc, _cube, _tokens, _secrets, _instances) = build().await;
         let err = svc.destroy("legacy", "nope").await.expect_err("must error");
-        matches!(err, WardenError::NotFound);
+        matches!(err, SwarmError::NotFound);
     }
 
     #[tokio::test]
@@ -982,7 +994,7 @@ mod tests {
     }
 
     /// Recorder reconfigurer.  Captures every body push so tests can
-    /// inspect the values warden chose.  Always succeeds — failure paths
+    /// inspect the values swarm chose.  Always succeeds — failure paths
     /// have their own coverage in the retry/backoff tests.
     #[derive(Default)]
     struct RecordingReconfigurer {
@@ -1009,11 +1021,11 @@ mod tests {
     ///
     /// `proxy_base` ends up in dyson.json's `providers.openrouter.base_url`,
     /// and dyson's `OpenAiCompatClient` appends `/v1/chat/completions` to
-    /// it on every request.  If warden hands dyson a base ending in `/v1`,
+    /// it on every request.  If swarm hands dyson a base ending in `/v1`,
     /// the URL doubles up to `.../openrouter/v1/v1/chat/completions` —
     /// OpenRouter's CDN serves the marketing site at that path and dyson
     /// surfaces the resulting non-200 as a generic "upstream HTTP error".
-    /// This test pins the contract: warden's reconfigure push uses
+    /// This test pins the contract: swarm's reconfigure push uses
     /// `<proxy_base>/openrouter`, with no trailing `/v1`.
     #[tokio::test]
     async fn create_pushes_proxy_base_without_trailing_v1() {

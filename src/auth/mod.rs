@@ -48,7 +48,7 @@ pub struct UserIdentity {
 pub enum AuthSource {
     /// Validated OIDC JWT.
     Oidc,
-    /// Opaque api-key bearer minted by warden.
+    /// Opaque api-key bearer minted by swarm.
     Bearer,
 }
 
@@ -151,7 +151,7 @@ mod tests {
 
     #[test]
     fn looks_like_jwt_rejects_opaque_bearer() {
-        // warden-issued opaque bearers share the `dy_` prefix and have
+        // swarm-issued opaque bearers share the `dy_` prefix and have
         // no dots — must be classified as not-a-JWT so the chain
         // authenticator doesn't waste an OIDC verify on them.
         assert!(!looks_like_jwt("dy_0123456789abcdef0123456789abcdef"));

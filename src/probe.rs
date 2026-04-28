@@ -26,7 +26,7 @@ use crate::traits::{HealthProber, InstanceRow, InstanceStatus, InstanceStore, Li
 #[derive(Clone)]
 pub struct HttpHealthProber {
     http: Client,
-    /// Public hostname warden answers on (e.g. `dyson.myprivate.network`).
+    /// Public hostname swarm answers on (e.g. `dyson.myprivate.network`).
     /// We probe `https://<instance_id>.<hostname>/healthz` so the prober
     /// exercises the same chain the user's browser does — Caddy →
     /// dispatch → dyson_proxy → cubeproxy → dyson.  When `None` the
@@ -58,7 +58,7 @@ impl HttpHealthProber {
 impl HealthProber for HttpHealthProber {
     async fn probe(&self, instance: &InstanceRow) -> ProbeResult {
         // The instance row's `cube_sandbox_id` must be set for any
-        // forward path through warden's dispatcher to succeed (it's
+        // forward path through swarm's dispatcher to succeed (it's
         // the value dyson_proxy uses to address cubeproxy), so a
         // missing id is a hard "unreachable".
         if instance.cube_sandbox_id.as_deref().is_none_or(str::is_empty) {
@@ -68,7 +68,7 @@ impl HealthProber for HttpHealthProber {
         }
         let Some(url) = self.url_for(&instance.id) else {
             return ProbeResult::Unreachable {
-                reason: "warden hostname not configured (set `hostname` in config.toml)".into(),
+                reason: "swarm hostname not configured (set `hostname` in config.toml)".into(),
             };
         };
         // /healthz is anonymous through dispatch — see

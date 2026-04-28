@@ -1,4 +1,4 @@
-/* warden — store hook.
+/* swarm — store hook.
  *
  * Wraps useSyncExternalStore so components can read the global snapshot.
  * Selectors are encouraged to keep renders narrow.

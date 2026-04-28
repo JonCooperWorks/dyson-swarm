@@ -1,4 +1,4 @@
-/* warden — HTTP client for the orchestrator's REST API.
+/* swarm — HTTP client for the orchestrator's REST API.
  *
  * Every method maps to one endpoint in src/http/*.rs.  Constructor
  * accepts an injectable fetch + getToken so tests can mock without
@@ -12,14 +12,14 @@
  * CSRF isn't a viable attack against this surface.
  */
 
-export class WardenClient {
+export class SwarmClient {
   constructor({ fetch: fetchImpl, getToken } = {}) {
     const globalFetch = typeof globalThis.fetch === 'function'
       ? globalThis.fetch.bind(globalThis)
       : null;
     this._fetch = fetchImpl === undefined ? globalFetch : fetchImpl;
     this._getToken = typeof getToken === 'function' ? getToken : () => null;
-    if (!this._fetch) throw new Error('WardenClient: no fetch implementation available');
+    if (!this._fetch) throw new Error('SwarmClient: no fetch implementation available');
   }
 
   _authedFetch(url, init) {
@@ -70,7 +70,7 @@ export class WardenClient {
 
   /// PATCH the employee profile.  Body fields are optional — pass only
   /// what you want changed.  When `models` is supplied (non-empty
-  /// array), warden also pushes the new list into the running dyson
+  /// array), swarm also pushes the new list into the running dyson
   /// via /api/admin/configure (Stage 8.3 runtime reconfigure).
   updateInstance(id, { name, task, models } = {}) {
     const body = {};

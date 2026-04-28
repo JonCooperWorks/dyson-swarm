@@ -14,7 +14,7 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
 use crate::auth::CallerIdentity;
-use crate::error::WardenError;
+use crate::error::SwarmError;
 use crate::http::{secrets::store_err_to_status, AppState};
 use crate::instance::{CreateRequest, CreatedInstance};
 use crate::traits::{InstanceRow, InstanceStatus, ListFilter, ProbeResult};
@@ -39,7 +39,7 @@ struct PatchInstanceBody {
     /// New task / mission. Pass null/missing to leave unchanged.
     #[serde(default)]
     task: Option<String>,
-    /// New ordered model list.  When supplied, warden pushes the new
+    /// New ordered model list.  When supplied, swarm pushes the new
     /// list into the running dyson via /api/admin/configure (Stage 8.3
     /// — runtime-reconfigure of the agent's model selection without
     /// destroying the sandbox).  Empty/missing leaves models unchanged.
@@ -57,7 +57,7 @@ async fn update_instance(
     // pick up the existing values for the un-touched identity fields.
     let current = match state.instances.get(&caller.user_id, &id).await {
         Ok(r) => r,
-        Err(e) => return Err(warden_err_to_status(e)),
+        Err(e) => return Err(swarm_err_to_status(e)),
     };
 
     // 1. Identity update (name + task).  `rename` also pushes the new
@@ -70,7 +70,7 @@ async fn update_instance(
         .await
     {
         Ok(row) => row,
-        Err(e) => return Err(warden_err_to_status(e)),
+        Err(e) => return Err(swarm_err_to_status(e)),
     };
 
     // 2. Models update (optional).  Synchronous so the SPA can show
@@ -82,7 +82,7 @@ async fn update_instance(
             .update_models(&caller.user_id, &id, models)
             .await
     {
-        return Err(warden_err_to_status(e));
+        return Err(swarm_err_to_status(e));
     }
 
     Ok(Json(InstanceView::from_row(row, state.hostname.as_deref())))
@@ -97,7 +97,7 @@ async fn create_instance(
         Ok(mut c) => {
             // The cube client returns the raw `<sandbox>.cube.app` URL,
             // which a browser on the public internet can't resolve.  When
-            // a warden hostname is configured, rewrite to the
+            // a swarm hostname is configured, rewrite to the
             // `<id>.<hostname>` shape — same value the SPA gets back from
             // GET /v1/instances/:id as `open_url`, so the modal's "open
             // profile" link actually works.
@@ -106,7 +106,7 @@ async fn create_instance(
             }
             Ok((StatusCode::CREATED, Json(c)))
         }
-        Err(e) => Err(warden_err_to_status(e)),
+        Err(e) => Err(swarm_err_to_status(e)),
     }
 }
 
@@ -133,7 +133,7 @@ async fn list_instances(
     };
     match state.instances.list(&caller.user_id, filter).await {
         Ok(rows) => Ok(Json(rows.into_iter().map(|r| InstanceView::from_row(r, state.hostname.as_deref())).collect())),
-        Err(e) => Err(warden_err_to_status(e)),
+        Err(e) => Err(swarm_err_to_status(e)),
     }
 }
 
@@ -157,7 +157,7 @@ async fn get_instance(
 ) -> Result<Json<InstanceView>, StatusCode> {
     match state.instances.get(&caller.user_id, &id).await {
         Ok(row) => Ok(Json(InstanceView::from_row(row, state.hostname.as_deref()))),
-        Err(e) => Err(warden_err_to_status(e)),
+        Err(e) => Err(swarm_err_to_status(e)),
     }
 }
 
@@ -176,7 +176,7 @@ async fn destroy_instance(
             crate::dyson_reconfig::forget_secret(&state.system_secrets, &id).await;
             StatusCode::NO_CONTENT
         }
-        Err(e) => warden_err_to_status(e),
+        Err(e) => swarm_err_to_status(e),
     }
 }
 
@@ -196,7 +196,7 @@ async fn probe_instance(
         .await
     {
         Ok(r) => Ok(Json(r)),
-        Err(e) => Err(warden_err_to_status(e)),
+        Err(e) => Err(swarm_err_to_status(e)),
     }
 }
 
@@ -207,7 +207,7 @@ async fn instance_url(
 ) -> Result<Json<UrlView>, StatusCode> {
     let row = match state.instances.get(&caller.user_id, &id).await {
         Ok(r) => r,
-        Err(e) => return Err(warden_err_to_status(e)),
+        Err(e) => return Err(swarm_err_to_status(e)),
     };
     let Some(sb) = row.cube_sandbox_id else {
         return Err(StatusCode::CONFLICT);
@@ -221,7 +221,7 @@ async fn instance_url(
 /// create time) and serialises enums into stable strings.
 ///
 /// `open_url` is the SPA's "open ↗" target.  Computed from the configured
-/// `hostname` plus the instance id; `None` when warden has no hostname
+/// `hostname` plus the instance id; `None` when swarm has no hostname
 /// configured (the host-based dispatcher is a no-op in that case, so the
 /// link can't actually reach the sandbox).
 #[derive(Debug, Serialize)]
@@ -269,13 +269,13 @@ impl InstanceView {
     }
 }
 
-pub(crate) fn warden_err_to_status(e: WardenError) -> StatusCode {
+pub(crate) fn swarm_err_to_status(e: SwarmError) -> StatusCode {
     match e {
-        WardenError::NotFound => StatusCode::NOT_FOUND,
-        WardenError::PolicyDenied(_) => StatusCode::FORBIDDEN,
-        WardenError::Cube(_) => StatusCode::BAD_GATEWAY,
-        WardenError::Store(s) => store_err_to_status(s),
-        WardenError::Backup(_) => StatusCode::INTERNAL_SERVER_ERROR,
-        WardenError::Config(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        SwarmError::NotFound => StatusCode::NOT_FOUND,
+        SwarmError::PolicyDenied(_) => StatusCode::FORBIDDEN,
+        SwarmError::Cube(_) => StatusCode::BAD_GATEWAY,
+        SwarmError::Store(s) => store_err_to_status(s),
+        SwarmError::Backup(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        SwarmError::Config(_) => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }

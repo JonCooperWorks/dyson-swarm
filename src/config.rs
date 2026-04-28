@@ -11,21 +11,21 @@ pub struct Config {
     /// Directory holding per-user age root keys
     /// (`<keys_dir>/<user_id>.age`, mode 0400).  The system-scope key
     /// for provider api_keys / OpenRouter provisioning lives at
-    /// `<keys_dir>/system.age`.  Created on first warden boot.
+    /// `<keys_dir>/system.age`.  Created on first swarm boot.
     /// Defaults to a sibling of `db_path` so a typical
-    /// `/var/lib/dyson-warden/` layout keeps all per-host secret
+    /// `/var/lib/dyson-swarm/` layout keeps all per-host secret
     /// material under one root.
     #[serde(default)]
     pub keys_dir: Option<PathBuf>,
 
-    /// Public hostname warden answers on, e.g. `"warden.example.com"`.
+    /// Public hostname swarm answers on, e.g. `"swarm.example.com"`.
     /// When set, every Dyson is reachable at
     /// `<instance_id>.<hostname>` — the host-based dispatcher in
     /// [`crate::http::dyson_proxy`] forwards those requests to the
     /// matching CubeSandbox.  Wildcard DNS (`*.<hostname>`) and a
     /// wildcard TLS cert are required for this to work in production.
     /// When unset, the dispatcher is a no-op and the per-Dyson UI is
-    /// unreachable from the browser (the rest of warden is unaffected).
+    /// unreachable from the browser (the rest of swarm is unaffected).
     #[serde(default)]
     pub hostname: Option<String>,
 
@@ -58,7 +58,7 @@ pub struct Config {
     #[serde(default)]
     pub oidc: Option<OidcConfigToml>,
     /// OpenRouter Provisioning-API config (Stage 6 per-user keys).
-    /// When present, warden mints a unique OR key per tenant on first
+    /// When present, swarm mints a unique OR key per tenant on first
     /// `/llm/openrouter/...` call, capped at the user's
     /// `openrouter_key_limit_usd`.  When absent the proxy falls back
     /// to the global `[providers.openrouter].api_key`.
@@ -133,14 +133,14 @@ pub struct OidcConfigToml {
 /// API-level RBAC): enable "Add Permissions in the Access Token" on
 /// the API, define a permission named `admin`, and attach it to your
 /// admin role.  The IdP then emits a top-level `permissions` array on
-/// every access token; warden checks for the configured value in it.
+/// every access token; swarm checks for the configured value in it.
 /// Config:
 ///     claim = "permissions"
 ///     admin = "admin"
 ///
 /// Alternative for IdPs without per-API RBAC: inject a custom claim
 /// (e.g. `https://your-host/roles`) via a post-login hook and point
-/// `claim` at that URL.  warden doesn't care which path — just that
+/// `claim` at that URL.  swarm doesn't care which path — just that
 /// `claims[claim]` is an array of strings containing `admin`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct OidcRoles {
@@ -261,7 +261,7 @@ impl Config {
         }
     }
 
-    /// Load the config from `path`, apply `WARDEN_*` env overrides, then
+    /// Load the config from `path`, apply `SWARM_*` env overrides, then
     /// validate. `dangerous_no_auth` relaxes the admin-token check.
     pub fn load(
         path: &Path,
@@ -278,29 +278,29 @@ impl Config {
         Ok(cfg)
     }
 
-    /// Apply env-var overrides. Convention: `WARDEN_<UPPER_SNAKE_PATH>`
-    /// e.g. `WARDEN_CUBE_URL`, `WARDEN_PROVIDERS_ANTHROPIC_API_KEY`.
+    /// Apply env-var overrides. Convention: `SWARM_<UPPER_SNAKE_PATH>`
+    /// e.g. `SWARM_CUBE_URL`, `SWARM_PROVIDERS_ANTHROPIC_API_KEY`.
     /// Implemented by hand — no `figment`.
     fn apply_env(&mut self, env: &BTreeMap<String, String>) {
-        if let Some(v) = env.get("WARDEN_BIND") {
+        if let Some(v) = env.get("SWARM_BIND") {
             self.bind = v.clone();
         }
-        if let Some(v) = env.get("WARDEN_DB_PATH") {
+        if let Some(v) = env.get("SWARM_DB_PATH") {
             self.db_path = PathBuf::from(v);
         }
-        if let Some(v) = env.get("WARDEN_KEYS_DIR") {
+        if let Some(v) = env.get("SWARM_KEYS_DIR") {
             self.keys_dir = if v.is_empty() { None } else { Some(PathBuf::from(v)) };
         }
-        if let Some(v) = env.get("WARDEN_HOSTNAME") {
+        if let Some(v) = env.get("SWARM_HOSTNAME") {
             self.hostname = if v.is_empty() { None } else { Some(v.clone()) };
         }
-        if let Some(v) = env.get("WARDEN_CUBE_URL") {
+        if let Some(v) = env.get("SWARM_CUBE_URL") {
             self.cube.url = v.clone();
         }
-        if let Some(v) = env.get("WARDEN_CUBE_API_KEY") {
+        if let Some(v) = env.get("SWARM_CUBE_API_KEY") {
             self.cube.api_key = v.clone();
         }
-        if let Some(v) = env.get("WARDEN_CUBE_SANDBOX_DOMAIN") {
+        if let Some(v) = env.get("SWARM_CUBE_SANDBOX_DOMAIN") {
             self.cube.sandbox_domain = v.clone();
         }
 
@@ -311,8 +311,8 @@ impl Config {
             ("OPENROUTER", &mut self.providers.openrouter),
             ("OLLAMA", &mut self.providers.ollama),
         ] {
-            let key = format!("WARDEN_PROVIDERS_{provider}_API_KEY");
-            let upstream_key = format!("WARDEN_PROVIDERS_{provider}_UPSTREAM");
+            let key = format!("SWARM_PROVIDERS_{provider}_API_KEY");
+            let upstream_key = format!("SWARM_PROVIDERS_{provider}_UPSTREAM");
             if let Some(p) = slot.as_mut() {
                 if let Some(v) = env.get(&key) {
                     p.api_key = Some(v.clone());
@@ -323,26 +323,26 @@ impl Config {
             }
         }
 
-        if let Some(v) = env.get("WARDEN_BACKUP_LOCAL_CACHE_DIR") {
+        if let Some(v) = env.get("SWARM_BACKUP_LOCAL_CACHE_DIR") {
             self.backup.local_cache_dir = PathBuf::from(v);
         }
         if let Some(s3) = self.backup.s3.as_mut() {
-            if let Some(v) = env.get("WARDEN_BACKUP_S3_ENDPOINT") {
+            if let Some(v) = env.get("SWARM_BACKUP_S3_ENDPOINT") {
                 s3.endpoint = v.clone();
             }
-            if let Some(v) = env.get("WARDEN_BACKUP_S3_REGION") {
+            if let Some(v) = env.get("SWARM_BACKUP_S3_REGION") {
                 s3.region = v.clone();
             }
-            if let Some(v) = env.get("WARDEN_BACKUP_S3_BUCKET") {
+            if let Some(v) = env.get("SWARM_BACKUP_S3_BUCKET") {
                 s3.bucket = v.clone();
             }
-            if let Some(v) = env.get("WARDEN_BACKUP_S3_PREFIX") {
+            if let Some(v) = env.get("SWARM_BACKUP_S3_PREFIX") {
                 s3.prefix = v.clone();
             }
-            if let Some(v) = env.get("WARDEN_BACKUP_S3_ACCESS_KEY_ID") {
+            if let Some(v) = env.get("SWARM_BACKUP_S3_ACCESS_KEY_ID") {
                 s3.access_key_id = v.clone();
             }
-            if let Some(v) = env.get("WARDEN_BACKUP_S3_SECRET_ACCESS_KEY") {
+            if let Some(v) = env.get("SWARM_BACKUP_S3_SECRET_ACCESS_KEY") {
                 s3.secret_access_key = v.clone();
             }
         }
@@ -434,7 +434,7 @@ local_cache_dir = "/tmp/cache"
     }
 
     fn write_tmp(name: &str, contents: &str) -> PathBuf {
-        let p = std::env::temp_dir().join(format!("warden-cfg-test-{}-{name}", std::process::id()));
+        let p = std::env::temp_dir().join(format!("swarm-cfg-test-{}-{name}", std::process::id()));
         std::fs::write(&p, contents).unwrap();
         p
     }
@@ -456,8 +456,8 @@ local_cache_dir = "/tmp/cache"
     fn env_override_wins() {
         let path = write_tmp("env_override.toml", example_toml());
         let mut env = BTreeMap::new();
-        env.insert("WARDEN_CUBE_URL".into(), "https://override".into());
-        env.insert("WARDEN_PROVIDERS_ANTHROPIC_API_KEY".into(), "from-env".into());
+        env.insert("SWARM_CUBE_URL".into(), "https://override".into());
+        env.insert("SWARM_PROVIDERS_ANTHROPIC_API_KEY".into(), "from-env".into());
         let cfg = Config::load(&path, &env, false).expect("loads");
         assert_eq!(cfg.cube.url, "https://override");
         assert_eq!(
@@ -485,7 +485,7 @@ local_cache_dir = "/tmp/cache"
     #[test]
     fn refuses_world_readable_db_file() {
         use std::os::unix::fs::PermissionsExt;
-        let db = std::env::temp_dir().join(format!("warden-db-test-{}.db", std::process::id()));
+        let db = std::env::temp_dir().join(format!("swarm-db-test-{}.db", std::process::id()));
         std::fs::write(&db, b"").unwrap();
         std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o644)).unwrap();
         let err = check_db_path_permissions(&db).expect_err("rejects 0644");

@@ -25,10 +25,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use dyson_warden::backup::s3::S3BackupSink;
-use dyson_warden::config::S3Config;
-use dyson_warden::error::CubeError;
-use dyson_warden::traits::{
+use dyson_swarm::backup::s3::S3BackupSink;
+use dyson_swarm::config::S3Config;
+use dyson_swarm::error::CubeError;
+use dyson_swarm::traits::{
     BackupSink, CreateSandboxArgs, CubeClient, SandboxInfo, SnapshotInfo, SnapshotKind,
     SnapshotRow,
 };
@@ -86,7 +86,7 @@ async fn promote_pull_delete_round_trip_against_minio() {
         endpoint,
         region,
         bucket,
-        prefix: format!("warden-it/{}/", uuid::Uuid::new_v4().simple()),
+        prefix: format!("swarm-it/{}/", uuid::Uuid::new_v4().simple()),
         access_key_id: access_key,
         secret_access_key: secret_key,
         path_style: true,
@@ -131,14 +131,14 @@ async fn promote_pull_delete_round_trip_against_minio() {
     sink.delete(&row).await.expect("delete");
     let after_pull = sink.pull(&row).await;
     assert!(
-        matches!(after_pull, Err(dyson_warden::error::BackupError::Missing)),
+        matches!(after_pull, Err(dyson_swarm::error::BackupError::Missing)),
         "expected Missing after delete, got {after_pull:?}"
     );
 }
 
 fn tempdir() -> PathBuf {
     let p = std::env::temp_dir().join(format!(
-        "warden-s3-test-{}-{}",
+        "swarm-s3-test-{}-{}",
         std::process::id(),
         uuid::Uuid::new_v4().simple()
     ));

@@ -131,7 +131,7 @@ mod tests {
     fn oidc_without_spa_client_id_yields_none() {
         let oidc = OidcConfigToml {
             issuer: "https://idp.example".into(),
-            audience: "warden".into(),
+            audience: "swarm".into(),
             jwks_url: None,
             jwks_ttl_seconds: 86_400,
             spa_client_id: None,
@@ -146,10 +146,10 @@ mod tests {
     fn oidc_with_spa_client_id_yields_oidc() {
         let oidc = OidcConfigToml {
             issuer: "https://idp.example".into(),
-            audience: "warden".into(),
+            audience: "swarm".into(),
             jwks_url: None,
             jwks_ttl_seconds: 86_400,
-            spa_client_id: Some("warden-spa".into()),
+            spa_client_id: Some("swarm-spa".into()),
             spa_scopes: vec!["profile".into(), "email".into()],
             roles: None,
         };
@@ -157,8 +157,8 @@ mod tests {
         match cfg.mode {
             AuthMode::Oidc { issuer, audience, client_id, required_scopes, admin_claim, admin_role } => {
                 assert_eq!(issuer, "https://idp.example");
-                assert_eq!(audience, "warden");
-                assert_eq!(client_id, "warden-spa");
+                assert_eq!(audience, "swarm");
+                assert_eq!(client_id, "swarm-spa");
                 assert_eq!(required_scopes, vec!["profile", "email"]);
                 assert!(admin_claim.is_none(), "no [oidc.roles] → no admin claim surfaced");
                 assert!(admin_role.is_none());
@@ -171,10 +171,10 @@ mod tests {
     fn oidc_with_roles_surfaces_admin_claim_and_role() {
         let oidc = OidcConfigToml {
             issuer: "https://idp.example".into(),
-            audience: "warden".into(),
+            audience: "swarm".into(),
             jwks_url: None,
             jwks_ttl_seconds: 86_400,
-            spa_client_id: Some("warden-spa".into()),
+            spa_client_id: Some("swarm-spa".into()),
             spa_scopes: vec![],
             roles: Some(crate::config::OidcRoles {
                 claim: "permissions".into(),
@@ -195,7 +195,7 @@ mod tests {
     fn empty_spa_client_id_treated_as_unset() {
         let oidc = OidcConfigToml {
             issuer: "https://idp.example".into(),
-            audience: "warden".into(),
+            audience: "swarm".into(),
             jwks_url: None,
             jwks_ttl_seconds: 86_400,
             spa_client_id: Some("   ".into()),
@@ -218,8 +218,8 @@ mod tests {
         let cfg = AuthConfig {
             mode: AuthMode::Oidc {
                 issuer: "https://idp.example".into(),
-                audience: "warden".into(),
-                client_id: "warden-spa".into(),
+                audience: "swarm".into(),
+                client_id: "swarm-spa".into(),
                 required_scopes: vec!["profile".into()],
                 admin_claim: Some("permissions".into()),
                 admin_role: Some("admin".into()),
@@ -234,7 +234,7 @@ mod tests {
             serde_json::json!(["anthropic/claude-sonnet-4-5"])
         );
         assert_eq!(json["issuer"], "https://idp.example");
-        assert_eq!(json["client_id"], "warden-spa");
+        assert_eq!(json["client_id"], "swarm-spa");
         assert_eq!(json["required_scopes"], serde_json::json!(["profile"]));
         assert_eq!(json["default_template_id"], "tpl-abc");
     }

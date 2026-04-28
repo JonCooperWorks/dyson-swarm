@@ -88,7 +88,7 @@ pub struct UserView {
     pub created_at: i64,
     pub activated_at: Option<i64>,
     pub last_seen_at: Option<i64>,
-    /// True when warden has minted an OR key for this user.  We don't
+    /// True when swarm has minted an OR key for this user.  We don't
     /// surface the id itself — operators don't need it, and exposing
     /// it through the SPA's admin pane would invite copy-paste leaks.
     pub openrouter_key_present: bool,

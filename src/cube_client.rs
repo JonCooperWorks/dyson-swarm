@@ -67,7 +67,38 @@ struct CreateBody<'a> {
     env: &'a BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Option::is_none", rename = "fromSnapshot")]
     from_snapshot: Option<FromSnapshot<'a>>,
+    /// Force CubeAPI to install an explicit `CubeVSContext` for the
+    /// sandbox.  Without `allow_internet_access` *or* a non-empty
+    /// `network` block, `build_cubevs_context` returns `None` and the
+    /// per-ifindex eBPF policy maps end up in whatever state the
+    /// previous occupant of the TAP (or the pool pre-allocation) left
+    /// them in — observed as silent egress drops.  Mirrors the shape
+    /// used in CubeSandbox's `network_denylist.py` example.
+    allow_internet_access: bool,
+    network: SandboxNetwork<'a>,
 }
+
+#[derive(Debug, Serialize)]
+struct SandboxNetwork<'a> {
+    /// Mirrors `alwaysDeniedSandboxCIDRs` in CubeNet (`netpolicy.go`).
+    /// The eBPF layer always appends these to the deny trie, but
+    /// passing them here forces `build_cubevs_context` to return
+    /// `Some(...)` so the per-ifindex inner LPM maps are populated
+    /// explicitly rather than left to default state.
+    #[serde(rename = "denyOut")]
+    deny_out: &'a [&'static str],
+}
+
+/// Default outbound deny list — same as CubeNet's hardcoded
+/// `alwaysDeniedSandboxCIDRs`.  Duplicated here on purpose so swarm's
+/// HTTP payload makes the policy explicit at the CubeAPI boundary.
+const DEFAULT_DENY_OUT: &[&str] = &[
+    "10.0.0.0/8",
+    "127.0.0.0/8",
+    "169.254.0.0/16",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+];
 
 #[derive(Debug, Serialize)]
 struct FromSnapshot<'a> {
@@ -111,6 +142,10 @@ impl CubeClient for HttpCubeClient {
             template_id: &args.template_id,
             env: &args.env,
             from_snapshot: from_snap_path.as_deref().map(|path| FromSnapshot { path }),
+            allow_internet_access: true,
+            network: SandboxNetwork {
+                deny_out: DEFAULT_DENY_OUT,
+            },
         };
         let url = self.url("/sandboxes");
         let resp: CreateResp = with_retry(MAX_ATTEMPTS, || async {
@@ -307,6 +342,10 @@ mod tests {
         if !body["envVars"].is_null() {
             assert!(body["envVars"].is_object());
         }
+        // Egress policy is always sent so CubeVSContext is non-None on
+        // the API side — see `network_denylist.py` in CubeSandbox/examples.
+        assert_eq!(body["allow_internet_access"], true);
+        assert!(body["network"]["denyOut"].is_array());
         Ok(Json(serde_json::json!({
             "sandboxID": "sb-1",
             "hostIP": "10.0.0.5",
@@ -377,6 +416,45 @@ mod tests {
             api_key: "test-key".into(),
             sandbox_domain: "cube.test".into(),
         }
+    }
+
+    #[test]
+    fn create_body_serialises_egress_policy() {
+        // Lock in the wire shape consumed by CubeAPI's
+        // `build_cubevs_context`: top-level `allow_internet_access` plus
+        // a `network` block carrying `denyOut`.  Without both, the API
+        // returns `cubevs_context: None` and the per-ifindex eBPF
+        // policy maps are not explicitly populated.
+        let env = BTreeMap::new();
+        let body = CreateBody {
+            template_id: "tpl",
+            env: &env,
+            from_snapshot: None,
+            allow_internet_access: true,
+            network: SandboxNetwork {
+                deny_out: DEFAULT_DENY_OUT,
+            },
+        };
+        let v = serde_json::to_value(&body).unwrap();
+        assert_eq!(v["templateID"], "tpl");
+        assert_eq!(v["allow_internet_access"], true);
+        let deny: Vec<&str> = v["network"]["denyOut"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.as_str().unwrap())
+            .collect();
+        // Mirrors `alwaysDeniedSandboxCIDRs` in CubeNet/cubevs/netpolicy.go.
+        assert_eq!(
+            deny,
+            vec![
+                "10.0.0.0/8",
+                "127.0.0.0/8",
+                "169.254.0.0/16",
+                "172.16.0.0/12",
+                "192.168.0.0/16",
+            ],
+        );
     }
 
     #[tokio::test]

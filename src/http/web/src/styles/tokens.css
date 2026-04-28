@@ -1,4 +1,4 @@
-/* warden — design tokens.  Dark by default, light via prefers-color-scheme. */
+/* swarm — design tokens.  Dark by default, light via prefers-color-scheme. */
 
 :root {
   --bg: #0f1115;

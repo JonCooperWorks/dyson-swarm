@@ -29,7 +29,7 @@ pub struct OidcConfig {
     /// The IdP's `iss` claim — must match exactly. e.g.
     /// `https://accounts.google.com`.
     pub issuer: String,
-    /// The expected `aud` claim. Usually the warden's client_id at the IdP.
+    /// The expected `aud` claim. Usually the swarm's client_id at the IdP.
     pub audience: String,
     /// Optional override for the JWKS URL. If `None` we discover it from
     /// `<issuer>/.well-known/openid-configuration`.
@@ -405,12 +405,12 @@ mod tests {
         let idp = spawn_idp().await;
         let cfg = OidcConfig {
             issuer: idp.issuer.clone(),
-            audience: "warden".into(),
+            audience: "swarm".into(),
             jwks_url: None,
             jwks_ttl: Duration::from_secs(60),
         };
         let auth = OidcAuthenticator::new(cfg).unwrap();
-        let token = idp.mint("alice", "warden", Some("alice@example"));
+        let token = idp.mint("alice", "swarm", Some("alice@example"));
         let id = auth
             .authenticate(&headers_with_token(&token))
             .await
@@ -426,13 +426,13 @@ mod tests {
         let idp = spawn_idp().await;
         let cfg = OidcConfig {
             issuer: idp.issuer.clone(),
-            audience: "warden".into(),
+            audience: "swarm".into(),
             jwks_url: None,
             jwks_ttl: Duration::from_secs(60),
         };
         let auth = OidcAuthenticator::new(cfg).unwrap();
         for sub in ["a", "b", "c"] {
-            let t = idp.mint(sub, "warden", None);
+            let t = idp.mint(sub, "swarm", None);
             auth.authenticate(&headers_with_token(&t)).await.unwrap();
         }
         assert_eq!(idp.jwks_calls.load(Ordering::SeqCst), 1);
@@ -443,7 +443,7 @@ mod tests {
         let idp = spawn_idp().await;
         let cfg = OidcConfig {
             issuer: idp.issuer.clone(),
-            audience: "warden".into(),
+            audience: "swarm".into(),
             jwks_url: None,
             jwks_ttl: Duration::from_secs(60),
         };
@@ -461,7 +461,7 @@ mod tests {
         let idp = spawn_idp().await;
         let cfg = OidcConfig {
             issuer: idp.issuer.clone(),
-            audience: "warden".into(),
+            audience: "swarm".into(),
             jwks_url: None,
             jwks_ttl: Duration::from_secs(60),
         };
@@ -478,7 +478,7 @@ mod tests {
         let idp = spawn_idp().await;
         let cfg = OidcConfig {
             issuer: idp.issuer.clone(),
-            audience: "warden".into(),
+            audience: "swarm".into(),
             jwks_url: None,
             jwks_ttl: Duration::from_secs(60),
         };

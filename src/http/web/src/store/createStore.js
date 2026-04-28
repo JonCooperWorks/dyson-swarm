@@ -1,4 +1,4 @@
-/* warden — minimal subscribe / getSnapshot / dispatch store.
+/* swarm — minimal subscribe / getSnapshot / dispatch store.
  *
  * Built for React's useSyncExternalStore: one frozen snapshot, listeners
  * fire synchronously on change, reducers that return the same reference

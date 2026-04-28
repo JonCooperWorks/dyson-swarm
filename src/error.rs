@@ -33,7 +33,7 @@ pub enum BackupError {
 }
 
 #[derive(Debug, Error)]
-pub enum WardenError {
+pub enum SwarmError {
     #[error(transparent)]
     Cube(#[from] CubeError),
     #[error(transparent)]

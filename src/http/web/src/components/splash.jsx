@@ -1,4 +1,4 @@
-/* warden — splash screens.
+/* swarm — splash screens.
  *
  * Three end states the SPA can show without entering the main shell:
  *   - <AuthDisabledSplash/>   — backend reports mode:"none"
@@ -11,7 +11,7 @@ import React from 'react';
 export function AuthDisabledSplash() {
   return (
     <main className="splash">
-      <h1>warden</h1>
+      <h1>swarm</h1>
       <p>This deployment doesn't have OIDC configured for the web UI.</p>
       <p className="muted small">
         Set <code>[oidc].spa_client_id</code> in <code>config.toml</code> to
@@ -27,7 +27,7 @@ export function InactiveAccountSplash({ onLogout }) {
     <main className="splash">
       <h1>account pending activation</h1>
       <p>
-        Your sign-in succeeded, but your warden account hasn't been
+        Your sign-in succeeded, but your swarm account hasn't been
         activated yet.
       </p>
       <p className="muted small">
@@ -42,7 +42,7 @@ export function InactiveAccountSplash({ onLogout }) {
 export function BootErrorSplash({ message, onRetry }) {
   return (
     <main className="splash">
-      <h1>warden</h1>
+      <h1>swarm</h1>
       <p>Couldn't reach the API.</p>
       <p className="muted small">{message || 'unknown error'}</p>
       {onRetry ? <button onClick={onRetry} className="btn">retry</button> : null}

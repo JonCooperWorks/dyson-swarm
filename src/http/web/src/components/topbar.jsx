@@ -1,4 +1,4 @@
-/* warden — top chrome.
+/* swarm — top chrome.
  *
  * Brand on the left, current view tag in the middle, sign-out on the
  * right.  Phase 3 only has a single view (Instances) so the middle
@@ -13,12 +13,12 @@ export function TopBar({ view }) {
   // `view.name === 'admin'` is the route-active state; `auth.isAdmin`
   // is the JWT-permissions-claim state from bootstrapAuth.  The admin
   // link only renders for actual admins — server returns 404 for
-  // non-admins (see require_admin_role on the warden side), so a
+  // non-admins (see require_admin_role on the swarm side), so a
   // visible link would just dead-end into a missing-page error.
   const onAdminRoute = view?.name === 'admin';
   return (
     <header className="topbar">
-      <div className="topbar-brand">warden</div>
+      <div className="topbar-brand">swarm</div>
       <nav className="topbar-nav">
         <a className={!onAdminRoute ? 'active' : ''} href="#/">instances</a>
         {auth.isAdmin ? (

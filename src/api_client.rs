@@ -1,10 +1,10 @@
 //! Tiny HTTP client used by the CLI subcommands so they share one code path
-//! with the public API. The CLI is a client of the local warden, not a
+//! with the public API. The CLI is a client of the local swarm, not a
 //! re-implementation of its logic.
 //!
 //! The bearer is whatever the operator wants to authenticate as.  Stage 5
 //! killed the legacy admin_token; CLI users now mint a `user_api_keys`
-//! row via the SPA and export it as `WARDEN_API_KEY=...` for the CLI to
+//! row via the SPA and export it as `SWARM_API_KEY=...` for the CLI to
 //! pick up via [`build_api_client`] in `main.rs`.
 
 use reqwest::{Client, Method, StatusCode};

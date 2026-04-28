@@ -1,9 +1,9 @@
-/* warden — auth bootstrap for the SPA.
+/* swarm — auth bootstrap for the SPA.
  *
  * Backend tells us via GET /auth/config which mode is active.  For OIDC
  * we run a textbook Authorization Code + PKCE flow against whatever IdP
  * the operator configured — Auth0, Okta, Keycloak, Entra, dex, take
- * your pick.  Warden never sees plaintext credentials; it just verifies
+ * your pick.  Swarm never sees plaintext credentials; it just verifies
  * the JWT the IdP signs back.
  *
  * Token storage:
@@ -25,13 +25,13 @@
  *   The backend /auth/config returns just issuer + audience + client_id
  *   + required_scopes.  The SPA fetches authorization_endpoint and
  *   token_endpoint directly from <issuer>/.well-known/openid-configuration
- *   — every modern IdP serves it CORS-enabled.  This keeps warden out
+ *   — every modern IdP serves it CORS-enabled.  This keeps swarm out
  *   of the IdP discovery business and avoids an unauthenticated
  *   server-side fetch with attacker-influenced URLs.
  */
 
-const STORAGE_KEY = 'warden:auth';
-const PENDING_KEY = 'warden:auth:pending';
+const STORAGE_KEY = 'swarm:auth';
+const PENDING_KEY = 'swarm:auth:pending';
 const REFRESH_LEEWAY_S = 60;
 
 // ──────────────────────────────────────────────────────────────────
@@ -66,7 +66,7 @@ function writeTokens(tokens) {
 // `<sub>.apex.example.com`.  SameSite=Lax keeps it off cross-site POSTs;
 // the proxy has no state-changing cookie-only verbs anyway.  Secure
 // gates it to HTTPS (the deployment is HTTPS-only via Caddy).
-const COOKIE_NAME = 'dyson_warden_session';
+const COOKIE_NAME = 'dyson_swarm_session';
 function cookieDomain() {
   const host = window.location.hostname;
   // No-op when running on localhost / a single-label host (cookies work
@@ -251,7 +251,7 @@ function toStorageShape(t) {
   return {
     access_token: t.access_token,
     // Held only for `id_token_hint` on RP-initiated logout — never
-    // sent to warden's API.  Auth0's end_session endpoint accepts
+    // sent to swarm's API.  Auth0's end_session endpoint accepts
     // logout without a hint but skips the consent screen with one.
     id_token: t.id_token || null,
     refresh_token: t.refresh_token || null,
@@ -401,7 +401,7 @@ function checkAdminClaim(token, cfg) {
 // `post_logout_redirect_uri` must be allowlisted on the IdP side
 // (Auth0: Application → "Allowed Logout URLs").  When the IdP
 // rejects the URL it 400s the redirect; the user lands on an error
-// page instead of warden's splash.
+// page instead of swarm's splash.
 function signOut(cfg, discovery, onRedirect) {
   const tokens = readTokens();
   writeTokens(null);

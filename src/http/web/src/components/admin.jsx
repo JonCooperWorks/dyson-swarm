@@ -1,4 +1,4 @@
-/* warden — Admin view (users + proxy-token revocation).
+/* swarm — Admin view (users + proxy-token revocation).
  *
  * Admin routes (/v1/admin/*) sit behind the same OIDC chain as
  * everything else, with an extra middleware that requires the

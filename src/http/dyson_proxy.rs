@@ -1,6 +1,6 @@
 //! Host-based reverse proxy that fronts each Dyson sandbox.
 //!
-//! When warden is configured with a `hostname` (e.g. `warden.example.com`),
+//! When swarm is configured with a `hostname` (e.g. `swarm.example.com`),
 //! every running Dyson is reachable at `<instance_id>.<hostname>`.  The
 //! [`dispatch`] middleware inspects every inbound request's `Host`
 //! header; if it parses as a sandbox subdomain, the request is
@@ -14,7 +14,7 @@
 //! etc.  A path-prefix proxy would require patching Dyson in five
 //! places.  Subdomains let each Dyson "own" an origin so its existing
 //! root-absolute URLs Just Work.  This is also how Cube itself
-//! organizes sandboxes (`<sandbox_id>.cube.app`), so warden becomes a
+//! organizes sandboxes (`<sandbox_id>.cube.app`), so swarm becomes a
 //! reverse proxy that matches that shape from the outside while
 //! reaching the private network internally.
 //!
@@ -25,7 +25,7 @@
 //!   downstream handlers, but here there are no downstream handlers,
 //!   just the proxy. Same `Authenticator` trait, different invocation
 //!   point. Bearer source: `Authorization: Bearer ...` if present,
-//!   otherwise the `dyson_warden_session` cookie (the SPA mirrors the
+//!   otherwise the `dyson_swarm_session` cookie (the SPA mirrors the
 //!   OIDC access token there with `Domain=<hostname>` so plain URL-bar
 //!   navigation to a Dyson subdomain — open-in-new-tab, image src,
 //!   anchor click — carries credentials. No CSRF surface: there are
@@ -70,7 +70,7 @@ impl DispatchState {
     }
 }
 
-/// Outer middleware applied around the entire warden router.  Inspects
+/// Outer middleware applied around the entire swarm router.  Inspects
 /// the Host header; if it's a sandbox subdomain, authenticates +
 /// forwards.  Otherwise hands the request to `next`.
 pub async fn dispatch(
@@ -98,7 +98,7 @@ pub async fn dispatch(
 pub fn extract_instance_subdomain<'a>(host: &'a str, base: &str) -> Option<&'a str> {
     let host_no_port = host.split(':').next().unwrap_or("");
     // Match the suffix `.{base}` exactly.  A bare `host == base` must
-    // not match — that's warden's own UI, not a sandbox.
+    // not match — that's swarm's own UI, not a sandbox.
     let suffix_len = base.len() + 1;
     if host_no_port.len() <= suffix_len {
         return None;
@@ -125,7 +125,7 @@ async fn forward(state: DispatchState, instance_id: String, req: Request) -> Res
     //    sighting, refuse non-Active accounts.
     //
     //    Anonymous-probe carve-out: `/healthz` requests are forwarded
-    //    without any auth or owner check so warden's internal health
+    //    without any auth or owner check so swarm's internal health
     //    prober can exercise the same end-to-end chain the user's
     //    browser does (Caddy → dispatch → cubeproxy → dyson) without
     //    needing a system credential.  /healthz returns just a tiny
@@ -134,7 +134,7 @@ async fn forward(state: DispatchState, instance_id: String, req: Request) -> Res
     //    than the wildcard cert already exposing the id's existence.
     //
     //    Otherwise: if the inbound request has no Authorization
-    //    header but does carry a `dyson_warden_session` cookie,
+    //    header but does carry a `dyson_swarm_session` cookie,
     //    synthesize the header from the cookie value before
     //    authenticating.  This is what makes the SPA's "open ↗"
     //    link work — a plain anchor click can't set Authorization
@@ -148,7 +148,7 @@ async fn forward(state: DispatchState, instance_id: String, req: Request) -> Res
     let row: InstanceRow = if anonymous_probe {
         match state.app.instances.get_unscoped(&instance_id).await {
             Ok(r) => r,
-            Err(crate::error::WardenError::NotFound) => {
+            Err(crate::error::SwarmError::NotFound) => {
                 return error_response(StatusCode::NOT_FOUND, "no such instance");
             }
             Err(_) => {
@@ -169,7 +169,7 @@ async fn forward(state: DispatchState, instance_id: String, req: Request) -> Res
         };
         match state.app.instances.get(&caller_user_id, &instance_id).await {
             Ok(r) => r,
-            Err(crate::error::WardenError::NotFound) => {
+            Err(crate::error::SwarmError::NotFound) => {
                 return error_response(StatusCode::NOT_FOUND, "no such instance");
             }
             Err(_) => {
@@ -195,7 +195,7 @@ async fn forward(state: DispatchState, instance_id: String, req: Request) -> Res
         Some(q) if !q.is_empty() => format!("{path}?{q}"),
         _ => path.to_string(),
     };
-    let cube_port = std::env::var("WARDEN_CUBE_INTERNAL_PORT")
+    let cube_port = std::env::var("SWARM_CUBE_INTERNAL_PORT")
         .ok()
         .and_then(|p| p.parse::<u16>().ok())
         .unwrap_or(80);
@@ -214,7 +214,7 @@ async fn forward(state: DispatchState, instance_id: String, req: Request) -> Res
     };
 
     // 5. Outbound headers: strip hop-by-hop + cookie + host + the
-    //    inbound Authorization (warden's OIDC bearer, useless to
+    //    inbound Authorization (swarm's OIDC bearer, useless to
     //    Dyson), then stamp the per-instance bearer.
     let mut out_headers = HeaderMap::new();
     for (k, v) in parts.headers.iter() {
@@ -277,7 +277,7 @@ fn error_response(status: StatusCode, msg: &str) -> Response<Body> {
 
 /// If the inbound headers already carry `Authorization`, return them
 /// as-is (cheaply — the caller borrows the result).  Otherwise, look
-/// for a `dyson_warden_session=<jwt>` cookie and, if found, return a
+/// for a `dyson_swarm_session=<jwt>` cookie and, if found, return a
 /// new `HeaderMap` with a stamped-in `Authorization: Bearer <jwt>`.
 ///
 /// The cookie name is intentionally specific so it can't collide with
@@ -286,7 +286,7 @@ fn ensure_authorization_from_cookie(inbound: &HeaderMap) -> HeaderMap {
     if inbound.get(header::AUTHORIZATION).is_some() {
         return inbound.clone();
     }
-    let Some(token) = read_cookie(inbound, "dyson_warden_session") else {
+    let Some(token) = read_cookie(inbound, "dyson_swarm_session") else {
         return inbound.clone();
     };
     let mut out = inbound.clone();
@@ -331,8 +331,8 @@ fn is_hop_by_hop(name: &HeaderName) -> bool {
 ///
 /// CubeSandbox's cubeproxy serves `*.cube.app` with TLS issued by a
 /// per-host mkcert root that isn't in reqwest's webpki bundle. Set
-/// `WARDEN_CUBE_ROOT_CA` to the absolute path of that PEM (the
-/// installer drops it at `/etc/dyson-warden/cube-root-ca.pem`) and
+/// `SWARM_CUBE_ROOT_CA` to the absolute path of that PEM (the
+/// installer drops it at `/etc/dyson-swarm/cube-root-ca.pem`) and
 /// the proxy will trust it as an additional root. Verification stays
 /// on; the only thing changing is which CAs the client treats as
 /// authoritative for cubeproxy's hostnames.
@@ -340,7 +340,7 @@ pub fn build_client() -> Result<reqwest::Client, reqwest::Error> {
     let mut b = reqwest::Client::builder()
         .timeout(Duration::from_secs(30 * 60))
         .pool_idle_timeout(Duration::from_secs(60));
-    if let Ok(path) = std::env::var("WARDEN_CUBE_ROOT_CA")
+    if let Ok(path) = std::env::var("SWARM_CUBE_ROOT_CA")
         && !path.is_empty()
     {
         match std::fs::read(&path) {
@@ -349,9 +349,9 @@ pub fn build_client() -> Result<reqwest::Client, reqwest::Error> {
                     tracing::info!(path = %path, "dyson_proxy: trusting cube root CA");
                     b = b.add_root_certificate(cert);
                 }
-                Err(e) => tracing::error!(path = %path, error = %e, "WARDEN_CUBE_ROOT_CA: failed to parse PEM"),
+                Err(e) => tracing::error!(path = %path, error = %e, "SWARM_CUBE_ROOT_CA: failed to parse PEM"),
             },
-            Err(e) => tracing::error!(path = %path, error = %e, "WARDEN_CUBE_ROOT_CA: failed to read"),
+            Err(e) => tracing::error!(path = %path, error = %e, "SWARM_CUBE_ROOT_CA: failed to read"),
         }
     }
     b.build()
@@ -364,7 +364,7 @@ mod tests {
     #[test]
     fn extract_subdomain_happy_path() {
         assert_eq!(
-            extract_instance_subdomain("abc123.warden.example.com", "warden.example.com"),
+            extract_instance_subdomain("abc123.swarm.example.com", "swarm.example.com"),
             Some("abc123"),
         );
     }
@@ -372,42 +372,42 @@ mod tests {
     #[test]
     fn extract_subdomain_strips_port() {
         assert_eq!(
-            extract_instance_subdomain("abc123.warden.example.com:8080", "warden.example.com"),
+            extract_instance_subdomain("abc123.swarm.example.com:8080", "swarm.example.com"),
             Some("abc123"),
         );
     }
 
     #[test]
     fn bare_base_host_does_not_match() {
-        // Browser hits warden's own UI on the apex hostname — not a
+        // Browser hits swarm's own UI on the apex hostname — not a
         // sandbox subdomain.
-        assert!(extract_instance_subdomain("warden.example.com", "warden.example.com").is_none());
-        assert!(extract_instance_subdomain("warden.example.com:8080", "warden.example.com").is_none());
+        assert!(extract_instance_subdomain("swarm.example.com", "swarm.example.com").is_none());
+        assert!(extract_instance_subdomain("swarm.example.com:8080", "swarm.example.com").is_none());
     }
 
     #[test]
     fn multi_label_prefix_does_not_match() {
-        // a.b.warden.example.com would mean a sandbox-of-a-sandbox; we
+        // a.b.swarm.example.com would mean a sandbox-of-a-sandbox; we
         // accept exactly one label in front.
-        assert!(extract_instance_subdomain("a.b.warden.example.com", "warden.example.com").is_none());
+        assert!(extract_instance_subdomain("a.b.swarm.example.com", "swarm.example.com").is_none());
     }
 
     #[test]
     fn unrelated_host_does_not_match() {
-        assert!(extract_instance_subdomain("evil.com", "warden.example.com").is_none());
+        assert!(extract_instance_subdomain("evil.com", "swarm.example.com").is_none());
         // Substring-but-not-suffix attack.
         assert!(extract_instance_subdomain(
-            "warden.example.com.evil.com",
-            "warden.example.com",
+            "swarm.example.com.evil.com",
+            "swarm.example.com",
         )
         .is_none());
     }
 
     #[test]
     fn empty_prefix_does_not_match() {
-        // ".warden.example.com" — empty leading label.  `strip_suffix`
+        // ".swarm.example.com" — empty leading label.  `strip_suffix`
         // would otherwise return Some("") and we'd happily try to look
         // up an empty instance id.
-        assert!(extract_instance_subdomain(".warden.example.com", "warden.example.com").is_none());
+        assert!(extract_instance_subdomain(".swarm.example.com", "swarm.example.com").is_none());
     }
 }

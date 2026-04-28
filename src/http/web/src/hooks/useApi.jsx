@@ -1,4 +1,4 @@
-/* warden — React context for the WardenClient.
+/* swarm — React context for the SwarmClient.
  *
  * The client is built once at bootstrap and provided here so child
  * components don't have to thread it through props.  useApi() is the

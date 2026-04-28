@@ -56,7 +56,7 @@ pub struct AppState {
     pub tokens: Arc<dyn TokenStore>,
     pub users: Arc<dyn crate::traits::UserStore>,
     pub sandbox_domain: String,
-    /// Public hostname warden serves on, e.g. `"warden.example.com"`.
+    /// Public hostname swarm serves on, e.g. `"swarm.example.com"`.
     /// Drives the host-based dispatcher in
     /// [`dyson_proxy`] (each Dyson is reachable at
     /// `<instance_id>.<hostname>`) and `InstanceView::open_url` (the
@@ -119,7 +119,7 @@ pub fn router(
     //
     // `--dangerous-no-auth` mode skips user_middleware entirely —
     // require_admin_role's pass-through branch then stamps the
-    // X-Warden-Insecure header.  Otherwise local-dev would 401 on
+    // X-Swarm-Insecure header.  Otherwise local-dev would 401 on
     // every admin endpoint and the marker header would never fire.
     let admin_handlers =
         proxy_admin::router(state.clone()).merge(crate::http::admin_users::router(state.clone()));
@@ -424,16 +424,16 @@ mod tests {
 
     #[tokio::test]
     async fn host_dispatcher_passes_through_when_host_does_not_match() {
-        // hostname configured, but request Host = base host (warden's
+        // hostname configured, but request Host = base host (swarm's
         // own UI, not a sandbox subdomain).  The dispatcher must not
         // intercept; the request flows through to the normal router
         // and we get the regular 401 from user_middleware.
         let (mut state, users) = build_state().await;
-        state.hostname = Some("warden.test".into());
+        state.hostname = Some("swarm.test".into());
         let base = spawn(state, AuthState::enforced(crate::config::OidcRoles { claim: "https://test/roles".into(), admin: "rol_admin".into() }), deny_user_auth(users)).await;
         let r = reqwest::Client::new()
             .get(format!("{base}/v1/instances"))
-            .header("host", "warden.test")
+            .header("host", "swarm.test")
             .send()
             .await
             .unwrap();
@@ -446,14 +446,14 @@ mod tests {
         // The dispatcher authenticates the user (alice), looks up the
         // instance, and returns 404.
         let (mut state, _) = build_state().await;
-        state.hostname = Some("warden.test".into());
+        state.hostname = Some("swarm.test".into());
         let users = state.users.clone();
         let (alice_auth, _alice_id) =
             crate::auth::user::fixed_user_auth(users, "alice").await;
         let base = spawn(state, AuthState::enforced(crate::config::OidcRoles { claim: "https://test/roles".into(), admin: "rol_admin".into() }), alice_auth).await;
         let r = reqwest::Client::new()
             .get(format!("{base}/anything"))
-            .header("host", "no-such-id.warden.test")
+            .header("host", "no-such-id.swarm.test")
             .send()
             .await
             .unwrap();
@@ -467,7 +467,7 @@ mod tests {
         let r = reqwest::get(format!("{base}/v1/admin/users")).await.unwrap();
         assert_eq!(r.status(), 200);
         assert_eq!(
-            r.headers().get("x-warden-insecure").map(|v| v.to_str().unwrap()),
+            r.headers().get("x-swarm-insecure").map(|v| v.to_str().unwrap()),
             Some("1")
         );
     }
@@ -535,6 +535,6 @@ mod tests {
         let base = spawn(state, AuthState::dangerous_no_auth(), deny_user_auth(users)).await;
         let r = reqwest::get(format!("{base}/healthz")).await.unwrap();
         assert_eq!(r.status(), 200);
-        assert!(r.headers().get("x-warden-insecure").is_none());
+        assert!(r.headers().get("x-swarm-insecure").is_none());
     }
 }

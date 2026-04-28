@@ -7,7 +7,7 @@ import react from '@vitejs/plugin-react';
 // Dyson's pattern.
 function inlineCss() {
   return {
-    name: 'warden-inline-css',
+    name: 'swarm-inline-css',
     apply: 'build',
     enforce: 'post',
     transformIndexHtml: {
@@ -33,7 +33,7 @@ function inlineCss() {
   };
 }
 
-// Dev server proxies the warden HTTP server running on :8080 so the
+// Dev server proxies the swarm HTTP server running on :8080 so the
 // frontend can be iterated with HMR while talking to a real backend.
 // Production build emits to ./dist, which build.rs bakes into the Rust
 // binary via include_bytes!.

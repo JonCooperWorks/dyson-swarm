@@ -1,4 +1,4 @@
-/* warden — cold-load.
+/* swarm — cold-load.
  *
  * After auth bootstrap and before React mounts we probe the API to
  * confirm the user's account is active and pull the initial instance
@@ -16,7 +16,7 @@ export async function boot(client) {
     return { ok: true };
   } catch (err) {
     setBootstrapped(true);
-    setLoadError(err?.message || 'failed to reach warden');
+    setLoadError(err?.message || 'failed to reach swarm');
     // 403 from user_middleware means the user's row exists but isn't
     // Active — surface it so the splash can guide them to ask their
     // admin for activation.

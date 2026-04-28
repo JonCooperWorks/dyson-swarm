@@ -15,7 +15,7 @@ use axum::{Json, Router};
 use serde::Deserialize;
 
 use crate::auth::CallerIdentity;
-use crate::http::instances::warden_err_to_status;
+use crate::http::instances::swarm_err_to_status;
 use crate::http::AppState;
 use crate::instance::CreatedInstance;
 use crate::snapshot::SnapshotView;
@@ -40,7 +40,7 @@ async fn list_for_instance(
 ) -> Result<Json<Vec<SnapshotView>>, StatusCode> {
     match state.snapshots.list_for_instance(&caller.user_id, &id).await {
         Ok(rows) => Ok(Json(rows.into_iter().map(SnapshotView::from).collect())),
-        Err(e) => Err(warden_err_to_status(e)),
+        Err(e) => Err(swarm_err_to_status(e)),
     }
 }
 
@@ -60,7 +60,7 @@ async fn snapshot(
 ) -> Result<(StatusCode, Json<SnapshotView>), StatusCode> {
     match state.snapshots.snapshot(&caller.user_id, &id).await {
         Ok(row) => Ok((StatusCode::CREATED, Json(SnapshotView::from(row)))),
-        Err(e) => Err(warden_err_to_status(e)),
+        Err(e) => Err(swarm_err_to_status(e)),
     }
 }
 
@@ -71,7 +71,7 @@ async fn backup(
 ) -> Result<(StatusCode, Json<SnapshotView>), StatusCode> {
     match state.snapshots.backup(&caller.user_id, &id).await {
         Ok(row) => Ok((StatusCode::CREATED, Json(SnapshotView::from(row)))),
-        Err(e) => Err(warden_err_to_status(e)),
+        Err(e) => Err(swarm_err_to_status(e)),
     }
 }
 
@@ -82,7 +82,7 @@ async fn pull(
 ) -> Result<Json<SnapshotView>, StatusCode> {
     match state.snapshots.pull(&caller.user_id, &id).await {
         Ok(row) => Ok(Json(SnapshotView::from(row))),
-        Err(e) => Err(warden_err_to_status(e)),
+        Err(e) => Err(swarm_err_to_status(e)),
     }
 }
 
@@ -98,6 +98,6 @@ async fn restore(
         .await
     {
         Ok(c) => Ok((StatusCode::CREATED, Json(c))),
-        Err(e) => Err(warden_err_to_status(e)),
+        Err(e) => Err(swarm_err_to_status(e)),
     }
 }

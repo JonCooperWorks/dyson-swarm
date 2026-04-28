@@ -1,4 +1,4 @@
-/* warden — Instances view (list + detail + create modal).
+/* swarm — Instances view (list + detail + create modal).
  *
  * Two-pane layout: left rail lists every instance the caller owns,
  * the right pane shows whichever id the URL hash names.  Hash routing
@@ -114,17 +114,17 @@ function CreateModal({ onClose, onCreated }) {
   const [task, setTask] = React.useState('');
   // Model ids the agent can pick from.  One labelled suggestion
   // group ("default", from operator-curated `default_models` in
-  // /etc/dyson-warden/config.toml via /auth/config) plus free-form
+  // /etc/dyson-swarm/config.toml via /auth/config) plus free-form
   // text input for anything else (any OpenRouter id, comma- and
-  // space-tolerant).  First selected model becomes WARDEN_MODEL
+  // space-tolerant).  First selected model becomes SWARM_MODEL
   // (legacy single-pick env); the full list is passed as
-  // WARDEN_MODELS (csv) for agents that support failover/rotation.
+  // SWARM_MODELS (csv) for agents that support failover/rotation.
   const defaultModels = auth?.config?.default_models || [];
   const [models, setModels] = React.useState(
     defaultModels.length ? [defaultModels[0]] : []
   );
   // Operator-configured default from `default_template_id` in
-  // /etc/dyson-warden/config.toml, surfaced via /auth/config.  Fall
+  // /etc/dyson-swarm/config.toml, surfaced via /auth/config.  Fall
   // back to a placeholder string only when the deployment hasn't
   // configured one — submit is gated on `templateId.trim()` so the
   // user sees the field empty and is forced to fill it in.
@@ -151,11 +151,11 @@ function CreateModal({ onClose, onCreated }) {
         template_id: templateId.trim(),
         env: {
           // First-pick stays under the legacy single-model env so
-          // Dyson agents that read WARDEN_MODEL keep working.
-          WARDEN_MODEL: models[0],
+          // Dyson agents that read SWARM_MODEL keep working.
+          SWARM_MODEL: models[0],
           // Full ordered list — Dyson agents that support multiple
           // models (failover, A/B) split this on commas.
-          WARDEN_MODELS: models.join(','),
+          SWARM_MODELS: models.join(','),
         },
       };
       if (name.trim()) req.name = name.trim();
@@ -217,7 +217,7 @@ function CreateModal({ onClose, onCreated }) {
             rows={6}
           />
           <span className="hint muted small">
-            The agent reads this on first boot as <code>WARDEN_TASK</code>.
+            The agent reads this on first boot as <code>SWARM_TASK</code>.
             You can edit it later, but changes don't propagate to a
             running employee.
           </span>
@@ -273,7 +273,7 @@ function CreateModal({ onClose, onCreated }) {
   );
 }
 
-// Multi-select with two labelled suggestion sources: the warden's
+// Multi-select with two labelled suggestion sources: the swarm's
 // operator-curated `default_models` ("default") and the configured
 // upstream provider's full catalogue ("openrouter") fetched via
 // /v1/models — never directly from openrouter.ai.  Free-form text
@@ -544,7 +544,7 @@ function InstanceDetail({ id }) {
 
   const displayName = row.name && row.name.trim() ? row.name : '(unnamed)';
   // open_url is computed by the backend from `[server] hostname` + the
-  // instance id.  Null when warden has no hostname configured (the
+  // instance id.  Null when swarm has no hostname configured (the
   // host-based proxy is a no-op in that case) — that's the only case
   // we hard-disable the link, since there's literally nowhere to go.
   //
@@ -586,7 +586,7 @@ function InstanceDetail({ id }) {
             onClick={(e) => { if (!canOpen) e.preventDefault(); }}
             title={
               !canOpen
-                ? 'warden hostname is not configured — set [server] hostname in config.toml'
+                ? 'swarm hostname is not configured — set [server] hostname in config.toml'
                 : isWarmingUp
                   ? 'sandbox is still warming up — opening anyway'
                   : 'open this dyson in a new tab'

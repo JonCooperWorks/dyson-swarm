@@ -1,5 +1,5 @@
-// Build script — compiles the warden frontend (Vite) and generates the
-// Rust asset table that embeds the bundle into the warden binary.
+// Build script — compiles the swarm frontend (Vite) and generates the
+// Rust asset table that embeds the bundle into the swarm binary.
 //
 // Mirrors Dyson's build.rs design:
 //   * Outer gate: `cargo:rerun-if-changed` for every watched input — cargo
@@ -46,7 +46,7 @@ fn main() {
         ensure_node_modules(&web);
         run_npm_build(&web);
     } else {
-        println!("cargo:warning=warden: frontend dist/ is up to date, skipping vite build");
+        println!("cargo:warning=swarm: frontend dist/ is up to date, skipping vite build");
     }
 
     generate_asset_table(&dist, &out_dir.join("web_assets.rs"));
@@ -139,7 +139,7 @@ fn ensure_npm_available() {
         .unwrap_or(false);
     if !ok {
         panic!(
-            "npm is required to build the warden frontend.  Install Node.js 20+ \
+            "npm is required to build the swarm frontend.  Install Node.js 20+ \
              (https://nodejs.org) and retry `cargo build`.  The frontend lives \
              at {WEB_REL}/ and is bundled into the binary."
         );
@@ -147,7 +147,7 @@ fn ensure_npm_available() {
 }
 
 fn ensure_node_modules(web: &Path) {
-    let stamp = web.join("node_modules").join(".warden-lock-hash");
+    let stamp = web.join("node_modules").join(".swarm-lock-hash");
     let lock = web.join("package-lock.json");
     let hash = fs::read(&lock).map(hash_bytes).unwrap_or(0);
 
@@ -156,7 +156,7 @@ fn ensure_node_modules(web: &Path) {
         return;
     }
 
-    println!("cargo:warning=warden: installing frontend dependencies (npm install)");
+    println!("cargo:warning=swarm: installing frontend dependencies (npm install)");
     // `npm install` (not `npm ci`) so first-time builds without a
     // package-lock.json still work.  `npm ci` is stricter but requires a
     // pre-existing lockfile, which we don't ship.
@@ -175,7 +175,7 @@ fn ensure_node_modules(web: &Path) {
 }
 
 fn run_npm_build(web: &Path) {
-    println!("cargo:warning=warden: building frontend bundle (npm run build:nocheck)");
+    println!("cargo:warning=swarm: building frontend bundle (npm run build:nocheck)");
     // `build:nocheck` skips vitest — we run that separately in CI.  The
     // build.rs path is for `cargo build`, where a vitest failure would be
     // confusing if the frontend isn't what changed.

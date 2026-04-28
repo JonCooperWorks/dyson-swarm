@@ -13,7 +13,7 @@
 //! IdP-managed role, not a credential type.
 //!
 //! The `--dangerous-no-auth` flag bypasses both middlewares (set up
-//! at the router layer) and stamps an `X-Warden-Insecure: 1` header
+//! at the router layer) and stamps an `X-Swarm-Insecure: 1` header
 //! on every response so callers can't mistake the deployment posture.
 
 use axum::body::Body;
@@ -29,7 +29,7 @@ use crate::config::OidcRoles;
 ///
 /// - [`OidcRoles`] (cloned from config) — claim name + admin role id.
 /// - `dangerous_no_auth` — when true, every request passes and the
-///   response carries `X-Warden-Insecure: 1`.  Used by `--dangerous-no-auth`
+///   response carries `X-Swarm-Insecure: 1`.  Used by `--dangerous-no-auth`
 ///   for local dev; never set in production.
 #[derive(Clone, Debug)]
 pub struct AuthState {
@@ -73,7 +73,7 @@ pub async fn require_admin_role(
     if auth.dangerous_no_auth {
         let mut resp = next.run(req).await;
         resp.headers_mut()
-            .insert("X-Warden-Insecure", HeaderValue::from_static("1"));
+            .insert("X-Swarm-Insecure", HeaderValue::from_static("1"));
         return resp;
     }
 

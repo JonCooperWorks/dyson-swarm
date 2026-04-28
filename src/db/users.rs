@@ -13,7 +13,7 @@
 //! by opening the ciphertext with the user's key.
 //!
 //! Token format: `dy_<32 hex>` (35 chars).  The `dy_` literal makes
-//! warden-issued tokens unmistakable in logs / dashboards and lets
+//! swarm-issued tokens unmistakable in logs / dashboards and lets
 //! `BearerAuthenticator` short-circuit obviously-not-ours bearers
 //! before any DB hit.  The 32-hex random part gives 128 bits of
 //! unguessable entropy.
@@ -39,7 +39,7 @@ use crate::error::StoreError;
 use crate::now_secs;
 use crate::traits::{UserApiKey, UserRow, UserStatus, UserStore};
 
-/// Literal prefix every warden-issued bearer carries.  Public so
+/// Literal prefix every swarm-issued bearer carries.  Public so
 /// [`crate::auth::bearer::BearerAuthenticator`] can route by it.
 pub const TOKEN_PREFIX: &str = "dy_";
 /// Width (in chars) of the indexed plaintext lookup prefix.  8 hex
@@ -101,7 +101,7 @@ fn generate_token() -> String {
 }
 
 /// Extract the indexed lookup prefix from a token.  Returns `None`
-/// for anything that isn't shaped like a warden bearer (wrong literal
+/// for anything that isn't shaped like a swarm bearer (wrong literal
 /// prefix, too short).  Used by both mint (to derive the row's
 /// `prefix` column) and resolve (to compute the sqlite WHERE clause).
 fn lookup_prefix(token: &str) -> Option<&str> {

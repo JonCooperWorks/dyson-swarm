@@ -1,6 +1,6 @@
 //! Envelope encryption for secrets at rest.
 //!
-//! Every long-lived secret warden owns — provider API keys, per-user
+//! Every long-lived secret swarm owns — provider API keys, per-user
 //! OpenRouter keys, the per-user `api_keys` we mint for CLI access,
 //! arbitrary per-user opaque blobs — passes through this module on
 //! the way to and from sqlite.  The store sees only ciphertext; the
@@ -8,7 +8,7 @@
 //!
 //! ## Key model — one root key per user
 //!
-//! Each warden user owns an age X25519 root key.  That user's secrets
+//! Each swarm user owns an age X25519 root key.  That user's secrets
 //! are encrypted to their key only; compromise of one user's key
 //! doesn't reveal another user's plaintext.  System-scope secrets
 //! (provider api_keys, OpenRouter provisioning key) live under the
@@ -165,7 +165,7 @@ impl std::fmt::Debug for AgeCipher {
 
 impl AgeCipher {
     /// Load an age identity from `path` and build a cipher around it.
-    /// The file must be readable by the warden process and SHOULD be
+    /// The file must be readable by the swarm process and SHOULD be
     /// mode 0400 / 0600 (the operator's responsibility — we don't
     /// enforce here so tests can use temp files).
     pub fn from_key_file(path: impl Into<PathBuf>) -> Result<Self, EnvelopeError> {

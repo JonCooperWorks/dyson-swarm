@@ -1,4 +1,4 @@
-/* warden — global app state.
+/* swarm — global app state.
  *
  * Two top-level slices:
  *   - meta:      cold-load status, current view, error banner

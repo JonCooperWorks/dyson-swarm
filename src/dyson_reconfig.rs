@@ -1,6 +1,6 @@
 //! HTTP implementation of [`crate::instance::DysonReconfigurer`].
 //!
-//! Pushes warden-side identity/task/model state into a running dyson
+//! Pushes swarm-side identity/task/model state into a running dyson
 //! sandbox via dyson's `/api/admin/configure` endpoint.  Cube's
 //! microVM snapshot/restore freezes the dyson process's `/proc/self/environ`
 //! at warmup time (env empty) — without this push, every instance
@@ -25,7 +25,7 @@ use crate::secrets::SystemSecretsService;
 /// Header dyson reads to verify the per-instance configure secret.
 /// Value is the 32-hex plaintext; dyson runs argon2id over it and
 /// compares against the stored hash.
-const CONFIGURE_HEADER: &str = "X-Warden-Configure";
+const CONFIGURE_HEADER: &str = "X-Swarm-Configure";
 
 /// Header dyson's CSRF gate insists on for state-changing /api/*
 /// methods.  The value isn't read — only the presence is checked
@@ -39,7 +39,7 @@ const CSRF_HEADER: &str = "X-Dyson-CSRF";
 pub struct DysonReconfigurerHttp {
     http: reqwest::Client,
     /// Cube-internal sandbox suffix, e.g. `cube.app:8443`.  Mirrors
-    /// `[cube] sandbox_domain` in warden config.
+    /// `[cube] sandbox_domain` in swarm config.
     sandbox_domain: String,
     /// Where the per-instance configure secret is sealed.
     system_secrets: Arc<SystemSecretsService>,
@@ -55,7 +55,7 @@ impl DysonReconfigurerHttp {
         system_secrets: Arc<SystemSecretsService>,
     ) -> Result<Self, reqwest::Error> {
         let mut b = reqwest::Client::builder().timeout(Duration::from_secs(15));
-        if let Ok(path) = std::env::var("WARDEN_CUBE_ROOT_CA")
+        if let Ok(path) = std::env::var("SWARM_CUBE_ROOT_CA")
             && !path.is_empty()
         {
             match std::fs::read(&path) {
@@ -99,7 +99,7 @@ impl DysonReconfigurerHttp {
     /// forwarding regular requests (cubeproxy routes by the
     /// leading `<port>-` label of the SNI).
     fn url_for(&self, sandbox_id: &str) -> String {
-        let port: u16 = std::env::var("WARDEN_CUBE_INTERNAL_PORT")
+        let port: u16 = std::env::var("SWARM_CUBE_INTERNAL_PORT")
             .ok()
             .and_then(|p| p.parse().ok())
             .unwrap_or(80);
@@ -136,7 +136,7 @@ impl DysonReconfigurer for DysonReconfigurerHttp {
             .http
             .post(&url)
             .header(CONFIGURE_HEADER, &secret)
-            .header(CSRF_HEADER, "warden-internal")
+            .header(CSRF_HEADER, "swarm-internal")
             .json(body)
             .send()
             .await

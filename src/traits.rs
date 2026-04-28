@@ -51,7 +51,7 @@ pub struct UserRow {
     pub last_seen_at: Option<i64>,
     /// Stable OpenRouter Provisioning-API key id, or None before the
     /// first lazy mint.  Set when the proxy mints a key for this
-    /// user; cleared when an admin suspends/deletes them and warden
+    /// user; cleared when an admin suspends/deletes them and swarm
     /// revokes upstream.
     pub openrouter_key_id: Option<String>,
     /// USD spend cap on this user's OR key.  Default $10 (set by the
@@ -177,13 +177,13 @@ pub struct InstanceRow {
     pub id: String,
     pub owner_id: String,
     /// Human-readable label ("PR reviewer for foo/bar"). Optional —
-    /// stored as empty string when unset. Surfaced as `WARDEN_NAME` in
+    /// stored as empty string when unset. Surfaced as `SWARM_NAME` in
     /// the sandbox env at create/restore time.
     pub name: String,
-    /// Free-text mission statement. Surfaced as `WARDEN_TASK` in the
-    /// sandbox env at create/restore time. Per the design: warden
+    /// Free-text mission statement. Surfaced as `SWARM_TASK` in the
+    /// sandbox env at create/restore time. Per the design: swarm
     /// seeds this on first boot; the agent (Dyson) owns identity from
-    /// then on, so subsequent edits in warden don't propagate to a
+    /// then on, so subsequent edits in swarm don't propagate to a
     /// running sandbox without an explicit re-onboard.
     pub task: String,
     pub cube_sandbox_id: Option<String>,
@@ -357,7 +357,7 @@ pub trait SystemSecretStore: Send + Sync {
     async fn put(&self, name: &str, ciphertext: &str) -> Result<(), StoreError>;
     async fn get(&self, name: &str) -> Result<Option<String>, StoreError>;
     async fn delete(&self, name: &str) -> Result<(), StoreError>;
-    /// Returns names only (operators inspect via `warden secret list system`).
+    /// Returns names only (operators inspect via `swarm secret list system`).
     async fn list_names(&self) -> Result<Vec<String>, StoreError>;
 }
 

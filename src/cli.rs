@@ -4,14 +4,14 @@ use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "warden",
+    name = "swarm",
     version,
     about = "Orchestrator for Dyson agents in CubeSandbox MicroVMs",
     disable_help_subcommand = true
 )]
 pub struct Cli {
     /// Path to the config TOML.
-    #[arg(long, default_value = "/etc/dyson-warden/config.toml", global = true)]
+    #[arg(long, default_value = "/etc/dyson-swarm/config.toml", global = true)]
     pub config: PathBuf,
 
     /// Disable the admin-token check on /v1/* routes. Loud and dangerous;
@@ -87,7 +87,7 @@ pub enum SecretsAction {
     Clear { instance: String, name: String },
     /// Set or overwrite a system-scope secret (provider api keys, etc.).
     /// Bypasses the HTTP API and writes straight to the DB + cipher dir,
-    /// so it's runnable on the warden host without an admin bearer.
+    /// so it's runnable on the swarm host without an admin bearer.
     SystemSet { name: String, value: String },
     /// Remove a system-scope secret by name.
     SystemClear { name: String },
@@ -102,7 +102,7 @@ pub const DANGEROUS_BANNER: &str = "\
 =================================================================
 WARNING: --dangerous-no-auth is set.
 The admin API at /v1/* will accept requests with no bearer token.
-Every authenticated response carries X-Warden-Insecure.
+Every authenticated response carries X-Swarm-Insecure.
 Do not run this configuration outside a trusted network.
 =================================================================";
 

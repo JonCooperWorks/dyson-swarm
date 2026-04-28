@@ -26,7 +26,7 @@ use axum::{Json, Router};
 use futures::stream;
 use serde_json::json;
 
-use dyson_warden::{
+use dyson_swarm::{
     auth::AuthState,
     backup::local::LocalDiskBackupSink,
     config::{ProviderConfig, Providers},
@@ -79,7 +79,7 @@ async fn cube_snapshot(
     let name = body["name"].as_str().unwrap_or("snap").to_string();
     let id = format!("snap-{sandbox}-{name}");
     s.snapshots.lock().unwrap().push(id.clone());
-    let dir = std::env::temp_dir().join(format!("warden-e2e-{}-{}", std::process::id(), id));
+    let dir = std::env::temp_dir().join(format!("swarm-e2e-{}-{}", std::process::id(), id));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("metadata.json"), b"{\"v\":1}").unwrap();
     Json(json!({
@@ -161,17 +161,17 @@ async fn spawn(router: Router) -> String {
 
 #[tokio::test]
 async fn full_walkthrough() {
-    // 1. Mocks first so warden can be configured against them.
+    // 1. Mocks first so swarm can be configured against them.
     let cube_state = CubeState::default();
     let cube_url = spawn(cube_router(cube_state.clone())).await;
 
     let llm_state = LlmState::default();
     let llm_url = spawn(llm_router(llm_state.clone())).await;
 
-    // 2. Warden assembly. In-memory DB, real HttpCubeClient pointing at the
+    // 2. Swarm assembly. In-memory DB, real HttpCubeClient pointing at the
     // mock Cube, local backup sink (sufficient for the e2e — no S3 leg).
     let pool = db::open_in_memory().await.unwrap();
-    let cube_cfg = dyson_warden::config::CubeConfig {
+    let cube_cfg = dyson_swarm::config::CubeConfig {
         url: cube_url.clone(),
         api_key: "k".into(),
         sandbox_domain: "cube.test".into(),
@@ -184,10 +184,10 @@ async fn full_walkthrough() {
     let cipher_dir: Arc<dyn CipherDirectory> =
         Arc::new(AgeCipherDirectory::new(keys_tmp.path()).unwrap());
     let user_secrets_store: Arc<dyn UserSecretStore> = Arc::new(
-        dyson_warden::db::secrets::SqlxUserSecretStore::new(pool.clone()),
+        dyson_swarm::db::secrets::SqlxUserSecretStore::new(pool.clone()),
     );
     let system_secrets_store: Arc<dyn SystemSecretStore> = Arc::new(
-        dyson_warden::db::secrets::SqlxSystemSecretStore::new(pool.clone()),
+        dyson_swarm::db::secrets::SqlxSystemSecretStore::new(pool.clone()),
     );
     let user_secrets_svc = Arc::new(UserSecretsService::new(user_secrets_store, cipher_dir.clone()));
     let system_secrets_svc = Arc::new(SystemSecretsService::new(system_secrets_store, cipher_dir.clone()));
@@ -196,17 +196,17 @@ async fn full_walkthrough() {
         instances_store.clone(),
         secrets_store.clone(),
         tokens_store.clone(),
-        "http://warden.test/llm",
+        "http://swarm.test/llm",
         3600,
     ));
     let secrets_svc = Arc::new(SecretsService::new(secrets_store.clone(), cipher_dir.clone()));
     let backup: Arc<dyn BackupSink> = Arc::new(LocalDiskBackupSink::new(cube.clone()));
     let snapshots_store: Arc<dyn SnapshotStore> =
-        Arc::new(dyson_warden::db::snapshots::SqliteSnapshotStore::new(pool.clone()));
+        Arc::new(dyson_swarm::db::snapshots::SqliteSnapshotStore::new(pool.clone()));
     let policies_store: Arc<dyn PolicyStore> =
-        Arc::new(dyson_warden::db::policies::SqlitePolicyStore::new(pool.clone()));
+        Arc::new(dyson_swarm::db::policies::SqlitePolicyStore::new(pool.clone()));
     let audit_store: Arc<dyn AuditStore> =
-        Arc::new(dyson_warden::db::audit::SqliteAuditStore::new(pool.clone()));
+        Arc::new(dyson_swarm::db::audit::SqliteAuditStore::new(pool.clone()));
     let snapshot_svc = Arc::new(SnapshotService::new(
         cube.clone(),
         instances_store.clone(),
@@ -249,11 +249,11 @@ async fn full_walkthrough() {
     let llm_router_inner = proxy::http::router(proxy_svc);
 
     let prober: Arc<dyn HealthProber> = Arc::new(StubProber);
-    let users_store: Arc<dyn dyson_warden::traits::UserStore> = Arc::new(
-        dyson_warden::db::users::SqlxUserStore::new(pool.clone(), cipher_dir.clone()),
+    let users_store: Arc<dyn dyson_swarm::traits::UserStore> = Arc::new(
+        dyson_swarm::db::users::SqlxUserStore::new(pool.clone(), cipher_dir.clone()),
     );
     let (user_auth, _user_id) =
-        dyson_warden::auth::user::fixed_user_auth(users_store.clone(), "alice").await;
+        dyson_swarm::auth::user::fixed_user_auth(users_store.clone(), "alice").await;
     let app_state = http::AppState {
         secrets: secrets_svc,
         user_secrets: user_secrets_svc,
@@ -284,15 +284,15 @@ async fn full_walkthrough() {
         user_auth,
         llm_router_inner,
     );
-    let warden_url = spawn(app).await;
+    let swarm_url = spawn(app).await;
 
     let admin = reqwest::Client::new();
 
     // 3. Create an instance.
     let resp = admin
-        .post(format!("{warden_url}/v1/instances"))
+        .post(format!("{swarm_url}/v1/instances"))
         .bearer_auth("admin-token")
-        .json(&json!({"template_id": "tpl-x", "env": {"WARDEN_MODEL": "anthropic/claude-sonnet-4-5"}, "ttl_seconds": 600}))
+        .json(&json!({"template_id": "tpl-x", "env": {"SWARM_MODEL": "anthropic/claude-sonnet-4-5"}, "ttl_seconds": 600}))
         .send()
         .await
         .unwrap();
@@ -304,7 +304,7 @@ async fn full_walkthrough() {
 
     // Optional: secret put/delete round-trip.
     let r = admin
-        .put(format!("{warden_url}/v1/instances/{inst_id}/secrets/SECRET_K"))
+        .put(format!("{swarm_url}/v1/instances/{inst_id}/secrets/SECRET_K"))
         .bearer_auth("admin-token")
         .json(&json!({"value": "v"}))
         .send()
@@ -314,7 +314,7 @@ async fn full_walkthrough() {
 
     // 4. Snapshot.
     let r = admin
-        .post(format!("{warden_url}/v1/instances/{inst_id}/snapshot"))
+        .post(format!("{swarm_url}/v1/instances/{inst_id}/snapshot"))
         .bearer_auth("admin-token")
         .send()
         .await
@@ -327,7 +327,7 @@ async fn full_walkthrough() {
 
     // 5. Backup (local sink, kind=backup).
     let r = admin
-        .post(format!("{warden_url}/v1/instances/{inst_id}/backup"))
+        .post(format!("{swarm_url}/v1/instances/{inst_id}/backup"))
         .bearer_auth("admin-token")
         .send()
         .await
@@ -338,7 +338,7 @@ async fn full_walkthrough() {
 
     // 6. Destroy.
     let r = admin
-        .delete(format!("{warden_url}/v1/instances/{inst_id}"))
+        .delete(format!("{swarm_url}/v1/instances/{inst_id}"))
         .bearer_auth("admin-token")
         .send()
         .await
@@ -348,7 +348,7 @@ async fn full_walkthrough() {
 
     // 7. Restore from the manual snapshot.
     let r = admin
-        .post(format!("{warden_url}/v1/instances/{inst_id}/restore"))
+        .post(format!("{swarm_url}/v1/instances/{inst_id}/restore"))
         .bearer_auth("admin-token")
         .json(&json!({"snapshot_id": snap_id, "env": {}, "ttl_seconds": 600}))
         .send()
@@ -363,7 +363,7 @@ async fn full_walkthrough() {
     // 8. Streaming LLM call through the proxy with the restored instance's
     // token. Use the allowed model so policy passes.
     let resp = reqwest::Client::new()
-        .post(format!("{warden_url}/llm/openai/v1/chat/completions"))
+        .post(format!("{swarm_url}/llm/openai/v1/chat/completions"))
         .bearer_auth(&restored_token)
         .json(&json!({"model": "allowed-model", "messages": []}))
         .send()
@@ -380,7 +380,7 @@ async fn full_walkthrough() {
 
     // 9. Policy denial: model not in allowed_models.
     let resp = reqwest::Client::new()
-        .post(format!("{warden_url}/llm/openai/v1/chat/completions"))
+        .post(format!("{swarm_url}/llm/openai/v1/chat/completions"))
         .bearer_auth(&restored_token)
         .json(&json!({"model": "nope", "messages": []}))
         .send()
@@ -393,7 +393,7 @@ async fn full_walkthrough() {
     // 10. Token revocation via admin endpoint → next call 401.
     let r = admin
         .post(format!(
-            "{warden_url}/v1/admin/proxy_tokens/{restored_token}/revoke"
+            "{swarm_url}/v1/admin/proxy_tokens/{restored_token}/revoke"
         ))
         .bearer_auth("admin-token")
         .send()
@@ -401,7 +401,7 @@ async fn full_walkthrough() {
         .unwrap();
     assert_eq!(r.status(), 204);
     let resp = reqwest::Client::new()
-        .post(format!("{warden_url}/llm/openai/v1/chat/completions"))
+        .post(format!("{swarm_url}/llm/openai/v1/chat/completions"))
         .bearer_auth(&restored_token)
         .json(&json!({"model": "allowed-model", "messages": []}))
         .send()
@@ -411,13 +411,13 @@ async fn full_walkthrough() {
 
     // 11. /healthz remains open — quick sanity that the unauth path still
     // works under the assembled stack.
-    let resp = reqwest::get(format!("{warden_url}/healthz")).await.unwrap();
+    let resp = reqwest::get(format!("{swarm_url}/healthz")).await.unwrap();
     assert_eq!(resp.status(), 200);
 
-    // Probe loop sanity (synchronous): ask the warden to probe the restored
+    // Probe loop sanity (synchronous): ask the swarm to probe the restored
     // instance directly. The mock prober always reports Healthy.
     let r = admin
-        .post(format!("{warden_url}/v1/instances/{restored_id}/probe"))
+        .post(format!("{swarm_url}/v1/instances/{restored_id}/probe"))
         .bearer_auth("admin-token")
         .send()
         .await

@@ -1,19 +1,19 @@
 bind = "0.0.0.0:8080"
 admin_token = "CHANGE_ME"
-db_path = "/var/lib/dyson-warden/state.db"
+db_path = "/var/lib/dyson-swarm/state.db"
 
-# Public hostname warden answers on. When set, every Dyson is reachable at
+# Public hostname swarm answers on. When set, every Dyson is reachable at
 # `<instance_id>.<hostname>` — the host-based dispatcher forwards those
-# requests to the matching CubeSandbox over warden's private network. The
+# requests to the matching CubeSandbox over swarm's private network. The
 # SPA's "open ↗" button uses this URL.
 #
 # Production setup requires:
-#   - Wildcard DNS:    *.warden.example.com → warden's public IP
+#   - Wildcard DNS:    *.swarm.example.com → swarm's public IP
 #   - Wildcard TLS:    issued via Let's Encrypt DNS-01 (acme-dns, Caddy, etc)
 #
-# Leave unset to disable per-Dyson UI access; the rest of warden (API,
+# Leave unset to disable per-Dyson UI access; the rest of swarm (API,
 # CLI, admin panel) works fine without it.
-hostname = "warden.example.com"
+hostname = "swarm.example.com"
 
 default_ttl_seconds = 86400
 health_probe_interval_seconds = 60
@@ -31,21 +31,21 @@ sandbox_domain = "cube.app"
 # Keycloak, Google, etc.).
 [oidc]
 issuer = "https://accounts.example.com"
-audience = "warden"
-# jwks_url override — usually omitted; warden discovers it from
+audience = "swarm"
+# jwks_url override — usually omitted; swarm discovers it from
 # <issuer>/.well-known/openid-configuration.
 # jwks_url = "https://accounts.example.com/.well-known/jwks.json"
 jwks_ttl_seconds = 86400
 
 # Web-UI (SPA) PKCE client. Register `spa_client_id` at the IdP as a
 # public client with PKCE enabled and the redirect URI set to wherever
-# warden serves the bundle (typically `https://<warden-host>/`). The
+# swarm serves the bundle (typically `https://<swarm-host>/`). The
 # SPA discovers authorization_endpoint/token_endpoint by hitting
 # `<issuer>/.well-known/openid-configuration` directly.
 #
 # Leave `spa_client_id` unset to disable the browser flow — admin
 # bearers and opaque api keys still work.
-spa_client_id = "warden-spa"
+spa_client_id = "swarm-spa"
 spa_scopes = ["profile", "email"]
 
 # Per-user policy fallback. Applied to any user that doesn't have a row in
@@ -79,13 +79,13 @@ upstream = "http://localhost:11434"
 
 [backup]
 sink = "local"
-local_cache_dir = "/var/lib/dyson-warden/backup-cache"
+local_cache_dir = "/var/lib/dyson-swarm/backup-cache"
 
 [backup.s3]
 endpoint = "https://s3.us-east-1.amazonaws.com"
 region = "us-east-1"
 bucket = "dyson-backups"
-prefix = "warden/"
+prefix = "swarm/"
 access_key_id = "CHANGE_ME"
 secret_access_key = "CHANGE_ME"
 path_style = false

@@ -2,14 +2,14 @@
 //! resulting row into the `snapshots` table tagged with the right `kind`,
 //! and (for backups) hands the row to a `BackupSink::promote`.
 //!
-//! Cube owns the snapshot id; warden uses Cube's `snapshotID` verbatim as
+//! Cube owns the snapshot id; swarm uses Cube's `snapshotID` verbatim as
 //! the row PK so there is no second namespace to translate between.
 
 use std::sync::Arc;
 
 use serde::Serialize;
 
-use crate::error::WardenError;
+use crate::error::SwarmError;
 use crate::instance::{CreatedInstance, InstanceService, RestoreRequest};
 use crate::now_secs;
 use crate::traits::{
@@ -76,7 +76,7 @@ impl SnapshotService {
         &self,
         owner_id: &str,
         instance_id: &str,
-    ) -> Result<SnapshotRow, WardenError> {
+    ) -> Result<SnapshotRow, SwarmError> {
         self.snapshot_with_kind(owner_id, instance_id, SnapshotKind::Manual, None)
             .await
     }
@@ -87,7 +87,7 @@ impl SnapshotService {
         &self,
         owner_id: &str,
         instance_id: &str,
-    ) -> Result<SnapshotRow, WardenError> {
+    ) -> Result<SnapshotRow, SwarmError> {
         let mut row = self
             .snapshot_with_kind(owner_id, instance_id, SnapshotKind::Backup, None)
             .await?;
@@ -109,7 +109,7 @@ impl SnapshotService {
         &self,
         owner_id: &str,
         instance_id: &str,
-    ) -> Result<Vec<SnapshotRow>, WardenError> {
+    ) -> Result<Vec<SnapshotRow>, SwarmError> {
         // Confirm ownership of the instance up front. `get_for_owner`
         // returns `None` either when the row doesn't exist or when it
         // belongs to someone else — both surface as `NotFound`, which is
@@ -117,7 +117,7 @@ impl SnapshotService {
         self.instances
             .get_for_owner(owner_id, instance_id)
             .await?
-            .ok_or(WardenError::NotFound)?;
+            .ok_or(SwarmError::NotFound)?;
         let rows = self.snapshots.list_for_instance(instance_id).await?;
         Ok(rows
             .into_iter()
@@ -133,12 +133,12 @@ impl SnapshotService {
         &self,
         owner_id: &str,
         snapshot_id: &str,
-    ) -> Result<SnapshotRow, WardenError> {
+    ) -> Result<SnapshotRow, SwarmError> {
         let mut row = self
             .snapshots
             .get(snapshot_id)
             .await?
-            .ok_or(WardenError::NotFound)?;
+            .ok_or(SwarmError::NotFound)?;
         require_owner(&row.owner_id, owner_id)?;
         let new_path = self.backup.pull(&row).await?;
         let new_path_str = new_path.display().to_string();
@@ -159,12 +159,12 @@ impl SnapshotService {
         snapshot_id: &str,
         ttl_seconds: Option<i64>,
         env: std::collections::BTreeMap<String, String>,
-    ) -> Result<CreatedInstance, WardenError> {
+    ) -> Result<CreatedInstance, SwarmError> {
         let mut row = self
             .snapshots
             .get(snapshot_id)
             .await?
-            .ok_or(WardenError::NotFound)?;
+            .ok_or(SwarmError::NotFound)?;
         require_owner(&row.owner_id, owner_id)?;
 
         // If the local path is missing and we have a remote URI, ask the
@@ -182,7 +182,7 @@ impl SnapshotService {
             .instances
             .get(&row.source_instance_id)
             .await?
-            .ok_or(WardenError::NotFound)?;
+            .ok_or(SwarmError::NotFound)?;
 
         self.instance_svc
             .restore(
@@ -208,16 +208,16 @@ impl SnapshotService {
         instance_id: &str,
         kind: SnapshotKind,
         parent: Option<String>,
-    ) -> Result<SnapshotRow, WardenError> {
+    ) -> Result<SnapshotRow, SwarmError> {
         let inst = self
             .instances
             .get_for_owner(owner_id, instance_id)
             .await?
-            .ok_or(WardenError::NotFound)?;
+            .ok_or(SwarmError::NotFound)?;
         let sandbox = inst
             .cube_sandbox_id
             .as_deref()
-            .ok_or(WardenError::NotFound)?;
+            .ok_or(SwarmError::NotFound)?;
         let snap_name = format!("ckpt-{}", uuid::Uuid::new_v4().simple());
         let info = self.cube.snapshot_sandbox(sandbox, &snap_name).await?;
 
@@ -239,11 +239,11 @@ impl SnapshotService {
     }
 }
 
-fn require_owner(row_owner: &str, caller_owner: &str) -> Result<(), WardenError> {
+fn require_owner(row_owner: &str, caller_owner: &str) -> Result<(), SwarmError> {
     if caller_owner == "*" || row_owner == caller_owner {
         Ok(())
     } else {
-        Err(WardenError::NotFound)
+        Err(SwarmError::NotFound)
     }
 }
 
@@ -464,7 +464,7 @@ mod tests {
         let _alice_snap = svc.snapshot("alice", &alice_inst.id).await.unwrap();
 
         let err = svc.list_for_instance("bob", &alice_inst.id).await.unwrap_err();
-        assert!(matches!(err, WardenError::NotFound));
+        assert!(matches!(err, SwarmError::NotFound));
 
         let visible = svc.list_for_instance("alice", &alice_inst.id).await.unwrap();
         assert_eq!(visible.len(), 1);

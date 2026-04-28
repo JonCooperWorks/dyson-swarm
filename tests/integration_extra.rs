@@ -1,5 +1,5 @@
 //! Integration tests for surfaces that the original `e2e_mock_cube`
-//! walkthrough doesn't cover.  Each test stands up its own warden using
+//! walkthrough doesn't cover.  Each test stands up its own swarm using
 //! the same in-process mocks, then exercises one focused behaviour:
 //!
 //! - **tenancy isolation** — alice creates an instance; bob can't see,
@@ -18,7 +18,7 @@
 //! - **per-instance secrets isolation** — alice's secret on her instance
 //!   isn't visible to bob via the secret list endpoint.
 //! - **proxy_base shape** — full-stack regression for the `/openrouter/v1`
-//!   double-suffix bug.  Drives a turn-shaped LLM call through warden's
+//!   double-suffix bug.  Drives a turn-shaped LLM call through swarm's
 //!   proxy and confirms the URL the upstream sees has exactly one `/v1`.
 
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -33,7 +33,7 @@ use axum::{Json, Router};
 use futures::stream;
 use serde_json::json;
 
-use dyson_warden::{
+use dyson_swarm::{
     auth::{chain::ChainAuthenticator, Authenticator, AuthState, UserAuthState},
     backup::local::LocalDiskBackupSink,
     config::{ProviderConfig, Providers},
@@ -89,7 +89,7 @@ fn cube_router(state: CubeState) -> Router {
 }
 
 /// Mock LLM upstream — captures the auth header and last-seen path so
-/// tests can assert what warden forwarded.  Returns a tiny SSE stream so
+/// tests can assert what swarm forwarded.  Returns a tiny SSE stream so
 /// the response bytes are realistic-shaped.
 #[derive(Clone, Default)]
 struct LlmState {
@@ -188,7 +188,7 @@ async fn spawn(router: Router) -> String {
     format!("http://{addr}")
 }
 
-/// Build everything a warden router needs.  Returns the URL the test
+/// Build everything a swarm router needs.  Returns the URL the test
 /// hits + handles to mocks the test will assert against.
 struct Stack {
     base: String,
@@ -198,7 +198,7 @@ struct Stack {
     users: Arc<dyn UserStore>,
 }
 
-/// Build a warden whose user-auth chain is the production wiring: a
+/// Build a swarm whose user-auth chain is the production wiring: a
 /// bearer authenticator backed by `users.api_keys` plus a fixed-OIDC
 /// fallback for `subject_for_no_bearer`.  Tests that want pure-bearer
 /// auth can pass any garbage subject — they'll never hit the OIDC link.
@@ -210,7 +210,7 @@ async fn build_stack(subject_for_no_bearer: &str) -> Stack {
     let llm_url = spawn(llm_router(llm_state.clone())).await;
 
     let pool = db::open_in_memory().await.unwrap();
-    let cube_cfg = dyson_warden::config::CubeConfig {
+    let cube_cfg = dyson_swarm::config::CubeConfig {
         url: cube_url,
         api_key: "k".into(),
         sandbox_domain: "cube.test".into(),
@@ -223,9 +223,9 @@ async fn build_stack(subject_for_no_bearer: &str) -> Stack {
     let cipher_dir: Arc<dyn CipherDirectory> =
         Arc::new(AgeCipherDirectory::new(keys_tmp.path()).unwrap());
     let user_secrets_store: Arc<dyn UserSecretStore> =
-        Arc::new(dyson_warden::db::secrets::SqlxUserSecretStore::new(pool.clone()));
+        Arc::new(dyson_swarm::db::secrets::SqlxUserSecretStore::new(pool.clone()));
     let system_secrets_store: Arc<dyn SystemSecretStore> = Arc::new(
-        dyson_warden::db::secrets::SqlxSystemSecretStore::new(pool.clone()),
+        dyson_swarm::db::secrets::SqlxSystemSecretStore::new(pool.clone()),
     );
     let user_secrets_svc = Arc::new(UserSecretsService::new(user_secrets_store, cipher_dir.clone()));
     let system_secrets_svc =
@@ -235,19 +235,19 @@ async fn build_stack(subject_for_no_bearer: &str) -> Stack {
         instances_store.clone(),
         secrets_store.clone(),
         tokens_store.clone(),
-        "http://warden.test/llm",
+        "http://swarm.test/llm",
         3600,
     ));
     let secrets_svc = Arc::new(SecretsService::new(secrets_store.clone(), cipher_dir.clone()));
     let backup: Arc<dyn BackupSink> = Arc::new(LocalDiskBackupSink::new(cube.clone()));
     let snapshots_store: Arc<dyn SnapshotStore> = Arc::new(
-        dyson_warden::db::snapshots::SqliteSnapshotStore::new(pool.clone()),
+        dyson_swarm::db::snapshots::SqliteSnapshotStore::new(pool.clone()),
     );
     let policies_store: Arc<dyn PolicyStore> = Arc::new(
-        dyson_warden::db::policies::SqlitePolicyStore::new(pool.clone()),
+        dyson_swarm::db::policies::SqlitePolicyStore::new(pool.clone()),
     );
     let audit_store: Arc<dyn AuditStore> =
-        Arc::new(dyson_warden::db::audit::SqliteAuditStore::new(pool.clone()));
+        Arc::new(dyson_swarm::db::audit::SqliteAuditStore::new(pool.clone()));
     let snapshot_svc = Arc::new(SnapshotService::new(
         cube.clone(),
         instances_store.clone(),
@@ -285,7 +285,7 @@ async fn build_stack(subject_for_no_bearer: &str) -> Stack {
     };
 
     let users_store: Arc<dyn UserStore> = Arc::new(
-        dyson_warden::db::users::SqlxUserStore::new(pool.clone(), cipher_dir.clone()),
+        dyson_swarm::db::users::SqlxUserStore::new(pool.clone(), cipher_dir.clone()),
     );
 
     let or_prov = Arc::new(RecordingProvisioning::default());
@@ -316,8 +316,8 @@ async fn build_stack(subject_for_no_bearer: &str) -> Stack {
     // path; the fallback covers cookie-less endpoints (admin pages
     // hitting the bearer check).
     let bearer_link: Arc<dyn Authenticator> =
-        Arc::new(dyson_warden::auth::bearer::BearerAuthenticator::new(users_store.clone()));
-    let (fixed_auth, _fixed_id) = dyson_warden::auth::user::fixed_user_auth_with_roles(
+        Arc::new(dyson_swarm::auth::bearer::BearerAuthenticator::new(users_store.clone()));
+    let (fixed_auth, _fixed_id) = dyson_swarm::auth::user::fixed_user_auth_with_roles(
         users_store.clone(),
         subject_for_no_bearer,
         Some(("https://test/roles", &["rol_admin"])),
@@ -348,7 +348,7 @@ async fn build_stack(subject_for_no_bearer: &str) -> Stack {
     };
     let app = http::router(
         app_state,
-        AuthState::enforced(dyson_warden::config::OidcRoles {
+        AuthState::enforced(dyson_swarm::config::OidcRoles {
             claim: "https://test/roles".into(),
             admin: "rol_admin".into(),
         }),
@@ -392,7 +392,7 @@ async fn tenancy_isolation_blocks_cross_user_access() {
     let inst = admin
         .post(format!("{}/v1/instances", stack.base))
         .bearer_auth(&alice_token)
-        .json(&json!({"template_id": "tpl", "env": {"WARDEN_MODEL": "m"}}))
+        .json(&json!({"template_id": "tpl", "env": {"SWARM_MODEL": "m"}}))
         .send()
         .await
         .unwrap();
@@ -576,7 +576,7 @@ async fn openrouter_proxy_lazy_mints_then_reuses() {
     let r = admin
         .post(format!("{}/v1/instances", stack.base))
         .bearer_auth(&alice_bearer)
-        .json(&json!({"template_id": "tpl", "env": {"WARDEN_MODEL": "m"}}))
+        .json(&json!({"template_id": "tpl", "env": {"SWARM_MODEL": "m"}}))
         .send()
         .await
         .unwrap();
@@ -640,7 +640,7 @@ async fn llm_proxy_forwards_path_with_single_v1() {
     let r = admin
         .post(format!("{}/v1/instances", stack.base))
         .bearer_auth(&alice_bearer)
-        .json(&json!({"template_id": "tpl", "env": {"WARDEN_MODEL": "m"}}))
+        .json(&json!({"template_id": "tpl", "env": {"SWARM_MODEL": "m"}}))
         .send()
         .await
         .unwrap();
@@ -652,8 +652,8 @@ async fn llm_proxy_forwards_path_with_single_v1() {
         .unwrap()
         .to_string();
 
-    // Dyson (post-fix) hits `<warden>/llm/openrouter/v1/chat/completions`
-    // — single `/v1`.  Warden must forward to `<upstream>/v1/chat/completions`.
+    // Dyson (post-fix) hits `<swarm>/llm/openrouter/v1/chat/completions`
+    // — single `/v1`.  Swarm must forward to `<upstream>/v1/chat/completions`.
     let r = reqwest::Client::new()
         .post(format!("{}/llm/openrouter/v1/chat/completions", stack.base))
         .bearer_auth(&proxy_token)
@@ -665,7 +665,7 @@ async fn llm_proxy_forwards_path_with_single_v1() {
     let path = stack.llm.last_path.lock().unwrap().clone().unwrap_or_default();
     assert_eq!(
         path, "/v1/chat/completions",
-        "warden must strip the /llm/<provider> prefix, leaving the upstream path with exactly one /v1"
+        "swarm must strip the /llm/<provider> prefix, leaving the upstream path with exactly one /v1"
     );
 }
 

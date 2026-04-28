@@ -1,6 +1,6 @@
 //! OpenRouter Provisioning API client.
 //!
-//! Used by the warden's Stage-6 per-user-key flow: each user gets their
+//! Used by the swarm's Stage-6 per-user-key flow: each user gets their
 //! own OpenRouter key minted at first use, with a configurable USD
 //! budget cap (default $10).  When the user is suspended or admin-
 //! deleted, the key is revoked upstream so a leaked plaintext stops
@@ -8,7 +8,7 @@
 //!
 //! The "provisioning key" is a separate credential from a regular
 //! OpenRouter API key — only it can mint/list/update/delete keys via
-//! `/api/v1/keys`.  Keep it tightly scoped (warden config / system
+//! `/api/v1/keys`.  Keep it tightly scoped (swarm config / system
 //! secrets); never hand it to a Dyson sandbox.
 //!
 //! API shape (excerpt from openrouter.ai/docs):
@@ -45,7 +45,7 @@ pub enum OpenRouterError {
 #[derive(Debug, Clone, Serialize)]
 struct CreateKeyBody<'a> {
     /// User-visible label in the OpenRouter dashboard. We use the
-    /// warden user id (and email if known, joined) so an operator
+    /// swarm user id (and email if known, joined) so an operator
     /// can match a key to a person.  Note: OR's API returns its
     /// own `label` field (the key preview, server-generated); the
     /// only operator-visible string is `name`, so we encode both
@@ -65,7 +65,7 @@ struct UpdateKeyBody {
 }
 
 /// Fields returned by POST /keys.  `key` is the plaintext bearer the
-/// user's instances will use; warden seals it into the user's
+/// user's instances will use; swarm seals it into the user's
 /// envelope cipher and stores the ciphertext in `user_secrets`.
 /// Subsequent calls (PATCH/GET) return only the metadata — never
 /// the plaintext again.
@@ -112,7 +112,7 @@ struct MintWireData {
 impl OpenRouterProvisioning {
     /// Build a client.  `upstream` is e.g. `"https://openrouter.ai/api"`
     /// (no trailing slash; matches the `[providers.openrouter]` value
-    /// in warden config).
+    /// in swarm config).
     pub fn new(upstream: impl Into<String>, provisioning_key: impl Into<String>) -> Result<Self, reqwest::Error> {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(20))
@@ -128,7 +128,7 @@ impl OpenRouterProvisioning {
         format!("{}/v1/keys{}", self.upstream.trim_end_matches('/'), path)
     }
 
-    /// Mint a new key for `name` (we use the warden user id, plus
+    /// Mint a new key for `name` (we use the swarm user id, plus
     /// email if known, joined into one string since OR's API only
     /// has one operator-visible label field) with the given USD
     /// `limit_usd`.  Returns the plaintext key — the only chance to
@@ -197,7 +197,7 @@ impl OpenRouterProvisioning {
 
     /// Disable (revoke) a key upstream.  After this call, any inbound
     /// requests bearing the plaintext get 401 from OR.  We use this
-    /// on user suspension and on hard-delete; warden's local copy of
+    /// on user suspension and on hard-delete; swarm's local copy of
     /// the ciphertext is wiped separately.
     pub async fn delete(&self, id: &str) -> Result<(), OpenRouterError> {
         let resp = self
@@ -322,7 +322,7 @@ impl UserOrKeyResolver {
 
         // Otherwise lazy mint.  Use the email as the OR-side label so
         // an operator browsing the OR dashboard sees a human hint
-        // alongside the warden user id.
+        // alongside the swarm user id.
         let label = user.email.as_deref();
         let minted = self
             .provisioning

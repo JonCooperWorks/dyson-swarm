@@ -33,14 +33,15 @@ use dyson_warden::{
     cube_client::HttpCubeClient,
     db,
     db::{instances::SqlxInstanceStore, secrets::SqlxSecretStore, tokens::SqlxTokenStore},
+    envelope::{AgeCipherDirectory, CipherDirectory},
     http,
     instance::InstanceService,
     proxy::{self, policy_check::InstancePolicy, ProxyService},
-    secrets::SecretsService,
+    secrets::{SecretsService, SystemSecretsService, UserSecretsService},
     snapshot::SnapshotService,
     traits::{
         AuditStore, BackupSink, CubeClient, HealthProber, InstanceRow, InstanceStore, PolicyStore,
-        ProbeResult, SecretStore, SnapshotStore, TokenStore,
+        ProbeResult, SecretStore, SnapshotStore, SystemSecretStore, TokenStore, UserSecretStore,
     },
 };
 
@@ -179,6 +180,17 @@ async fn full_walkthrough() {
     let instances_store: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(pool.clone()));
     let secrets_store: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
     let tokens_store: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(pool.clone()));
+    let keys_tmp = tempfile::tempdir().unwrap();
+    let cipher_dir: Arc<dyn CipherDirectory> =
+        Arc::new(AgeCipherDirectory::new(keys_tmp.path()).unwrap());
+    let user_secrets_store: Arc<dyn UserSecretStore> = Arc::new(
+        dyson_warden::db::secrets::SqlxUserSecretStore::new(pool.clone()),
+    );
+    let system_secrets_store: Arc<dyn SystemSecretStore> = Arc::new(
+        dyson_warden::db::secrets::SqlxSystemSecretStore::new(pool.clone()),
+    );
+    let user_secrets_svc = Arc::new(UserSecretsService::new(user_secrets_store, cipher_dir.clone()));
+    let system_secrets_svc = Arc::new(SystemSecretsService::new(system_secrets_store, cipher_dir.clone()));
     let instance_svc = Arc::new(InstanceService::new(
         cube.clone(),
         instances_store.clone(),
@@ -187,7 +199,7 @@ async fn full_walkthrough() {
         "http://warden.test/llm",
         3600,
     ));
-    let secrets_svc = Arc::new(SecretsService::new(secrets_store.clone()));
+    let secrets_svc = Arc::new(SecretsService::new(secrets_store.clone(), cipher_dir.clone()));
     let backup: Arc<dyn BackupSink> = Arc::new(LocalDiskBackupSink::new(cube.clone()));
     let snapshots_store: Arc<dyn SnapshotStore> =
         Arc::new(dyson_warden::db::snapshots::SqliteSnapshotStore::new(pool.clone()));
@@ -237,25 +249,38 @@ async fn full_walkthrough() {
     let llm_router_inner = proxy::http::router(proxy_svc);
 
     let prober: Arc<dyn HealthProber> = Arc::new(StubProber);
-    let users_store: Arc<dyn dyson_warden::traits::UserStore> =
-        Arc::new(dyson_warden::db::users::SqlxUserStore::new(pool.clone()));
+    let users_store: Arc<dyn dyson_warden::traits::UserStore> = Arc::new(
+        dyson_warden::db::users::SqlxUserStore::new(pool.clone(), cipher_dir.clone()),
+    );
     let (user_auth, _user_id) =
         dyson_warden::auth::user::fixed_user_auth(users_store.clone(), "alice").await;
     let app_state = http::AppState {
         secrets: secrets_svc,
+        user_secrets: user_secrets_svc,
+        system_secrets: system_secrets_svc,
+        ciphers: cipher_dir.clone(),
         instances: instance_svc.clone(),
         snapshots: snapshot_svc.clone(),
         prober,
         tokens: tokens_store.clone(),
         users: users_store,
         sandbox_domain: "cube.test".into(),
-            hostname: None,
+        hostname: None,
         auth_config: std::sync::Arc::new(http::auth_config::AuthConfig::none()),
         dyson_http: http::dyson_proxy::build_client().expect("dyson http client init"),
+        models_upstream: None,
+        models_cache: http::models::ModelsCache::new(),
+        openrouter_provisioning: None,
+        user_or_keys: None,
     };
+    // Stage 5 retired the legacy `admin-token` shared bearer; this e2e
+    // exercises admin endpoints via `--dangerous-no-auth`, the same
+    // bypass path the local-dev CLI uses.  Production deployments rely
+    // on the OIDC role check (`AuthState::enforced(OidcRoles {...})`)
+    // exercised in the unit tests under `src/http/mod.rs`.
     let app = http::router(
         app_state,
-        AuthState::enforced("admin-token"),
+        AuthState::dangerous_no_auth(),
         user_auth,
         llm_router_inner,
     );

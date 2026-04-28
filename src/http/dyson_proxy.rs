@@ -19,23 +19,21 @@
 //! reaching the private network internally.
 //!
 //! Auth shape:
-//! - inbound  the OIDC chain runs inline — we can't reuse the tenant
-//!            tier's `user_middleware` because it stamps an Extension
-//!            for downstream handlers, but here there are no downstream
-//!            handlers, just the proxy.  Same `Authenticator` trait,
-//!            different invocation point.
 //!
-//!            Bearer source:  `Authorization: Bearer …` if present,
-//!            otherwise the `dyson_warden_session` cookie (the SPA
-//!            mirrors the OIDC access token there with
-//!            `Domain=<hostname>` so plain URL-bar navigation to a
-//!            Dyson subdomain — open-in-new-tab, image src, anchor
-//!            click — carries credentials.  No CSRF surface: there
-//!            are no state-changing cookie-only verbs on the proxy
-//!            target, and the cookie is `SameSite=Lax`.).
-//! - outbound `Authorization: Bearer <instance.bearer_token>`; cookies
-//!            and inbound auth headers are stripped (different security
-//!            boundary).
+//! - inbound: the OIDC chain runs inline — we can't reuse the tenant
+//!   tier's `user_middleware` because it stamps an Extension for
+//!   downstream handlers, but here there are no downstream handlers,
+//!   just the proxy. Same `Authenticator` trait, different invocation
+//!   point. Bearer source: `Authorization: Bearer ...` if present,
+//!   otherwise the `dyson_warden_session` cookie (the SPA mirrors the
+//!   OIDC access token there with `Domain=<hostname>` so plain URL-bar
+//!   navigation to a Dyson subdomain — open-in-new-tab, image src,
+//!   anchor click — carries credentials. No CSRF surface: there are
+//!   no state-changing cookie-only verbs on the proxy target, and the
+//!   cookie is `SameSite=Lax`).
+//! - outbound: `Authorization: Bearer <instance.bearer_token>`;
+//!   cookies and inbound auth headers are stripped (different security
+//!   boundary).
 //!
 //! Streaming:
 //! - Request body buffered (8 MiB cap).

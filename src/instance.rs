@@ -1363,4 +1363,193 @@ mod tests {
              site at /v1/v1/... and surfaces as 'upstream HTTP error'"
         );
     }
+
+    /// Helper: stand up an InstanceService backed by sqlx stores and a
+    /// recording reconfigurer.  Used by the image-gen rewire tests
+    /// below; folded into a helper because every test needs the same
+    /// 6-line dance.
+    async fn build_with_recorder() -> (
+        Arc<InstanceService>,
+        Arc<MockCube>,
+        Arc<dyn TokenStore>,
+        Arc<dyn InstanceStore>,
+        Arc<RecordingReconfigurer>,
+    ) {
+        let pool = open_in_memory().await.unwrap();
+        let cube = MockCube::new();
+        let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(pool.clone()));
+        let secrets: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
+        let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(pool));
+        let recorder = Arc::new(RecordingReconfigurer::default());
+        let svc = InstanceService::new(
+            cube.clone(),
+            instances.clone(),
+            secrets,
+            tokens.clone(),
+            "https://dyson.example.com/llm",
+        )
+        .with_reconfigurer(recorder.clone());
+        (Arc::new(svc), cube, tokens, instances, recorder)
+    }
+
+    /// Block until N pushes have landed in the recorder, or 1s passes.
+    /// The configure push runs in `create()`'s tail so a race-free
+    /// test needs to poll, not assume.
+    async fn wait_for_pushes(recorder: &RecordingReconfigurer, want: usize) {
+        for _ in 0..40 {
+            if recorder.pushed.lock().unwrap().len() >= want {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn create_push_carries_image_generation_defaults() {
+        // Every freshly-hired dyson must arrive with the image-gen
+        // wiring already pushed — no operator follow-up required, no
+        // manual `/api/admin/configure` call.  The block points at the
+        // same swarm /llm/openrouter hop the chat path uses (so the
+        // reused proxy_token authenticates) and the agent fields
+        // resolve to that block's name.
+        let (svc, _cube, _tokens, _instances, recorder) = build_with_recorder().await;
+        svc.create("legacy", CreateRequest {
+            template_id: "tpl".into(),
+            name: Some("alice".into()),
+            task: Some("review prs".into()),
+            env: env_with_model(),
+            ttl_seconds: None,
+        })
+        .await
+        .unwrap();
+        wait_for_pushes(&recorder, 1).await;
+        let pushed = recorder.pushed.lock().unwrap();
+        let (_, _, body) = &pushed[0];
+
+        assert_eq!(body.image_provider_name.as_deref(), Some("openrouter-image"));
+        assert_eq!(
+            body.image_generation_provider.as_deref(),
+            Some("openrouter-image"),
+        );
+        assert_eq!(
+            body.image_generation_model.as_deref(),
+            Some("google/gemini-3-pro-image-preview"),
+        );
+        let block = body
+            .image_provider_block
+            .as_ref()
+            .expect("image provider block must be present");
+        assert_eq!(block["type"], "openrouter");
+        assert_eq!(block["base_url"], "https://dyson.example.com/llm/openrouter");
+        assert_eq!(block["models"][0], "google/gemini-3-pro-image-preview");
+        // The api_key on the image block is the same proxy_token the
+        // chat block uses — proves the swarm hop is reused (no second
+        // mint, no second token to revoke on destroy).
+        let chat_token = body
+            .proxy_token
+            .as_deref()
+            .expect("chat proxy_token must be set");
+        assert_eq!(block["api_key"], chat_token);
+    }
+
+    #[tokio::test]
+    async fn rewire_image_generation_visits_each_live_instance_with_its_token() {
+        // Hire two dysons.  After the create-time pushes drain, run
+        // the sweep — it must visit each one and stamp the SAME
+        // proxy_token already embedded in the chat path on each
+        // instance's image provider block.  Pre-Stage-8 instances
+        // (no token row) are skipped silently.
+        let (svc, _cube, tokens, _instances, recorder) = build_with_recorder().await;
+        let a = svc
+            .create("legacy", CreateRequest {
+                template_id: "tpl".into(),
+                name: None, task: None,
+                env: env_with_model(),
+                ttl_seconds: None,
+            })
+            .await
+            .unwrap();
+        let b = svc
+            .create("legacy", CreateRequest {
+                template_id: "tpl".into(),
+                name: None, task: None,
+                env: env_with_model(),
+                ttl_seconds: None,
+            })
+            .await
+            .unwrap();
+        wait_for_pushes(&recorder, 2).await;
+        // Drop the create-time pushes so the sweep's are the only ones
+        // we assert on.
+        recorder.pushed.lock().unwrap().clear();
+
+        let (visited, succeeded) = svc
+            .rewire_image_generation_all()
+            .await
+            .expect("sweep must succeed against an in-memory store");
+        assert_eq!(visited, 2);
+        assert_eq!(succeeded, 2);
+
+        let pushed = recorder.pushed.lock().unwrap().clone();
+        assert_eq!(pushed.len(), 2);
+        // Map by instance_id for stable assertions regardless of
+        // store iteration order.
+        let by_id: std::collections::HashMap<_, _> = pushed
+            .into_iter()
+            .map(|(id, _, body)| (id, body))
+            .collect();
+
+        for (created, expect_token) in [(&a.id, &a.proxy_token), (&b.id, &b.proxy_token)] {
+            let body = by_id.get(created).expect("each instance must be visited");
+            assert_eq!(body.image_provider_name.as_deref(), Some("openrouter-image"));
+            assert_eq!(
+                body.image_generation_model.as_deref(),
+                Some("google/gemini-3-pro-image-preview"),
+            );
+            let block = body.image_provider_block.as_ref().unwrap();
+            assert_eq!(block["api_key"], *expect_token);
+            // Sweep pushes ONLY image-gen fields — no chat-side
+            // mutation that could clobber a legitimate operator
+            // override of dyson.json.
+            assert!(body.proxy_token.is_none(), "sweep must not push proxy_token");
+            assert!(body.proxy_base.is_none(),  "sweep must not push proxy_base");
+            assert!(body.models.is_empty(),     "sweep must not push models");
+        }
+        // Verify the token-store reverse lookup returns each token —
+        // the sweep depends on this and a regression here would make
+        // the sweep silently skip every instance.
+        for (id, expect) in [(&a.id, &a.proxy_token), (&b.id, &b.proxy_token)] {
+            let got = tokens.lookup_by_instance(id).await.unwrap();
+            assert_eq!(got.as_ref(), Some(expect));
+        }
+    }
+
+    #[tokio::test]
+    async fn rewire_image_generation_no_op_when_defaults_disabled() {
+        // Operators who manually patched dyson.json get an opt-out:
+        // `with_image_gen_defaults(None)` makes the sweep do nothing
+        // so a swarm restart doesn't fight their override.
+        let (svc, _cube, _tokens, _instances, recorder) = build_with_recorder().await;
+        // Rebuild the service with image-gen disabled.  The same
+        // recorder + stores are reused, so prior creates still count.
+        let pool_svc = std::sync::Arc::try_unwrap(svc).ok().unwrap()
+            .with_image_gen_defaults(None);
+        let svc = std::sync::Arc::new(pool_svc);
+        svc.create("legacy", CreateRequest {
+            template_id: "tpl".into(),
+            name: None, task: None,
+            env: env_with_model(),
+            ttl_seconds: None,
+        })
+        .await
+        .unwrap();
+        wait_for_pushes(&recorder, 1).await;
+        recorder.pushed.lock().unwrap().clear();
+
+        let (visited, succeeded) = svc.rewire_image_generation_all().await.unwrap();
+        assert_eq!(visited, 0, "disabled defaults must short-circuit the sweep");
+        assert_eq!(succeeded, 0);
+        assert!(recorder.pushed.lock().unwrap().is_empty(),
+            "no pushes should fire when image_gen_defaults is None");
+    }
 }

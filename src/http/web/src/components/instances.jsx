@@ -8,11 +8,24 @@
  */
 
 import React from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import remarkBreaks from 'remark-breaks';
 import { useApi } from '../hooks/useApi.jsx';
 import { useAppState } from '../hooks/useAppState.js';
 import {
   upsertInstance, removeInstance, selectInstance, setLoadError, setInstances,
 } from '../store/app.js';
+
+// Links inside task markdown open in a new tab — the task pane is a
+// scratchpad, not a navigation target, and following a link in-place
+// would blow away the user's instance state.
+const TASK_MARKDOWN_PLUGINS = [remarkGfm, remarkBreaks];
+const TASK_MARKDOWN_COMPONENTS = {
+  a: ({ node, ...props }) => (
+    <a {...props} target="_blank" rel="noopener noreferrer"/>
+  ),
+};
 
 export function InstancesView({ view }) {
   const selectedId = view.name === 'instance' ? view.id : null;
@@ -587,7 +600,14 @@ function InstanceDetail({ id, onOpenSidebar }) {
           </div>
           <div className="employee-task">
             {row.task && row.task.trim() ? (
-              <p className="task-prose">{row.task}</p>
+              <div className="task-prose">
+                <ReactMarkdown
+                  remarkPlugins={TASK_MARKDOWN_PLUGINS}
+                  components={TASK_MARKDOWN_COMPONENTS}
+                >
+                  {row.task}
+                </ReactMarkdown>
+              </div>
             ) : (
               <p className="muted small">
                 no task description — click <em>edit</em> to write one.
@@ -623,10 +643,8 @@ function InstanceDetail({ id, onOpenSidebar }) {
 
       <section className="panel">
         <div className="panel-title">runtime</div>
-        <KvRow label="cube sandbox id" value={row.cube_sandbox_id || '—'}/>
         <KvRow label="created" value={fmtTime(row.created_at)}/>
         <KvRow label="last active" value={fmtTime(row.last_active_at)}/>
-        <KvRow label="expires" value={row.expires_at ? fmtTime(row.expires_at) : 'never'}/>
         <KvRow label="last probe" value={
           row.last_probe_at
             ? `${fmtTime(row.last_probe_at)} · ${probeLabel(row.last_probe_status)}`

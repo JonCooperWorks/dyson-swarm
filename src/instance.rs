@@ -254,7 +254,14 @@ impl InstanceService {
         let id = Uuid::new_v4().simple().to_string();
         let bearer = Uuid::new_v4().simple().to_string();
         let now = now_secs();
-        let ttl = req.ttl_seconds.unwrap_or(self.default_ttl_seconds);
+        // Dysons are long-lived employees, not throwaway batch jobs —
+        // default to no expiry.  The TTL sweeper filters
+        // `expires_at IS NOT NULL`, so None means "never reaped".
+        // Callers that genuinely want a deadline can still pass
+        // `ttl_seconds` explicitly (used by the snapshot/restore
+        // flow's smoke tests and by anything that wants a self-
+        // destructing scratch instance).
+        let expires_at = req.ttl_seconds.map(|ttl| now + ttl);
         let name = req.name.clone().unwrap_or_default();
         let task = req.task.clone().unwrap_or_default();
 
@@ -271,7 +278,7 @@ impl InstanceService {
             status: InstanceStatus::Cold,
             bearer_token: bearer.clone(),
             pinned: false,
-            expires_at: Some(now + ttl),
+            expires_at,
             last_active_at: now,
             last_probe_at: None,
             last_probe_status: None,
@@ -589,7 +596,8 @@ impl InstanceService {
         let id = Uuid::new_v4().simple().to_string();
         let bearer = Uuid::new_v4().simple().to_string();
         let now = now_secs();
-        let ttl = req.ttl_seconds.unwrap_or(self.default_ttl_seconds);
+        // Same default-no-expiry policy as `create`; opt-in via ttl_seconds.
+        let expires_at = req.ttl_seconds.map(|ttl| now + ttl);
 
         let existing = if let Some(src) = &req.source_instance_id {
             self.secrets.list(src).await?
@@ -609,7 +617,7 @@ impl InstanceService {
             status: InstanceStatus::Cold,
             bearer_token: bearer.clone(),
             pinned: false,
-            expires_at: Some(now + ttl),
+            expires_at,
             last_active_at: now,
             last_probe_at: None,
             last_probe_status: None,

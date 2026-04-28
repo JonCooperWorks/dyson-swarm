@@ -543,14 +543,32 @@ impl InstanceService {
         Ok(())
     }
 
-    pub async fn destroy(&self, owner_id: &str, id: &str) -> Result<(), SwarmError> {
+    /// Destroy an instance.  When `force` is true, a `CubeError` from
+    /// `destroy_sandbox` is logged and swallowed so the row can still
+    /// be reaped — admin escape hatch for the case where the underlying
+    /// cube sandbox is already dead/unreachable and cubemaster keeps
+    /// 502'ing.  DB-side cleanup (token revoke + status flip) still runs
+    /// and its errors are still fatal: `force` only buys forgiveness for
+    /// the cube call.
+    pub async fn destroy(&self, owner_id: &str, id: &str, force: bool) -> Result<(), SwarmError> {
         let row = self
             .instances
             .get_for_owner(owner_id, id)
             .await?
             .ok_or(SwarmError::NotFound)?;
         if let Some(sb) = &row.cube_sandbox_id {
-            self.cube.destroy_sandbox(sb).await?;
+            match self.cube.destroy_sandbox(sb).await {
+                Ok(()) => {}
+                Err(e) if force => {
+                    tracing::warn!(
+                        error = %e,
+                        instance = %id,
+                        sandbox = %sb,
+                        "destroy: cube destroy_sandbox failed; force=true, proceeding with DB-side cleanup"
+                    );
+                }
+                Err(e) => return Err(e.into()),
+            }
         }
         self.tokens.revoke_for_instance(id).await?;
         self.instances
@@ -730,6 +748,11 @@ mod tests {
         last_create: Mutex<Option<CapturedCreate>>,
         destroyed: Mutex<Vec<String>>,
         next_sandbox_id: Mutex<u32>,
+        /// When set, `destroy_sandbox` returns a synthetic CubeError
+        /// instead of recording the call — used to simulate the
+        /// "cube already dead/unreachable" repro the force-destroy
+        /// path is meant to handle.
+        fail_destroy: Mutex<bool>,
     }
 
     impl MockCube {
@@ -738,6 +761,9 @@ mod tests {
         }
         fn last_create(&self) -> CapturedCreate {
             self.last_create.lock().unwrap().take().unwrap()
+        }
+        fn fail_destroys(&self) {
+            *self.fail_destroy.lock().unwrap() = true;
         }
     }
 
@@ -763,6 +789,12 @@ mod tests {
         }
 
         async fn destroy_sandbox(&self, sandbox_id: &str) -> Result<(), CubeError> {
+            if *self.fail_destroy.lock().unwrap() {
+                return Err(CubeError::Status {
+                    status: 502,
+                    body: "cube unreachable".into(),
+                });
+            }
             self.destroyed.lock().unwrap().push(sandbox_id.into());
             Ok(())
         }
@@ -939,7 +971,7 @@ mod tests {
             .unwrap();
         assert!(tokens.resolve(&created.proxy_token).await.unwrap().is_some());
 
-        svc.destroy("legacy", &created.id).await.unwrap();
+        svc.destroy("legacy", &created.id, false).await.unwrap();
         assert!(tokens.resolve(&created.proxy_token).await.unwrap().is_none());
 
         let row = instances.get(&created.id).await.unwrap().unwrap();
@@ -952,8 +984,52 @@ mod tests {
     #[tokio::test]
     async fn destroy_unknown_returns_not_found() {
         let (svc, _cube, _tokens, _secrets, _instances) = build().await;
-        let err = svc.destroy("legacy", "nope").await.expect_err("must error");
+        let err = svc.destroy("legacy", "nope", false).await.expect_err("must error");
         matches!(err, SwarmError::NotFound);
+    }
+
+    /// Repro for the dead-cube case: an admin tries to destroy an
+    /// instance whose underlying sandbox cubemaster can't reach.
+    /// Without `force`, the cube error bubbles and the row stays Live
+    /// forever (the bug).  With `force=true`, the service logs the
+    /// cube failure and still revokes tokens + flips the row to
+    /// Destroyed so the API stops 502'ing on it.
+    #[tokio::test]
+    async fn destroy_force_proceeds_when_cube_errors() {
+        let (svc, cube, tokens, _secrets, instances) = build().await;
+        let created = svc
+            .create("legacy", CreateRequest {
+                template_id: "tpl".into(),
+                name: None,
+                task: None,
+                env: env_with_model(),
+                ttl_seconds: None,
+            })
+            .await
+            .unwrap();
+
+        cube.fail_destroys();
+
+        // Strict path bubbles the cube error and leaves the row Live.
+        let err = svc
+            .destroy("legacy", &created.id, false)
+            .await
+            .expect_err("non-force destroy must surface cube error");
+        assert!(matches!(err, SwarmError::Cube(_)));
+        let row = instances.get(&created.id).await.unwrap().unwrap();
+        assert_eq!(row.status, InstanceStatus::Live);
+        assert!(tokens.resolve(&created.proxy_token).await.unwrap().is_some());
+
+        // Force path swallows the cube error and reaps DB-side.
+        svc.destroy("legacy", &created.id, true).await.unwrap();
+        assert!(tokens.resolve(&created.proxy_token).await.unwrap().is_none());
+        let row = instances.get(&created.id).await.unwrap().unwrap();
+        assert_eq!(row.status, InstanceStatus::Destroyed);
+        assert!(row.destroyed_at.is_some());
+        // Cube destroy was attempted (and rejected) — the destroyed
+        // list stays empty because the mock returns Err before
+        // recording.
+        assert!(cube.destroyed.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

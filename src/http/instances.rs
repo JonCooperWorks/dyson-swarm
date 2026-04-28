@@ -165,8 +165,19 @@ async fn destroy_instance(
     State(state): State<AppState>,
     Extension(caller): Extension<CallerIdentity>,
     Path(id): Path<String>,
+    uri: Uri,
 ) -> impl IntoResponse {
-    match state.instances.destroy(&caller.user_id, &id).await {
+    // Force is the default: a CubeError from `destroy_sandbox` is
+    // swallowed and DB-side cleanup proceeds anyway, so a dead/
+    // unreachable cube can't strand the row Live forever.  Pass
+    // `?force=false` (or `0` / `no`) to opt back into the strict
+    // path that bubbles cube errors as 502.
+    let q = parse_query(uri.query().unwrap_or(""));
+    let force = !matches!(
+        q.get("force").map(|s| s.as_str()),
+        Some("0" | "false" | "no")
+    );
+    match state.instances.destroy(&caller.user_id, &id, force).await {
         Ok(()) => {
             // Stage 8: wipe the per-instance configure secret
             // sealed in `system_secrets["instance.<id>.configure"]`.

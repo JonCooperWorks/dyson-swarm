@@ -27,7 +27,10 @@ pub async fn run_once(instances: &dyn InstanceStore, service: &InstanceService) 
         }
     };
     for row in expired {
-        if let Err(e) = service.destroy(crate::instance::SYSTEM_OWNER, &row.id).await {
+        if let Err(e) = service
+            .destroy(crate::instance::SYSTEM_OWNER, &row.id, false)
+            .await
+        {
             tracing::warn!(
                 error = %e,
                 instance = %row.id,

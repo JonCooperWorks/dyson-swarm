@@ -419,8 +419,13 @@ mod tests {
         // legacy seeded user wouldn't suffice here because we need two.
         use crate::traits::{UserRow, UserStatus};
         let pool = open_in_memory().await.unwrap();
-        let users: Arc<dyn crate::traits::UserStore> =
-            Arc::new(crate::db::users::SqlxUserStore::new(pool.clone()));
+        let _keys_tmp = tempfile::tempdir().unwrap();
+        let cipher_dir: Arc<dyn crate::envelope::CipherDirectory> = Arc::new(
+            crate::envelope::AgeCipherDirectory::new(_keys_tmp.path()).unwrap(),
+        );
+        let users: Arc<dyn crate::traits::UserStore> = Arc::new(
+            crate::db::users::SqlxUserStore::new(pool.clone(), cipher_dir),
+        );
         for sub in ["alice", "bob"] {
             users
                 .create(UserRow {

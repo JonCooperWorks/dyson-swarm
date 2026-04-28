@@ -130,7 +130,8 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         Arc::new(db::policies::SqlitePolicyStore::new(pool.clone()));
     let audit_store: Arc<dyn AuditStore> =
         Arc::new(db::audit::SqliteAuditStore::new(pool.clone()));
-    let users_store: Arc<dyn UserStore> = Arc::new(db::users::SqlxUserStore::new(pool.clone()));
+    let users_store: Arc<dyn UserStore> =
+        Arc::new(db::users::SqlxUserStore::new(pool.clone(), cipher_dir.clone()));
 
     let proxy_base = format!("http://{}/llm", cfg.bind);
     let mut instance_svc = InstanceService::new(

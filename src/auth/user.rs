@@ -245,6 +245,20 @@ mod tests {
     use crate::auth::AuthSource;
     use crate::db::open_in_memory;
     use crate::db::users::SqlxUserStore;
+    use crate::envelope::{AgeCipherDirectory, CipherDirectory};
+
+    /// Build a test SqlxUserStore backed by a throwaway cipher dir.
+    /// Tests in this module never exercise the api-key envelope so
+    /// the dir's contents don't matter — but the constructor needs
+    /// one and we don't want to leak filesystem state.  The TempDir
+    /// is intentionally leaked (Box::leak) for the test process
+    /// lifetime, which is bounded by the test runner.
+    fn test_user_store(pool: sqlx::SqlitePool) -> Arc<dyn UserStore> {
+        let tmp = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+        let dir: Arc<dyn CipherDirectory> =
+            Arc::new(AgeCipherDirectory::new(tmp.path()).unwrap());
+        Arc::new(SqlxUserStore::new(pool, dir))
+    }
 
     /// Test authenticator that returns a fixed identity.
     struct FixedIdentity(UserIdentity);
@@ -294,7 +308,7 @@ mod tests {
         // passed the upstream signup flow).  Suspended/Inactive are
         // now ops-only states an admin can flip via the SPA.
         let pool = open_in_memory().await.unwrap();
-        let users: Arc<dyn UserStore> = Arc::new(SqlxUserStore::new(pool.clone()));
+        let users: Arc<dyn UserStore> = test_user_store(pool.clone());
         let auth: Arc<dyn Authenticator> = Arc::new(FixedIdentity(id("alice")));
         let state = UserAuthState::new(auth, users.clone());
         let base = spawn(state).await;
@@ -308,7 +322,7 @@ mod tests {
     #[tokio::test]
     async fn active_user_passes_and_extension_is_set() {
         let pool = open_in_memory().await.unwrap();
-        let users: Arc<dyn UserStore> = Arc::new(SqlxUserStore::new(pool.clone()));
+        let users: Arc<dyn UserStore> = test_user_store(pool.clone());
         // Pre-provision an active user.
         users
             .create(UserRow {
@@ -337,7 +351,7 @@ mod tests {
     #[tokio::test]
     async fn suspended_user_is_403() {
         let pool = open_in_memory().await.unwrap();
-        let users: Arc<dyn UserStore> = Arc::new(SqlxUserStore::new(pool.clone()));
+        let users: Arc<dyn UserStore> = test_user_store(pool.clone());
         users
             .create(UserRow {
                 id: "u1".into(),
@@ -373,7 +387,7 @@ mod tests {
     #[tokio::test]
     async fn missing_credential_is_401() {
         let pool = open_in_memory().await.unwrap();
-        let users: Arc<dyn UserStore> = Arc::new(SqlxUserStore::new(pool.clone()));
+        let users: Arc<dyn UserStore> = test_user_store(pool.clone());
         let state = UserAuthState::new(Arc::new(AlwaysMissing), users);
         let base = spawn(state).await;
         let r = reqwest::get(format!("{base}/v1/x")).await.unwrap();

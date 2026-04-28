@@ -41,6 +41,10 @@ age = { version = "0.10", default-features = false, features = ["armor"] }
 # disk on first call (TOFU) and verifies on subsequent calls.  Same
 # crate dyson already uses for its bearer-auth hashing path.
 argon2 = "0.5"
+# CSPRNG for fresh api-key tokens (Stage 4).  Dev-deps already pulled
+# this in; promoting to a runtime dep so mint_api_key can use it
+# directly without hand-rolling a getrandom wrapper.
+rand = "0.8"
 
 [features]
 default = []
@@ -54,7 +58,6 @@ postgres = ["sqlx/postgres"]
 # Not a runtime dep — production OIDC verification only uses the public key
 # delivered via JWKS.
 rsa = { version = "0.9", default-features = false, features = ["std", "pem"] }
-rand = "0.8"
 base64 = "0.22"
 tempfile = "3"
 

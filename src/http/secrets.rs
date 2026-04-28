@@ -245,8 +245,9 @@ mod tests {
         let instances_store: Arc<dyn InstanceStore> =
             Arc::new(SqlxInstanceStore::new(pool.clone()));
         let tokens_store: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(pool.clone()));
-        let users_store: Arc<dyn crate::traits::UserStore> =
-            Arc::new(crate::db::users::SqlxUserStore::new(pool.clone()));
+        let users_store: Arc<dyn crate::traits::UserStore> = Arc::new(
+            crate::db::users::SqlxUserStore::new(pool.clone(), cipher_dir.clone()),
+        );
         let (user_auth, user_id) =
             crate::auth::user::fixed_user_auth(users_store.clone(), "alice").await;
         seed_instance(pool.clone(), "i1", &user_id).await;

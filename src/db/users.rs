@@ -3,13 +3,45 @@
 //! `inactive` status — JIT provisioning creates the row from a fresh OIDC
 //! token but the auth middleware refuses requests until an admin flips the
 //! status to `active`.
+//!
+//! # API-key envelope (Stage 4)
+//!
+//! Bearer tokens minted via `mint_api_key` are stored sealed: each row
+//! holds the OWNER user's age-encrypted ciphertext alongside an
+//! 8-hex-char plaintext `prefix` used as the lookup oracle.  The store
+//! never persists the bearer's plaintext — it can only be reconstructed
+//! by opening the ciphertext with the user's key.
+//!
+//! Token format: `dy_<32 hex>` (35 chars).  The `dy_` literal makes
+//! warden-issued tokens unmistakable in logs / dashboards and lets
+//! `BearerAuthenticator` short-circuit obviously-not-ours bearers
+//! before any DB hit.  The 32-hex random part gives 128 bits of
+//! unguessable entropy.
+//!
+//! Resolve flow: prefix-match → for each candidate, open the
+//! ciphertext with the row's user cipher → constant-time-compare against
+//! the bearer.  Prefix collisions in a 32-bit space are statistically
+//! negligible at human scales (a tenant minting 65k keys still has only
+//! ~50% chance of any prefix collision), so the expected per-resolve
+//! cost is exactly one age open.
+
+use std::sync::Arc;
 
 use async_trait::async_trait;
+use rand::RngCore;
 use sqlx::{Row, SqlitePool};
 use uuid::Uuid;
 
+use crate::envelope::CipherDirectory;
 use crate::error::StoreError;
 use crate::traits::{UserApiKey, UserRow, UserStatus, UserStore};
+
+/// Literal prefix every warden-issued bearer carries.  Public so
+/// [`crate::auth::bearer::BearerAuthenticator`] can route by it.
+pub const TOKEN_PREFIX: &str = "dy_";
+/// Width (in chars) of the indexed plaintext lookup prefix.  8 hex
+/// chars = 32 bits = collision-rare at any realistic tenant scale.
+const LOOKUP_PREFIX_LEN: usize = 8;
 
 fn map_sqlx(e: sqlx::Error) -> StoreError {
     match e {
@@ -46,15 +78,70 @@ fn row_to_user(row: &sqlx::sqlite::SqliteRow) -> Result<UserRow, StoreError> {
     })
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SqlxUserStore {
     pool: SqlitePool,
+    /// Routes `user_id → EnvelopeCipher` for sealing/opening api-key
+    /// ciphertexts.  Held here so the store is self-sufficient — the
+    /// auth path sees a plain `UserStore` trait object, no separate
+    /// service to thread through.
+    ciphers: Arc<dyn CipherDirectory>,
+}
+
+impl std::fmt::Debug for SqlxUserStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SqlxUserStore").finish_non_exhaustive()
+    }
 }
 
 impl SqlxUserStore {
-    pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+    pub fn new(pool: SqlitePool, ciphers: Arc<dyn CipherDirectory>) -> Self {
+        Self { pool, ciphers }
     }
+}
+
+/// Generate a fresh random api-key token: `dy_<32 hex>`.  Uses the
+/// thread-local CSPRNG; failures are unrecoverable so we panic.
+fn generate_token() -> String {
+    let mut bytes = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    let mut s = String::with_capacity(TOKEN_PREFIX.len() + 32);
+    s.push_str(TOKEN_PREFIX);
+    for b in bytes {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
+/// Extract the indexed lookup prefix from a token.  Returns `None`
+/// for anything that isn't shaped like a warden bearer (wrong literal
+/// prefix, too short).  Used by both mint (to derive the row's
+/// `prefix` column) and resolve (to compute the sqlite WHERE clause).
+fn lookup_prefix(token: &str) -> Option<&str> {
+    let rest = token.strip_prefix(TOKEN_PREFIX)?;
+    if rest.len() < LOOKUP_PREFIX_LEN {
+        return None;
+    }
+    let p = &rest[..LOOKUP_PREFIX_LEN];
+    if !p.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(p)
+}
+
+/// Constant-time bytewise equality for two ASCII bearers.  We're well
+/// past the entropy needed to make timing leaks academic, but lookup
+/// candidates do come from the DB so a non-CT comparison would, in
+/// principle, leak prefix-bucket sizes.  Trivial to do right.
+fn ct_eq(a: &str, b: &str) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for (x, y) in a.bytes().zip(b.bytes()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 #[async_trait]
@@ -153,13 +240,27 @@ impl UserStore for SqlxUserStore {
         user_id: &str,
         label: Option<&str>,
     ) -> Result<String, StoreError> {
-        let token = Uuid::new_v4().simple().to_string();
+        let token = generate_token();
+        let prefix = lookup_prefix(&token)
+            .expect("generate_token always produces a well-formed token");
+        let cipher = self
+            .ciphers
+            .for_user(user_id)
+            .map_err(|e| StoreError::Io(format!("envelope: {e}")))?;
+        let ciphertext_bytes = cipher
+            .seal(token.as_bytes())
+            .map_err(|e| StoreError::Io(format!("envelope seal: {e}")))?;
+        let ciphertext = String::from_utf8(ciphertext_bytes)
+            .map_err(|_| StoreError::Malformed("envelope ciphertext not ASCII".into()))?;
+        let id = Uuid::new_v4().simple().to_string();
         sqlx::query(
-            "INSERT INTO user_api_keys (token, user_id, label, created_at, revoked_at) \
-             VALUES (?, ?, ?, ?, NULL)",
+            "INSERT INTO user_api_keys (id, user_id, prefix, ciphertext, label, created_at, revoked_at) \
+             VALUES (?, ?, ?, ?, ?, ?, NULL)",
         )
-        .bind(&token)
+        .bind(&id)
         .bind(user_id)
+        .bind(prefix)
+        .bind(&ciphertext)
         .bind(label)
         .bind(now_secs())
         .execute(&self.pool)
@@ -169,36 +270,94 @@ impl UserStore for SqlxUserStore {
     }
 
     async fn resolve_api_key(&self, token: &str) -> Result<Option<UserApiKey>, StoreError> {
-        let row = sqlx::query(
-            "SELECT token, user_id, label, created_at, revoked_at \
-             FROM user_api_keys WHERE token = ? AND revoked_at IS NULL",
+        let Some(prefix) = lookup_prefix(token) else {
+            return Ok(None);
+        };
+        // Pull every live row whose plaintext prefix matches.  At 32
+        // bits of prefix entropy the candidate set is overwhelmingly
+        // size-1; we still iterate so a rare collision doesn't break
+        // resolution.
+        let rows = sqlx::query(
+            "SELECT id, user_id, ciphertext, label, created_at, revoked_at \
+             FROM user_api_keys WHERE prefix = ? AND revoked_at IS NULL",
         )
-        .bind(token)
-        .fetch_optional(&self.pool)
+        .bind(prefix)
+        .fetch_all(&self.pool)
         .await
         .map_err(map_sqlx)?;
-        Ok(row.map(|r| UserApiKey {
-            token: r.get("token"),
-            user_id: r.get("user_id"),
-            label: r.get("label"),
-            created_at: r.get("created_at"),
-            revoked_at: r.get("revoked_at"),
-        }))
+        for r in rows {
+            let user_id: String = r.get("user_id");
+            let ciphertext: String = r.get("ciphertext");
+            let cipher = match self.ciphers.for_user(&user_id) {
+                Ok(c) => c,
+                // Missing key file means the row has been orphaned by
+                // a forget_user — treat as not-found, don't error the
+                // whole lookup.
+                Err(_) => continue,
+            };
+            let Ok(plaintext) = cipher.open(ciphertext.as_bytes()) else {
+                continue;
+            };
+            let Ok(plaintext_str) = std::str::from_utf8(&plaintext) else {
+                continue;
+            };
+            if ct_eq(plaintext_str, token) {
+                return Ok(Some(UserApiKey {
+                    token: token.to_owned(),
+                    user_id,
+                    label: r.get("label"),
+                    created_at: r.get("created_at"),
+                    revoked_at: r.get("revoked_at"),
+                }));
+            }
+        }
+        Ok(None)
     }
 
     async fn revoke_api_key(&self, token: &str) -> Result<(), StoreError> {
-        let r = sqlx::query(
-            "UPDATE user_api_keys SET revoked_at = ? WHERE token = ? AND revoked_at IS NULL",
+        // Same prefix-and-open flow as resolve, but we mark the row
+        // by id (NOT by token, since the token isn't in the DB).
+        let Some(prefix) = lookup_prefix(token) else {
+            return Err(StoreError::NotFound);
+        };
+        let rows = sqlx::query(
+            "SELECT id, user_id, ciphertext FROM user_api_keys \
+             WHERE prefix = ? AND revoked_at IS NULL",
         )
-        .bind(now_secs())
-        .bind(token)
-        .execute(&self.pool)
+        .bind(prefix)
+        .fetch_all(&self.pool)
         .await
         .map_err(map_sqlx)?;
-        if r.rows_affected() == 0 {
-            return Err(StoreError::NotFound);
+        for r in rows {
+            let id: String = r.get("id");
+            let user_id: String = r.get("user_id");
+            let ciphertext: String = r.get("ciphertext");
+            let Ok(cipher) = self.ciphers.for_user(&user_id) else {
+                continue;
+            };
+            let Ok(plaintext) = cipher.open(ciphertext.as_bytes()) else {
+                continue;
+            };
+            let Ok(plaintext_str) = std::str::from_utf8(&plaintext) else {
+                continue;
+            };
+            if ct_eq(plaintext_str, token) {
+                let upd = sqlx::query(
+                    "UPDATE user_api_keys SET revoked_at = ? \
+                     WHERE id = ? AND revoked_at IS NULL",
+                )
+                .bind(now_secs())
+                .bind(&id)
+                .execute(&self.pool)
+                .await
+                .map_err(map_sqlx)?;
+                if upd.rows_affected() == 0 {
+                    return Err(StoreError::NotFound);
+                }
+                return Ok(());
+            }
         }
-        Ok(())
+        Err(StoreError::NotFound)
     }
 
     async fn set_openrouter_key_id(
@@ -240,10 +399,18 @@ impl UserStore for SqlxUserStore {
 mod tests {
     use super::*;
     use crate::db::open_in_memory;
+    use crate::envelope::AgeCipherDirectory;
 
-    fn sample(subject: &str) -> UserRow {
+    /// User-id shape accepted by [`AgeCipherDirectory::validate_user_id`]:
+    /// 32 hex chars.  Tests pre-stage-4 used `u-<subject>` which the
+    /// envelope rejects, so test fixtures now mint conformant ids.
+    fn fixed_id(seed: u8) -> String {
+        format!("{:032x}", u128::from(seed) | (u128::from(seed) << 64))
+    }
+
+    fn sample(id: &str, subject: &str) -> UserRow {
         UserRow {
-            id: format!("u-{subject}"),
+            id: id.to_owned(),
             subject: subject.into(),
             email: Some(format!("{subject}@example")),
             display_name: Some(subject.into()),
@@ -256,53 +423,63 @@ mod tests {
         }
     }
 
+    fn build_store() -> impl FnOnce(SqlitePool) -> (tempfile::TempDir, SqlxUserStore) {
+        |pool| {
+            let tmp = tempfile::tempdir().unwrap();
+            let dir: Arc<dyn CipherDirectory> =
+                Arc::new(AgeCipherDirectory::new(tmp.path()).unwrap());
+            (tmp, SqlxUserStore::new(pool, dir))
+        }
+    }
+
     #[tokio::test]
     async fn openrouter_key_round_trip() {
         let pool = open_in_memory().await.unwrap();
-        let store = SqlxUserStore::new(pool);
-        store.create(sample("alice")).await.unwrap();
+        let (_tmp, store) = build_store()(pool);
+        let alice = fixed_id(0xa1);
+        store.create(sample(&alice, "alice")).await.unwrap();
 
-        // Default limit is 10.0 from the migration default.
-        let r0 = store.get("u-alice").await.unwrap().unwrap();
+        let r0 = store.get(&alice).await.unwrap().unwrap();
         assert!(r0.openrouter_key_id.is_none());
         assert!((r0.openrouter_key_limit_usd - 10.0).abs() < 1e-9);
 
         store
-            .set_openrouter_key_id("u-alice", Some("or-key-abc"))
+            .set_openrouter_key_id(&alice, Some("or-key-abc"))
             .await
             .unwrap();
-        store.set_openrouter_limit("u-alice", 25.0).await.unwrap();
+        store.set_openrouter_limit(&alice, 25.0).await.unwrap();
 
-        let r1 = store.get("u-alice").await.unwrap().unwrap();
+        let r1 = store.get(&alice).await.unwrap().unwrap();
         assert_eq!(r1.openrouter_key_id.as_deref(), Some("or-key-abc"));
         assert!((r1.openrouter_key_limit_usd - 25.0).abs() < 1e-9);
 
-        // Clearing on suspend / delete.
-        store.set_openrouter_key_id("u-alice", None).await.unwrap();
-        let r2 = store.get("u-alice").await.unwrap().unwrap();
+        store.set_openrouter_key_id(&alice, None).await.unwrap();
+        let r2 = store.get(&alice).await.unwrap().unwrap();
         assert!(r2.openrouter_key_id.is_none());
     }
 
     #[tokio::test]
     async fn create_get_round_trip() {
         let pool = open_in_memory().await.unwrap();
-        let store = SqlxUserStore::new(pool);
-        store.create(sample("alice")).await.unwrap();
+        let (_tmp, store) = build_store()(pool);
+        let alice = fixed_id(0xa1);
+        store.create(sample(&alice, "alice")).await.unwrap();
         let got = store.get_by_subject("alice").await.unwrap().unwrap();
-        assert_eq!(got.id, "u-alice");
+        assert_eq!(got.id, alice);
         assert_eq!(got.status, UserStatus::Inactive);
     }
 
     #[tokio::test]
     async fn activate_user_sets_activated_at() {
         let pool = open_in_memory().await.unwrap();
-        let store = SqlxUserStore::new(pool);
-        store.create(sample("alice")).await.unwrap();
+        let (_tmp, store) = build_store()(pool);
+        let alice = fixed_id(0xa1);
+        store.create(sample(&alice, "alice")).await.unwrap();
         store
-            .set_status("u-alice", UserStatus::Active)
+            .set_status(&alice, UserStatus::Active)
             .await
             .unwrap();
-        let got = store.get("u-alice").await.unwrap().unwrap();
+        let got = store.get(&alice).await.unwrap().unwrap();
         assert_eq!(got.status, UserStatus::Active);
         assert!(got.activated_at.is_some());
     }
@@ -310,21 +487,98 @@ mod tests {
     #[tokio::test]
     async fn api_key_mint_resolve_revoke() {
         let pool = open_in_memory().await.unwrap();
-        let store = SqlxUserStore::new(pool);
-        store.create(sample("alice")).await.unwrap();
-        let tok = store.mint_api_key("u-alice", Some("ci")).await.unwrap();
-        assert_eq!(tok.len(), 32);
+        let (_tmp, store) = build_store()(pool);
+        let alice = fixed_id(0xa1);
+        store.create(sample(&alice, "alice")).await.unwrap();
+
+        let tok = store.mint_api_key(&alice, Some("ci")).await.unwrap();
+        assert!(tok.starts_with(TOKEN_PREFIX));
+        assert_eq!(tok.len(), TOKEN_PREFIX.len() + 32);
+
         let resolved = store.resolve_api_key(&tok).await.unwrap().unwrap();
-        assert_eq!(resolved.user_id, "u-alice");
+        assert_eq!(resolved.user_id, alice);
         assert_eq!(resolved.label.as_deref(), Some("ci"));
+
         store.revoke_api_key(&tok).await.unwrap();
         assert!(store.resolve_api_key(&tok).await.unwrap().is_none());
+
+        // Revoking an already-revoked token returns NotFound.
+        let err = store.revoke_api_key(&tok).await.unwrap_err();
+        assert!(matches!(err, StoreError::NotFound));
+    }
+
+    #[tokio::test]
+    async fn api_key_resolve_rejects_unprefixed_token() {
+        let pool = open_in_memory().await.unwrap();
+        let (_tmp, store) = build_store()(pool);
+        // No DB hit needed — short-circuits on token shape.
+        assert!(store.resolve_api_key("not-ours").await.unwrap().is_none());
+        assert!(store
+            .resolve_api_key("dy_short")
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn api_key_ciphertext_is_not_token_at_rest() {
+        let pool = open_in_memory().await.unwrap();
+        let (_tmp, store) = build_store()(pool.clone());
+        let alice = fixed_id(0xa1);
+        store.create(sample(&alice, "alice")).await.unwrap();
+        let tok = store.mint_api_key(&alice, None).await.unwrap();
+
+        // Read the row directly: ciphertext must not equal the token.
+        let row = sqlx::query("SELECT ciphertext, prefix FROM user_api_keys")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let ct: String = row.get("ciphertext");
+        let prefix: String = row.get("prefix");
+        assert_ne!(ct, tok);
+        // age-armored output starts with the literal `-----BEGIN AGE`.
+        assert!(ct.starts_with("-----BEGIN AGE"), "got: {ct:.40}");
+        // The prefix column is plaintext lookup oracle = first 8 hex
+        // chars after the `dy_` literal.
+        assert_eq!(prefix, &tok[TOKEN_PREFIX.len()..TOKEN_PREFIX.len() + 8]);
+    }
+
+    #[tokio::test]
+    async fn api_key_resolve_handles_prefix_collision() {
+        // Engineer a prefix collision so the lookup-by-prefix step
+        // returns multiple candidate rows: the open-and-compare loop
+        // must pick the row whose ciphertext actually decrypts to the
+        // bearer.  Forced here by rewriting bob's row's prefix to
+        // match alice's; we then resolve alice's token and assert
+        // the loop didn't accidentally surface bob's row.
+        let pool = open_in_memory().await.unwrap();
+        let (_tmp, store) = build_store()(pool.clone());
+        let alice = fixed_id(0xa1);
+        let bob = fixed_id(0xb0);
+        store.create(sample(&alice, "alice")).await.unwrap();
+        store.create(sample(&bob, "bob")).await.unwrap();
+        let alice_tok = store.mint_api_key(&alice, None).await.unwrap();
+        let _bob_tok = store.mint_api_key(&bob, None).await.unwrap();
+
+        let alice_prefix = lookup_prefix(&alice_tok).unwrap();
+        sqlx::query("UPDATE user_api_keys SET prefix = ? WHERE user_id = ?")
+            .bind(alice_prefix)
+            .bind(&bob)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // Two rows share the same plaintext prefix now; resolving
+        // alice's token must still return alice's row (only alice's
+        // ciphertext decrypts to alice's bearer).
+        let r_alice = store.resolve_api_key(&alice_tok).await.unwrap().unwrap();
+        assert_eq!(r_alice.user_id, alice);
     }
 
     #[tokio::test]
     async fn legacy_user_seeded_by_migration() {
         let pool = open_in_memory().await.unwrap();
-        let store = SqlxUserStore::new(pool);
+        let (_tmp, store) = build_store()(pool);
         let legacy = store.get("legacy").await.unwrap().unwrap();
         assert_eq!(legacy.subject, "legacy");
         assert_eq!(legacy.status, UserStatus::Suspended);

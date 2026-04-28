@@ -99,6 +99,7 @@ mod tests {
 
     use crate::db::open_in_memory;
     use crate::db::users::SqlxUserStore;
+    use crate::envelope::{AgeCipherDirectory, CipherDirectory};
     use crate::traits::{UserRow, UserStatus};
 
     fn headers(token: Option<&str>) -> HeaderMap {
@@ -112,12 +113,22 @@ mod tests {
         h
     }
 
-    async fn build() -> (BearerAuthenticator, Arc<SqlxUserStore>, String) {
+    /// Test fixture: 32-hex user id required by the envelope's
+    /// validate_user_id check.
+    fn alice_id() -> String {
+        format!("{:032x}", 0xa1u128 | (0xa1u128 << 64))
+    }
+
+    async fn build() -> (BearerAuthenticator, Arc<SqlxUserStore>, String, tempfile::TempDir) {
         let pool = open_in_memory().await.unwrap();
-        let store = Arc::new(SqlxUserStore::new(pool));
+        let tmp = tempfile::tempdir().unwrap();
+        let dir: Arc<dyn CipherDirectory> =
+            Arc::new(AgeCipherDirectory::new(tmp.path()).unwrap());
+        let store = Arc::new(SqlxUserStore::new(pool, dir));
+        let id = alice_id();
         store
             .create(UserRow {
-                id: "u1".into(),
+                id: id.clone(),
                 subject: "alice".into(),
                 email: Some("alice@example".into()),
                 display_name: Some("Alice".into()),
@@ -130,28 +141,28 @@ mod tests {
             })
             .await
             .unwrap();
-        let token = store.mint_api_key("u1", Some("ci")).await.unwrap();
+        let token = store.mint_api_key(&id, Some("ci")).await.unwrap();
         let auth = BearerAuthenticator::new(store.clone());
-        (auth, store, token)
+        (auth, store, token, tmp)
     }
 
     #[tokio::test]
     async fn missing_header_is_missing() {
-        let (auth, _, _) = build().await;
+        let (auth, _, _, _tmp) = build().await;
         let err = auth.authenticate(&headers(None)).await.unwrap_err();
         assert!(matches!(err, AuthError::Missing));
     }
 
     #[tokio::test]
     async fn unknown_bearer_is_invalid() {
-        let (auth, _, _) = build().await;
+        let (auth, _, _, _tmp) = build().await;
         let err = auth.authenticate(&headers(Some("nope"))).await.unwrap_err();
         assert!(matches!(err, AuthError::Invalid(_)));
     }
 
     #[tokio::test]
     async fn known_bearer_resolves_to_subject() {
-        let (auth, _, token) = build().await;
+        let (auth, _, token, _tmp) = build().await;
         let id = auth.authenticate(&headers(Some(&token))).await.unwrap();
         assert_eq!(id.subject, "alice");
         assert_eq!(id.email.as_deref(), Some("alice@example"));
@@ -160,7 +171,7 @@ mod tests {
 
     #[tokio::test]
     async fn revoked_bearer_is_invalid() {
-        let (auth, store, token) = build().await;
+        let (auth, store, token, _tmp) = build().await;
         store.revoke_api_key(&token).await.unwrap();
         let err = auth.authenticate(&headers(Some(&token))).await.unwrap_err();
         assert!(matches!(err, AuthError::Invalid(_)));
@@ -168,7 +179,7 @@ mod tests {
 
     #[tokio::test]
     async fn jwt_shaped_token_is_unsupported_so_chain_can_handoff() {
-        let (auth, _, _) = build().await;
+        let (auth, _, _, _tmp) = build().await;
         let err = auth
             .authenticate(&headers(Some("eyJhbGciOiJSUzI1NiJ9.foo.bar")))
             .await
@@ -179,7 +190,10 @@ mod tests {
     #[tokio::test]
     async fn prefix_filter_routes_other_tokens_to_unsupported() {
         let pool = open_in_memory().await.unwrap();
-        let store = Arc::new(SqlxUserStore::new(pool));
+        let tmp = tempfile::tempdir().unwrap();
+        let dir: Arc<dyn CipherDirectory> =
+            Arc::new(AgeCipherDirectory::new(tmp.path()).unwrap());
+        let store = Arc::new(SqlxUserStore::new(pool, dir));
         let auth = BearerAuthenticator::with_prefix(store, "wk-");
         let err = auth
             .authenticate(&headers(Some("not-prefixed")))

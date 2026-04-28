@@ -236,8 +236,9 @@ mod tests {
         let instances_store: Arc<dyn InstanceStore> =
             Arc::new(SqlxInstanceStore::new(pool.clone()));
         let tokens_store: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(pool.clone()));
-        let users_store: Arc<dyn crate::traits::UserStore> =
-            Arc::new(crate::db::users::SqlxUserStore::new(pool.clone()));
+        let users_store: Arc<dyn crate::traits::UserStore> = Arc::new(
+            crate::db::users::SqlxUserStore::new(pool.clone(), cipher_dir.clone()),
+        );
         let instance_svc = Arc::new(InstanceService::new(
             cube.clone(),
             instances_store.clone(),

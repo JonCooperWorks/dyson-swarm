@@ -155,8 +155,9 @@ mod tests {
             .await
             .unwrap();
         let token = tokens_store.mint(&id, "*").await.unwrap();
-        let users_store: Arc<dyn crate::traits::UserStore> =
-            Arc::new(crate::db::users::SqlxUserStore::new(pool));
+        let users_store: Arc<dyn crate::traits::UserStore> = Arc::new(
+            crate::db::users::SqlxUserStore::new(pool, cipher_dir.clone()),
+        );
         let state = AppState {
             secrets: svc,
             user_secrets,

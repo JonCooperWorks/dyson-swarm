@@ -6,18 +6,9 @@
 use async_trait::async_trait;
 use sqlx::{Row, SqlitePool};
 
+use crate::db::map_sqlx;
 use crate::error::StoreError;
 use crate::traits::{SnapshotKind, SnapshotRow, SnapshotStore};
-
-fn map_sqlx(e: sqlx::Error) -> StoreError {
-    match e {
-        sqlx::Error::RowNotFound => StoreError::NotFound,
-        sqlx::Error::Database(db) if db.is_unique_violation() => {
-            StoreError::Constraint(db.to_string())
-        }
-        other => StoreError::Io(other.to_string()),
-    }
-}
 
 fn row_to_snapshot(row: &sqlx::sqlite::SqliteRow) -> Result<SnapshotRow, StoreError> {
     let kind_text: String = row.try_get("kind").map_err(map_sqlx)?;

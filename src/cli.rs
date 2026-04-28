@@ -85,6 +85,16 @@ pub enum SecretsAction {
     },
     /// Remove a secret from an instance.
     Clear { instance: String, name: String },
+    /// Set or overwrite a system-scope secret (provider api keys, etc.).
+    /// Bypasses the HTTP API and writes straight to the DB + cipher dir,
+    /// so it's runnable on the warden host without an admin bearer.
+    SystemSet { name: String, value: String },
+    /// Remove a system-scope secret by name.
+    SystemClear { name: String },
+    /// List all system-scope secret names (values are never printed —
+    /// the store layer doesn't expose them and we wouldn't want to
+    /// dump api keys to a terminal anyway).
+    SystemList,
 }
 
 /// Five-line warning emitted when `--dangerous-no-auth` is active.

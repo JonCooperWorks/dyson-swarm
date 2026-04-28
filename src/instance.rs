@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::error::WardenError;
+use crate::now_secs;
 use crate::secrets::compose_env;
 use crate::traits::{
     CreateSandboxArgs, CubeClient, HealthProber, InstanceRow, InstanceStatus, InstanceStore,
@@ -141,6 +142,27 @@ pub trait DysonReconfigurer: Send + Sync {
     ) -> Result<(), String>;
 }
 
+/// Build the orchestrator-managed env envelope that gets handed to the
+/// sandbox at create + restore time. Centralised so the two paths can't
+/// drift on which keys they inject.
+fn managed_env(
+    proxy_base: &str,
+    proxy_token: &str,
+    instance_id: &str,
+    bearer: &str,
+    name: &str,
+    task: &str,
+) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    out.insert(ENV_PROXY_URL.into(), proxy_base.to_owned());
+    out.insert(ENV_PROXY_TOKEN.into(), proxy_token.to_owned());
+    out.insert(ENV_INSTANCE_ID.into(), instance_id.to_owned());
+    out.insert(ENV_BEARER_TOKEN.into(), bearer.to_owned());
+    out.insert(ENV_NAME.into(), name.to_owned());
+    out.insert(ENV_TASK.into(), task.to_owned());
+    out
+}
+
 /// Body sent to dyson's `/api/admin/configure`.  Mirrors the dyson
 /// side's `ConfigureBody` — the two structs are intentionally
 /// duplicated rather than shared because warden + dyson are two
@@ -232,23 +254,16 @@ impl InstanceService {
 
         let proxy_token = self.tokens.mint(&id, SHARED_PROVIDER).await?;
 
-        let mut managed = BTreeMap::new();
-        managed.insert(ENV_PROXY_URL.into(), self.proxy_base.clone());
-        managed.insert(ENV_PROXY_TOKEN.into(), proxy_token.clone());
-        managed.insert(ENV_INSTANCE_ID.into(), id.clone());
-        managed.insert(ENV_BEARER_TOKEN.into(), bearer.clone());
         // Identity envelope. The agent reads these on first boot to seed
         // its own self-knowledge files (SOUL.md and friends in Dyson's
         // case); subsequent edits to the warden row don't propagate to a
         // running sandbox, by design.
-        managed.insert(ENV_NAME.into(), name);
-        managed.insert(ENV_TASK.into(), task);
+        let managed = managed_env(&self.proxy_base, &proxy_token, &id, &bearer, &name, &task);
 
         // Templates aren't materialised inside warden — they live in Cube.
         // The "template" half of the merge is empty here; operators set per-
         // instance values via PUT /secrets and they win as `existing`.
-        let template_env = BTreeMap::new();
-        let env = compose_env(&template_env, &managed, &req.env, &[]);
+        let env = compose_env(&BTreeMap::new(), &managed, &req.env, &[]);
 
         let info = match self
             .cube
@@ -536,16 +551,17 @@ impl InstanceService {
             self.secrets.put(&id, name, value).await?;
         }
 
-        let mut managed = BTreeMap::new();
-        managed.insert(ENV_PROXY_URL.into(), self.proxy_base.clone());
-        managed.insert(ENV_PROXY_TOKEN.into(), proxy_token.clone());
-        managed.insert(ENV_INSTANCE_ID.into(), id.clone());
-        managed.insert(ENV_BEARER_TOKEN.into(), bearer.clone());
         // Identity envelope. Re-injected on restore so a fresh sandbox
         // (no SOUL.md) can seed itself; an inherited image with prior
         // self-knowledge will simply ignore them.
-        managed.insert(ENV_NAME.into(), restored_name);
-        managed.insert(ENV_TASK.into(), restored_task);
+        let managed = managed_env(
+            &self.proxy_base,
+            &proxy_token,
+            &id,
+            &bearer,
+            &restored_name,
+            &restored_task,
+        );
 
         let env = compose_env(&BTreeMap::new(), &managed, &req.env, &existing);
 
@@ -628,13 +644,6 @@ pub struct CreatedInstance {
     pub url: String,
     pub bearer_token: String,
     pub proxy_token: String,
-}
-
-fn now_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
 }
 
 #[cfg(test)]

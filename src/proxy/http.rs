@@ -23,6 +23,8 @@ use axum::Router;
 use futures::TryStreamExt;
 use serde::Serialize;
 
+use crate::auth::extract_bearer;
+use crate::now_secs;
 use crate::policy::PolicyDenial;
 use crate::proxy::adapters::anthropic as anthropic_adapter;
 use crate::proxy::policy_check::{enforce, EnforceContext};
@@ -252,13 +254,6 @@ async fn handle(
     response
 }
 
-fn extract_bearer(headers: &HeaderMap) -> Option<String> {
-    let h = headers.get(axum::http::header::AUTHORIZATION)?.to_str().ok()?;
-    h.strip_prefix("Bearer ")
-        .or_else(|| h.strip_prefix("bearer "))
-        .map(str::to_owned)
-}
-
 /// Strip hop-by-hop headers and the inbound proxy bearer before forwarding.
 fn sanitize_request_headers(headers: &mut HeaderMap) {
     let to_remove: Vec<HeaderName> = headers
@@ -332,13 +327,6 @@ fn estimate_prompt_tokens(body: &serde_json::Value) -> Option<i64> {
     body.get("usage")
         .and_then(|u| u.get("prompt_tokens"))
         .and_then(|t| t.as_i64())
-}
-
-fn now_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
 }
 
 #[cfg(test)]

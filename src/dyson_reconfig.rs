@@ -120,6 +120,18 @@ impl DysonReconfigurer for DysonReconfigurerHttp {
     ) -> Result<(), String> {
         let secret = self.ensure_secret(instance_id).await?;
         let url = self.url_for(sandbox_id);
+        let model_count = body.models.len();
+        let has_name = body.name.is_some();
+        let has_task = body.task.is_some();
+        tracing::info!(
+            instance = %instance_id,
+            sandbox = %sandbox_id,
+            url = %url,
+            models = model_count,
+            has_name,
+            has_task,
+            "reconfigure: pushing"
+        );
         let resp = self
             .http
             .post(&url)
@@ -131,9 +143,19 @@ impl DysonReconfigurer for DysonReconfigurerHttp {
             .map_err(|e| format!("send: {e}"))?;
         let status = resp.status();
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(format!("dyson /api/admin/configure {status}: {body}"));
+            let resp_body = resp.text().await.unwrap_or_default();
+            return Err(format!("dyson /api/admin/configure {status}: {resp_body}"));
         }
+        // Drain the response body for diagnostics — dyson returns
+        // `{ ok: true, identity_updated: bool, models_updated: bool }`,
+        // and `models_updated: false` while we DID send models is the
+        // smoking gun for a config_path miss on the dyson side.
+        let resp_body = resp.text().await.unwrap_or_default();
+        tracing::info!(
+            instance = %instance_id,
+            response = %resp_body,
+            "reconfigure: dyson accepted"
+        );
         Ok(())
     }
 }

@@ -273,12 +273,31 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         ))
     });
 
+    // Stage 3: provider api_keys live in `system_secrets` under the
+    // name `provider.<name>.api_key`.  Overlay them onto the TOML
+    // [providers.*] config at startup; the system_secrets value wins
+    // when set, the TOML value remains as a fallback for un-migrated
+    // deployments.  Read once at startup — rotating an api key
+    // requires a warden restart, which is fine for v1.
+    let providers_resolved = match overlay_provider_keys(
+        cfg.providers.clone(),
+        system_secrets_svc.as_ref(),
+    )
+    .await
+    {
+        Ok(p) => p,
+        Err(err) => {
+            tracing::error!(error = %err, "system_secrets overlay failed");
+            return ExitCode::from(2);
+        }
+    };
+
     let mut proxy = match ProxyService::new(
         tokens_store.clone(),
         instances_store.clone(),
         policies_store,
         audit_store,
-        cfg.providers.clone(),
+        providers_resolved,
         default_policy,
     ) {
         Ok(s) => s,
@@ -371,6 +390,46 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// Stage 3: overlay `system_secrets[provider.<name>.api_key]` onto the
+/// TOML `[providers.*]` config.  The system_secret takes precedence
+/// when set; the TOML value remains a fallback for deployments that
+/// haven't migrated yet.
+///
+/// Naming convention is fixed: `provider.<name>.api_key` (e.g.
+/// `provider.openrouter.api_key`).  Operators set these via
+/// `warden secrets system-set provider.openrouter.api_key <value>`.
+async fn overlay_provider_keys(
+    mut providers: config::Providers,
+    secrets: &dyson_warden::secrets::SystemSecretsService,
+) -> Result<config::Providers, String> {
+    for (name, slot) in [
+        ("anthropic", &mut providers.anthropic),
+        ("openai", &mut providers.openai),
+        ("gemini", &mut providers.gemini),
+        ("openrouter", &mut providers.openrouter),
+        ("ollama", &mut providers.ollama),
+    ] {
+        let Some(cfg) = slot.as_mut() else { continue };
+        let key = format!("provider.{name}.api_key");
+        match secrets.get_str(&key).await {
+            Ok(Some(value)) => {
+                tracing::info!(
+                    provider = name,
+                    "stage 3: provider api_key sourced from system_secrets"
+                );
+                cfg.api_key = Some(value);
+            }
+            Ok(None) => {
+                // No system_secret set; TOML value (if any) wins.  We
+                // don't warn here — many deployments will be mid-
+                // migration with TOML still authoritative.
+            }
+            Err(err) => return Err(format!("system_secrets[{key}]: {err}")),
+        }
+    }
+    Ok(providers)
+}
+
 /// Build the OpenRouter Provisioning client from `[openrouter]` if
 /// configured.  Returns `Ok(None)` when the section is omitted or the
 /// key path/inline is empty — that's a valid deployment posture
@@ -427,6 +486,19 @@ async fn run_secrets(
     dangerous_no_auth: bool,
     action: SecretsAction,
 ) -> ExitCode {
+    // System-scope variants bypass HTTP and operate on the DB + key
+    // dir directly.  This is intentional: provider api_keys are a
+    // bootstrap concern (the warden HTTP server may not be running
+    // yet, and there's no admin user to mint a bearer for in a fresh
+    // deployment) and the operator running this CLI on the warden
+    // host already has filesystem access to both pieces.
+    if let SecretsAction::SystemSet { .. }
+    | SecretsAction::SystemClear { .. }
+    | SecretsAction::SystemList = action
+    {
+        return run_system_secret(cfg, action).await;
+    }
+
     let Some(client) = build_api_client(cfg, dangerous_no_auth) else {
         return ExitCode::FAILURE;
     };
@@ -445,6 +517,10 @@ async fn run_secrets(
             let path = format!("/v1/instances/{instance}/secrets/{name}");
             client.send_no_body(Method::DELETE, &path).await
         }
+        // The Set/Clear/List system variants returned above.
+        SecretsAction::SystemSet { .. }
+        | SecretsAction::SystemClear { .. }
+        | SecretsAction::SystemList => unreachable!(),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -452,6 +528,67 @@ async fn run_secrets(
             eprintln!("error: {err:#}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// System-secret CLI handler.  Opens the sqlite DB + envelope key dir
+/// directly and pipes through [`SystemSecretsService`].  No HTTP, no
+/// admin bearer.
+async fn run_system_secret(cfg: &config::Config, action: SecretsAction) -> ExitCode {
+    let pool = match db::open(&cfg.db_path).await {
+        Ok(p) => p,
+        Err(err) => {
+            eprintln!("error: db open failed: {err:#}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let cipher_dir: Arc<dyn dyson_warden::envelope::CipherDirectory> =
+        match dyson_warden::envelope::AgeCipherDirectory::new(cfg.resolved_keys_dir()) {
+            Ok(d) => Arc::new(d),
+            Err(err) => {
+                eprintln!("error: envelope key dir init failed: {err:#}");
+                return ExitCode::FAILURE;
+            }
+        };
+    let store: Arc<dyn dyson_warden::traits::SystemSecretStore> = Arc::new(
+        dyson_warden::db::secrets::SqlxSystemSecretStore::new(pool.clone()),
+    );
+    let svc = dyson_warden::secrets::SystemSecretsService::new(store, cipher_dir);
+
+    match action {
+        SecretsAction::SystemSet { name, value } => match svc.put(&name, value.as_bytes()).await {
+            Ok(()) => {
+                eprintln!("ok: system secret {name} stored");
+                ExitCode::SUCCESS
+            }
+            Err(err) => {
+                eprintln!("error: {err:#}");
+                ExitCode::FAILURE
+            }
+        },
+        SecretsAction::SystemClear { name } => match svc.delete(&name).await {
+            Ok(()) => {
+                eprintln!("ok: system secret {name} cleared");
+                ExitCode::SUCCESS
+            }
+            Err(err) => {
+                eprintln!("error: {err:#}");
+                ExitCode::FAILURE
+            }
+        },
+        SecretsAction::SystemList => match svc.list_names().await {
+            Ok(names) => {
+                for n in names {
+                    println!("{n}");
+                }
+                ExitCode::SUCCESS
+            }
+            Err(err) => {
+                eprintln!("error: {err:#}");
+                ExitCode::FAILURE
+            }
+        },
+        _ => unreachable!(),
     }
 }
 

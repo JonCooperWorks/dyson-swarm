@@ -19,3 +19,13 @@ pub mod secrets;
 pub mod snapshot;
 pub mod traits;
 pub mod ttl;
+
+/// Wall-clock seconds since the Unix epoch as `i64`. Saturates at 0 on the
+/// (unreachable in practice) pre-epoch path so callers don't need to plumb
+/// errors for what is effectively a clock query.
+pub fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}

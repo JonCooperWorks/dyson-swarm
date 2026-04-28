@@ -22,7 +22,7 @@ use serde::Deserialize;
 use serde_json::Value as JsonValue;
 use tokio::sync::Mutex;
 
-use crate::auth::{AuthError, AuthSource, Authenticator, UserIdentity};
+use crate::auth::{extract_bearer, looks_like_jwt, AuthError, AuthSource, Authenticator, UserIdentity};
 
 #[derive(Debug, Clone)]
 pub struct OidcConfig {
@@ -220,17 +220,6 @@ impl Authenticator for OidcAuthenticator {
     }
 }
 
-fn extract_bearer(headers: &HeaderMap) -> Option<String> {
-    let h = headers.get(axum::http::header::AUTHORIZATION)?.to_str().ok()?;
-    h.strip_prefix("Bearer ")
-        .or_else(|| h.strip_prefix("bearer "))
-        .map(str::to_owned)
-}
-
-fn looks_like_jwt(token: &str) -> bool {
-    token.starts_with("ey") && token.matches('.').count() >= 2
-}
-
 #[derive(Debug, Deserialize)]
 struct DiscoveryDoc {
     jwks_uri: String,
@@ -289,10 +278,7 @@ mod tests {
                 #[serde(skip_serializing_if = "Option::is_none")]
                 name: Option<&'a str>,
             }
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs() as i64;
+            let now = crate::now_secs();
             let claims = Claims {
                 sub,
                 iss: &self.issuer,

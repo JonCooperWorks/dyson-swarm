@@ -619,7 +619,6 @@ name = "dyson-warden"
 version = "0.1.0"
 dependencies = [
  "age",
- "anyhow",
  "argon2",
  "async-trait",
  "axum",

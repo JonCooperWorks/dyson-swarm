@@ -13,7 +13,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use axum::http::HeaderMap;
 
-use crate::auth::{AuthError, AuthSource, Authenticator, UserIdentity};
+use crate::auth::{extract_bearer, looks_like_jwt, AuthError, AuthSource, Authenticator, UserIdentity};
 use crate::traits::UserStore;
 
 #[derive(Clone)]
@@ -39,20 +39,6 @@ impl BearerAuthenticator {
             required_prefix: Some(prefix.into()),
         }
     }
-}
-
-fn extract_bearer(headers: &HeaderMap) -> Option<String> {
-    let h = headers.get(axum::http::header::AUTHORIZATION)?.to_str().ok()?;
-    h.strip_prefix("Bearer ")
-        .or_else(|| h.strip_prefix("bearer "))
-        .map(str::to_owned)
-}
-
-/// Heuristic: a JWT has at least two `.` separators and a leading "ey" base64
-/// glyph. The bearer authenticator skips JWT-shaped tokens so a chain can hand
-/// them to OIDC.
-fn looks_like_jwt(token: &str) -> bool {
-    token.starts_with("ey") && token.matches('.').count() >= 2
 }
 
 #[async_trait]

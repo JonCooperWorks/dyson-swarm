@@ -14,6 +14,8 @@ use std::str::FromStr;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::SqlitePool;
 
+use crate::error::StoreError;
+
 pub mod audit;
 pub mod instances;
 pub mod policies;
@@ -26,6 +28,22 @@ pub mod users;
 pub mod pg;
 
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations/sqlite");
+
+/// Translate a [`sqlx::Error`] into the crate-level [`StoreError`] flavour
+/// callers expect. Shared so every store can use the same mapping —
+/// `RowNotFound → NotFound`, unique-violation → `Constraint`, everything
+/// else → `Io`. The audit table doesn't enforce uniqueness so its impl
+/// previously had a slimmer mapping; folding that case into the same
+/// function is harmless because the unique-violation arm just never fires.
+pub(crate) fn map_sqlx(e: sqlx::Error) -> StoreError {
+    match e {
+        sqlx::Error::RowNotFound => StoreError::NotFound,
+        sqlx::Error::Database(db) if db.is_unique_violation() => {
+            StoreError::Constraint(db.to_string())
+        }
+        other => StoreError::Io(other.to_string()),
+    }
+}
 
 pub async fn open(path: &Path) -> Result<SqlitePool, sqlx::Error> {
     if let Some(parent) = path.parent() {

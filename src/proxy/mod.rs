@@ -101,11 +101,11 @@ impl ProxyService {
     /// defines the policy primitive without prescribing the computation.
     pub async fn snapshot(&self, subject: &str) -> UsageSnapshot {
         let recent_rps = self.rate.observe(subject);
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
+        let daily_tokens = self
+            .audit
+            .daily_tokens(subject, crate::now_secs())
+            .await
             .unwrap_or(0);
-        let daily_tokens = self.audit.daily_tokens(subject, now).await.unwrap_or(0);
         UsageSnapshot {
             recent_rps,
             daily_tokens,

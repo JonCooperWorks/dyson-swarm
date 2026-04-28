@@ -25,6 +25,7 @@
 //! ~50% chance of any prefix collision), so the expected per-resolve
 //! cost is exactly one age open.
 
+use std::fmt::Write as _;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -32,8 +33,10 @@ use rand::RngCore;
 use sqlx::{Row, SqlitePool};
 use uuid::Uuid;
 
+use crate::db::map_sqlx;
 use crate::envelope::CipherDirectory;
 use crate::error::StoreError;
+use crate::now_secs;
 use crate::traits::{UserApiKey, UserRow, UserStatus, UserStore};
 
 /// Literal prefix every warden-issued bearer carries.  Public so
@@ -42,23 +45,6 @@ pub const TOKEN_PREFIX: &str = "dy_";
 /// Width (in chars) of the indexed plaintext lookup prefix.  8 hex
 /// chars = 32 bits = collision-rare at any realistic tenant scale.
 const LOOKUP_PREFIX_LEN: usize = 8;
-
-fn map_sqlx(e: sqlx::Error) -> StoreError {
-    match e {
-        sqlx::Error::RowNotFound => StoreError::NotFound,
-        sqlx::Error::Database(db) if db.is_unique_violation() => {
-            StoreError::Constraint(db.to_string())
-        }
-        other => StoreError::Io(other.to_string()),
-    }
-}
-
-fn now_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
 
 fn row_to_user(row: &sqlx::sqlite::SqliteRow) -> Result<UserRow, StoreError> {
     let status_text: String = row.try_get("status").map_err(map_sqlx)?;
@@ -108,7 +94,8 @@ fn generate_token() -> String {
     let mut s = String::with_capacity(TOKEN_PREFIX.len() + 32);
     s.push_str(TOKEN_PREFIX);
     for b in bytes {
-        s.push_str(&format!("{b:02x}"));
+        // `write!` formats straight into `s` — no per-byte heap alloc.
+        let _ = write!(s, "{b:02x}");
     }
     s
 }
@@ -142,6 +129,30 @@ fn ct_eq(a: &str, b: &str) -> bool {
         diff |= x ^ y;
     }
     diff == 0
+}
+
+/// Open `ciphertext` under `user_id`'s envelope cipher and constant-time-
+/// compare the plaintext against `token`. Used by both api-key resolve
+/// and revoke to walk the prefix-bucket candidate list. Any failure to
+/// load the cipher, decrypt, or interpret as UTF-8 is treated as a
+/// non-match — a row whose key file is missing (orphaned by a
+/// `forget_user`) shouldn't error a token lookup.
+fn ciphertext_matches_token(
+    ciphers: &dyn CipherDirectory,
+    user_id: &str,
+    ciphertext: &str,
+    token: &str,
+) -> bool {
+    let Ok(cipher) = ciphers.for_user(user_id) else {
+        return false;
+    };
+    let Ok(plaintext) = cipher.open(ciphertext.as_bytes()) else {
+        return false;
+    };
+    let Ok(plaintext_str) = std::str::from_utf8(&plaintext) else {
+        return false;
+    };
+    ct_eq(plaintext_str, token)
 }
 
 #[async_trait]
@@ -278,7 +289,7 @@ impl UserStore for SqlxUserStore {
         // size-1; we still iterate so a rare collision doesn't break
         // resolution.
         let rows = sqlx::query(
-            "SELECT id, user_id, ciphertext, label, created_at, revoked_at \
+            "SELECT user_id, ciphertext, label, created_at, revoked_at \
              FROM user_api_keys WHERE prefix = ? AND revoked_at IS NULL",
         )
         .bind(prefix)
@@ -288,20 +299,7 @@ impl UserStore for SqlxUserStore {
         for r in rows {
             let user_id: String = r.get("user_id");
             let ciphertext: String = r.get("ciphertext");
-            let cipher = match self.ciphers.for_user(&user_id) {
-                Ok(c) => c,
-                // Missing key file means the row has been orphaned by
-                // a forget_user — treat as not-found, don't error the
-                // whole lookup.
-                Err(_) => continue,
-            };
-            let Ok(plaintext) = cipher.open(ciphertext.as_bytes()) else {
-                continue;
-            };
-            let Ok(plaintext_str) = std::str::from_utf8(&plaintext) else {
-                continue;
-            };
-            if ct_eq(plaintext_str, token) {
+            if ciphertext_matches_token(&*self.ciphers, &user_id, &ciphertext, token) {
                 return Ok(Some(UserApiKey {
                     token: token.to_owned(),
                     user_id,
@@ -329,33 +327,25 @@ impl UserStore for SqlxUserStore {
         .await
         .map_err(map_sqlx)?;
         for r in rows {
-            let id: String = r.get("id");
             let user_id: String = r.get("user_id");
             let ciphertext: String = r.get("ciphertext");
-            let Ok(cipher) = self.ciphers.for_user(&user_id) else {
+            if !ciphertext_matches_token(&*self.ciphers, &user_id, &ciphertext, token) {
                 continue;
-            };
-            let Ok(plaintext) = cipher.open(ciphertext.as_bytes()) else {
-                continue;
-            };
-            let Ok(plaintext_str) = std::str::from_utf8(&plaintext) else {
-                continue;
-            };
-            if ct_eq(plaintext_str, token) {
-                let upd = sqlx::query(
-                    "UPDATE user_api_keys SET revoked_at = ? \
-                     WHERE id = ? AND revoked_at IS NULL",
-                )
-                .bind(now_secs())
-                .bind(&id)
-                .execute(&self.pool)
-                .await
-                .map_err(map_sqlx)?;
-                if upd.rows_affected() == 0 {
-                    return Err(StoreError::NotFound);
-                }
-                return Ok(());
             }
+            let id: String = r.get("id");
+            let upd = sqlx::query(
+                "UPDATE user_api_keys SET revoked_at = ? \
+                 WHERE id = ? AND revoked_at IS NULL",
+            )
+            .bind(now_secs())
+            .bind(&id)
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+            if upd.rows_affected() == 0 {
+                return Err(StoreError::NotFound);
+            }
+            return Ok(());
         }
         Err(StoreError::NotFound)
     }

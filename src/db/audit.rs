@@ -5,15 +5,9 @@
 use async_trait::async_trait;
 use sqlx::{Row, SqlitePool};
 
+use crate::db::map_sqlx;
 use crate::error::StoreError;
 use crate::traits::{AuditEntry, AuditStore};
-
-fn map_sqlx(e: sqlx::Error) -> StoreError {
-    match e {
-        sqlx::Error::RowNotFound => StoreError::NotFound,
-        other => StoreError::Io(other.to_string()),
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct SqliteAuditStore {

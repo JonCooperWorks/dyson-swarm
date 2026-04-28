@@ -11,6 +11,7 @@ use serde::Serialize;
 
 use crate::error::WardenError;
 use crate::instance::{CreatedInstance, InstanceService, RestoreRequest};
+use crate::now_secs;
 use crate::traits::{
     BackupSink, CubeClient, InstanceStore, SnapshotKind, SnapshotRow, SnapshotStore,
 };
@@ -244,13 +245,6 @@ fn require_owner(row_owner: &str, caller_owner: &str) -> Result<(), WardenError>
     } else {
         Err(WardenError::NotFound)
     }
-}
-
-fn now_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
 }
 
 #[cfg(test)]

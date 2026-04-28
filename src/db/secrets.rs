@@ -14,7 +14,9 @@
 use async_trait::async_trait;
 use sqlx::{Row, SqlitePool};
 
+use crate::db::map_sqlx;
 use crate::error::StoreError;
+use crate::now_secs;
 use crate::traits::{SecretStore, SystemSecretStore, UserSecretStore};
 
 #[derive(Debug, Clone)]
@@ -48,23 +50,6 @@ impl SqlxSystemSecretStore {
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
     }
-}
-
-fn map_sqlx(e: sqlx::Error) -> StoreError {
-    match e {
-        sqlx::Error::RowNotFound => StoreError::NotFound,
-        sqlx::Error::Database(db) if db.is_unique_violation() => {
-            StoreError::Constraint(db.to_string())
-        }
-        other => StoreError::Io(other.to_string()),
-    }
-}
-
-fn now_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
 }
 
 // ───────────────────────────────────────────────────────────────────

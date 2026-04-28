@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::instance::InstanceService;
+use crate::now_secs;
 use crate::traits::InstanceStore;
 
 /// Default sweep cadence (per the brief: "every minute").
@@ -53,13 +54,6 @@ pub fn spawn_loop(
             run_once(&*instances, &service).await;
         }
     })
-}
-
-fn now_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
 }
 
 #[cfg(test)]

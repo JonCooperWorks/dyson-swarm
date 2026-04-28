@@ -135,10 +135,7 @@ async fn resolve_or_provision(
     // the row was Inactive and an admin had to flip it; with no
     // admin_token to bootstrap from, that loop deadlocks.  Admin
     // suspend/reactivate via the SPA is still available for ops use.
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
+    let now = crate::now_secs();
     let row = UserRow {
         id: Uuid::new_v4().simple().to_string(),
         subject: identity.subject.clone(),

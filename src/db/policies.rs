@@ -9,18 +9,9 @@
 use async_trait::async_trait;
 use sqlx::{Row, SqlitePool};
 
+use crate::db::map_sqlx;
 use crate::error::StoreError;
 use crate::traits::{PolicyRecord, PolicyStore};
-
-fn map_sqlx(e: sqlx::Error) -> StoreError {
-    match e {
-        sqlx::Error::RowNotFound => StoreError::NotFound,
-        sqlx::Error::Database(db) if db.is_unique_violation() => {
-            StoreError::Constraint(db.to_string())
-        }
-        other => StoreError::Io(other.to_string()),
-    }
-}
 
 fn split_csv(s: &str) -> Vec<String> {
     s.split(',')

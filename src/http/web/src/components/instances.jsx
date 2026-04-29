@@ -264,12 +264,15 @@ function NewInstanceForm() {
   // /etc/dyson-swarm/config.toml, surfaced via /auth/config.  When
   // profiles are configured the first profile's template_id matches
   // (bring-up.sh keeps them in sync), so this seeds the dropdown to
-  // the right initial selection.  Fall back to a placeholder string
-  // only when the deployment hasn't configured one — submit is gated
-  // on `templateId.trim()` so the user sees the field empty and is
-  // forced to fill it in.
+  // the right initial selection.  When exactly one profile is
+  // configured we still seed from it as a belt-and-braces fallback
+  // for deployments where `default_template_id` was forgotten.  Fall
+  // back to a placeholder string only when the deployment hasn't
+  // configured one — submit is gated on `templateId.trim()` so the
+  // user sees the field empty and is forced to fill it in.
   const [templateId, setTemplateId] = React.useState(
-    auth?.config?.default_template_id || ''
+    auth?.config?.default_template_id
+      || (cubeProfiles.length === 1 ? cubeProfiles[0].template_id : '')
   );
   const [ttlSeconds, setTtlSeconds] = React.useState('');
   // Network policy state.  Default Open matches the pre-feature
@@ -392,7 +395,7 @@ function NewInstanceForm() {
 
       <section className="page-section">
         <h2 className="section-title">infrastructure</h2>
-        {cubeProfiles.length > 0 ? (
+        {cubeProfiles.length > 1 ? (
           <label className="field">
             <span>cube profile</span>
             <select
@@ -412,6 +415,13 @@ function NewInstanceForm() {
               Profiles are operator-curated in <code>config.env</code>.
             </span>
           </label>
+        ) : cubeProfiles.length === 1 ? (
+          // Single profile — picker would be a no-op dropdown.  Hide
+          // it; the form's templateId state is already seeded from
+          // that profile (see useState above).  Operators on a
+          // single-tier deployment shouldn't see UX they can't
+          // meaningfully interact with.
+          null
         ) : (
           <label className="field">
             <span>template id</span>

@@ -10,21 +10,28 @@ import { useApi } from '../hooks/useApi.jsx';
 
 export function TopBar({ view }) {
   const { auth } = useApi();
-  // `view.name === 'admin'` is the route-active state; `auth.isAdmin`
-  // is the JWT-permissions-claim state from bootstrapAuth.  The admin
-  // link only renders for actual admins — server returns 404 for
-  // non-admins (see require_admin_role on the swarm side), so a
-  // visible link would just dead-end into a missing-page error.
+  // The admin link is shown to every authenticated caller (OIDC mode
+  // or local-dev no-auth).  Hiding it on a stale JWT-permissions
+  // claim — which is what the previous `auth.isAdmin` gate did —
+  // surprised operators whose Auth0 role had just been updated:
+  // their session token didn't yet carry the new permission, the
+  // link disappeared, and they assumed swarm had broken.  The server
+  // already gates `/v1/admin/*` (404 for non-admins), and AdminView
+  // probes `/v1/admin/users` on mount and renders a clean
+  // "not authorized" splash when the probe 401/403s — so showing the
+  // link for non-admins lands them on a clear message rather than
+  // hiding the navigation surface entirely.
   const onAdminRoute = view?.name === 'admin';
   const onByokRoute = view?.name === 'byok';
   const onInstancesRoute = !onAdminRoute && !onByokRoute;
+  const showAdminLink = auth?.mode === 'oidc' || auth?.mode === 'none';
   return (
     <header className="topbar">
       <div className="topbar-brand">swarm</div>
       <nav className="topbar-nav">
         <a className={onInstancesRoute ? 'active' : ''} href="#/">instances</a>
         <a className={onByokRoute ? 'active' : ''} href="#/keys">keys</a>
-        {auth.isAdmin ? (
+        {showAdminLink ? (
           <a className={onAdminRoute ? 'active' : ''} href="#/admin">admin</a>
         ) : null}
       </nav>

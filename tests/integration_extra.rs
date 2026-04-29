@@ -359,6 +359,7 @@ async fn build_stack(subject_for_no_bearer: &str) -> Stack {
         }),
         user_auth,
         llm_router_inner,
+        axum::Router::new(),
     );
     let base = spawn(app).await;
 

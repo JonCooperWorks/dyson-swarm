@@ -6,7 +6,7 @@
  */
 import { describe, expect, test } from 'vitest';
 
-import { profileLabel } from './instances.jsx';
+import { profileLabel, serializeMcpServers } from './instances.jsx';
 
 describe('profileLabel', () => {
   test('renders the operator-facing tuple for a whole-cpu, whole-GB profile', () => {
@@ -59,5 +59,113 @@ describe('profileLabel', () => {
     // crashing the whole page.
     expect(profileLabel(null)).toBe('');
     expect(profileLabel(undefined)).toBe('');
+  });
+});
+
+describe('serializeMcpServers', () => {
+  test('returns an empty array when no rows are configured', () => {
+    expect(serializeMcpServers([])).toEqual([]);
+  });
+
+  test('drops rows missing a name or url so partial form state never reaches swarm', () => {
+    // The hire form lets the user click "+ add" without typing anything;
+    // we don't want a `{name:"", url:""}` to land in the wire payload
+    // and then 400 on the server side — silently dropping is the right
+    // call here because the user can see the row is empty.
+    const rows = [
+      { id: 'a', name: '', url: 'https://x', auth: { kind: 'none' } },
+      { id: 'b', name: 'x', url: '', auth: { kind: 'none' } },
+      { id: 'c', name: 'y', url: 'https://y', auth: { kind: 'none' } },
+    ];
+    const out = serializeMcpServers(rows);
+    expect(out).toEqual([{ name: 'y', url: 'https://y', auth: { kind: 'none' } }]);
+  });
+
+  test('serializes a bearer server with the token verbatim', () => {
+    const rows = [
+      {
+        id: 'b1',
+        name: 'linear',
+        url: 'https://api.linear.app/mcp',
+        auth: { kind: 'bearer', token: 'lin_xxx' },
+      },
+    ];
+    expect(serializeMcpServers(rows)).toEqual([
+      {
+        name: 'linear',
+        url: 'https://api.linear.app/mcp',
+        auth: { kind: 'bearer', token: 'lin_xxx' },
+      },
+    ]);
+  });
+
+  test('drops a bearer row with an empty token (would fail upstream auth anyway)', () => {
+    const rows = [
+      { id: 'b', name: 'x', url: 'https://x', auth: { kind: 'bearer', token: '   ' } },
+    ];
+    expect(serializeMcpServers(rows)).toEqual([]);
+  });
+
+  test('parses oauth scopes (comma- and space-tolerant) and omits empty discovery fields', () => {
+    // The minimal OAuth shape: discovery + DCR.  Empty client_id /
+    // endpoint fields must NOT appear in the wire JSON, because the
+    // server-side serde defaults treat absent and `null` differently —
+    // an empty string would land as `Some("")` and break URL parsing.
+    const rows = [
+      {
+        id: 'o1',
+        name: 'github',
+        url: 'https://copilot-api.githubusercontent.com/mcp',
+        auth: {
+          kind: 'oauth',
+          scopes: 'read,write   user',
+          client_id: '',
+          client_secret: '',
+          authorization_url: '',
+          token_url: '',
+          registration_url: '',
+        },
+      },
+    ];
+    expect(serializeMcpServers(rows)).toEqual([
+      {
+        name: 'github',
+        url: 'https://copilot-api.githubusercontent.com/mcp',
+        auth: { kind: 'oauth', scopes: ['read', 'write', 'user'] },
+      },
+    ]);
+  });
+
+  test('preserves explicitly-supplied OAuth endpoints + client_id', () => {
+    const rows = [
+      {
+        id: 'o2',
+        name: 'gh',
+        url: 'https://up/mcp',
+        auth: {
+          kind: 'oauth',
+          scopes: '',
+          client_id: 'my-client',
+          client_secret: 's3cret',
+          authorization_url: 'https://auth/x',
+          token_url: 'https://auth/t',
+          registration_url: '',
+        },
+      },
+    ];
+    expect(serializeMcpServers(rows)).toEqual([
+      {
+        name: 'gh',
+        url: 'https://up/mcp',
+        auth: {
+          kind: 'oauth',
+          scopes: [],
+          client_id: 'my-client',
+          client_secret: 's3cret',
+          authorization_url: 'https://auth/x',
+          token_url: 'https://auth/t',
+        },
+      },
+    ]);
   });
 });

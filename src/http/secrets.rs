@@ -212,6 +212,7 @@ mod tests {
             crate::auth::AuthState::dangerous_no_auth(),
             user_auth,
             axum::Router::new(),
+            axum::Router::new(),
         );
         tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();

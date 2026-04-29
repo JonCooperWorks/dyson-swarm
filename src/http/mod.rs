@@ -111,6 +111,7 @@ pub fn router(
     auth: AuthState,
     user_auth: UserAuthState,
     extra: Router,
+    mcp_user_router: Router,
 ) -> Router {
     // Admin-only routes — Stage 5 layered:
     // 1. user_middleware resolves the caller's CallerIdentity (OIDC
@@ -145,6 +146,7 @@ pub fn router(
         .merge(secrets::router(state.clone()))
         .merge(byok::router(state.clone()))
         .merge(models::router(state.clone()))
+        .merge(mcp_user_router)
         .layer(middleware::from_fn_with_state(user_auth.clone(), user_middleware));
 
     // Static assets (SPA bundle) are merged last so the API routes win
@@ -298,7 +300,7 @@ mod tests {
     async fn spawn(state: AppState, auth: AuthState, user_auth: UserAuthState) -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let app = router(state, auth, user_auth, Router::new());
+        let app = router(state, auth, user_auth, Router::new(), Router::new());
         tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });

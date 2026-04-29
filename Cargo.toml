@@ -61,6 +61,11 @@ rand = "0.8.6"
 # leave the mutex unlocked) and keeps the API blocking-only, which is
 # the right shape for the short critical sections we hold here.
 parking_lot = "0.12"
+# base64url encoding for PKCE verifier/challenge + CSRF state in the
+# MCP-server OAuth flow.  Same crate the dev-deps already pull in —
+# promoting to a runtime dep so `mcp_servers` can build PKCE without
+# reaching for a different encoder.
+base64 = "0.22.1"
 # Process-wide umask hardening.  Set 0o077 at startup so newly created
 # files (sqlite db, age key files) default to owner-only even if a
 # call site forgets to chmod after create — closes the TOCTOU window
@@ -81,7 +86,6 @@ postgres = ["sqlx/postgres"]
 # delivered via JWKS.  RUSTSEC-2023-0071 (Marvin timing attack) is a no-op
 # here: tests sign, never decrypt.
 rsa = { version = "0.9.10", default-features = false, features = ["std", "pem"] }
-base64 = "0.22.1"
 tempfile = "3.27"
 
 [profile.release]

@@ -16,9 +16,10 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::error::SwarmError;
+use crate::mcp_servers::{self, McpServerSpec};
 use crate::network_policy::{self, DnsHostResolver, HostResolver, NetworkPolicy};
 use crate::now_secs;
-use crate::secrets::compose_env;
+use crate::secrets::{compose_env, UserSecretsService};
 use crate::traits::{
     CreateSandboxArgs, CubeClient, HealthProber, InstanceRow, InstanceStatus, InstanceStore,
     ListFilter, ProbeResult, SecretStore, TokenStore,
@@ -148,6 +149,14 @@ pub struct InstanceService {
     /// DNS resolver for hostname entries in Allowlist/Denylist.
     /// Production uses `DnsHostResolver`; tests inject a mock.
     resolver: Arc<dyn HostResolver>,
+    /// Per-user encrypted secret store used to persist the upstream
+    /// URL + auth credentials for each MCP server attached to an
+    /// instance.  `None` skips the persistence step (older callers
+    /// and tests that don't exercise MCP).  When set, hire-time MCP
+    /// specs are sealed under the owner's cipher and the running
+    /// agent only ever sees the swarm proxy URL — never the real
+    /// upstream + token.
+    mcp_secrets: Option<Arc<UserSecretsService>>,
 }
 
 /// Anything that can push swarm-side identity/task/model state to a
@@ -255,6 +264,14 @@ pub struct ReconfigureBody {
     /// the reset (rename / models-only updates leave skills alone).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub reset_skills: bool,
+    /// Per-server stanzas to write under `mcp_servers.<name>` in
+    /// dyson.json.  Each value is the swarm-proxied entry the agent
+    /// should talk to: `{ url, headers: { Authorization: "Bearer ..." } }`.
+    /// `None` (the default) leaves any existing `mcp_servers` block
+    /// untouched; an empty map clears it.  See [`mcp_servers::dyson_json_block`]
+    /// for the canonical shape.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mcp_servers: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 /// Image-generation defaults a swarm-managed dyson should run with.
@@ -327,6 +344,7 @@ impl InstanceService {
             image_gen_defaults: Some(ImageGenDefaults::openrouter_gemini3_image()),
             llm_cidr: None,
             resolver: Arc::new(DnsHostResolver),
+            mcp_secrets: None,
         }
     }
 
@@ -360,6 +378,15 @@ impl InstanceService {
     /// tests that don't want to assert on the extra body fields).
     pub fn with_image_gen_defaults(mut self, defaults: Option<ImageGenDefaults>) -> Self {
         self.image_gen_defaults = defaults;
+        self
+    }
+
+    /// Builder-style: plug in the per-user secrets store so the create
+    /// path can persist MCP server records.  `None` (the default)
+    /// keeps `CreateRequest.mcp_servers` accepted but ignored — useful
+    /// for tests that don't need the proxy path.
+    pub fn with_mcp_secrets(mut self, secrets: Arc<UserSecretsService>) -> Self {
+        self.mcp_secrets = Some(secrets);
         self
     }
 
@@ -812,6 +839,25 @@ impl InstanceService {
 
         let proxy_token = self.tokens.mint(&id, SHARED_PROVIDER).await?;
 
+        // Persist MCP server records under the owner's cipher so the
+        // proxy path can decrypt them per-request.  We do this BEFORE
+        // any reconfigure push so the running agent's first JSON-RPC
+        // call lands on a populated entry rather than a 404.  Failure
+        // is fatal to the create — the alternative is an instance
+        // whose dyson.json points at /mcp/<id>/<name> but the secret
+        // store has no row, which would surface as confusing 404s.
+        let mcp_specs = req.mcp_servers.clone();
+        if !mcp_specs.is_empty()
+            && let Some(secrets) = self.mcp_secrets.as_ref()
+        {
+            mcp_servers::put_all(secrets, owner_id, &id, mcp_specs.clone())
+                .await
+                .map_err(|err| {
+                    tracing::warn!(error = %err, instance = %id, "mcp: persist failed");
+                    SwarmError::Internal(format!("mcp persist failed: {err}"))
+                })?;
+        }
+
         // Identity envelope. The agent reads these on first boot to seed
         // its own self-knowledge files (SOUL.md and friends in Dyson's
         // case); subsequent edits to the swarm row don't propagate to a
@@ -932,6 +978,27 @@ impl InstanceService {
                 // outcome deterministic regardless of which template
                 // the cube launched the instance from.
                 reset_skills: true,
+                // Render the proxied stanza for each attached MCP server.
+                // The agent sees `https://<swarm>/mcp/<id>/<name>` plus a
+                // bearer header; the upstream URL + real credentials stay
+                // in user_secrets and never reach dyson.json.
+                mcp_servers: if mcp_specs.is_empty() {
+                    None
+                } else {
+                    let mut map = serde_json::Map::with_capacity(mcp_specs.len());
+                    for spec in &mcp_specs {
+                        map.insert(
+                            spec.name.clone(),
+                            mcp_servers::dyson_json_block(
+                                &id,
+                                &spec.name,
+                                &self.proxy_base,
+                                &proxy_token,
+                            ),
+                        );
+                    }
+                    Some(map)
+                },
             };
             // Await the configure-push before returning Live.  Previously
             // this was tokio::spawn'd (fire-and-forget): the SPA could
@@ -1159,6 +1226,19 @@ impl InstanceService {
             }
         }
         self.tokens.revoke_for_instance(id).await?;
+        // Wipe any MCP server records associated with this instance so
+        // the sealed plaintext doesn't outlive the dyson it served.
+        // Best-effort — failures are logged but don't fail destroy
+        // (same posture as `dyson_reconfig::forget_secret`).
+        if let Some(secrets) = self.mcp_secrets.as_ref() {
+            if let Err(err) = mcp_servers::forget_all(secrets, owner_id, id).await {
+                tracing::warn!(
+                    error = %err,
+                    instance = %id,
+                    "destroy: mcp forget_all failed; sealed plaintext lingers"
+                );
+            }
+        }
         self.instances
             .update_status(id, InstanceStatus::Destroyed)
             .await?;
@@ -1279,7 +1359,7 @@ impl InstanceService {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct CreateRequest {
     pub template_id: String,
     /// Human-readable label for the employee. Optional — defaults to the
@@ -1300,6 +1380,12 @@ pub struct CreateRequest {
     /// See [`crate::network_policy`] for the four profiles.
     #[serde(default)]
     pub network_policy: NetworkPolicy,
+    /// Optional MCP servers attached to the dyson at hire time.
+    /// Each entry's URL + auth is sealed under the owner's cipher in
+    /// `user_secrets`; the agent only ever sees the swarm proxy URL.
+    /// Empty (the default) keeps the existing wire shape.
+    #[serde(default)]
+    pub mcp_servers: Vec<McpServerSpec>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1519,6 +1605,7 @@ mod tests {
                 env: env_with_model(),
                 ttl_seconds: None,
                 network_policy: NetworkPolicy::default(),
+                mcp_servers: Vec::new(),
             })
             .await
             .unwrap();
@@ -1547,6 +1634,7 @@ mod tests {
                 env: env_with_model(),
                 ttl_seconds: None,
                 network_policy: NetworkPolicy::default(),
+                mcp_servers: Vec::new(),
             })
             .await
             .unwrap();
@@ -1575,6 +1663,7 @@ mod tests {
                 env: caller,
                 ttl_seconds: Some(60),
                 network_policy: NetworkPolicy::default(),
+                mcp_servers: Vec::new(),
             })
             .await
             .unwrap();
@@ -1617,6 +1706,7 @@ mod tests {
             env: caller,
             ttl_seconds: None,
             network_policy: NetworkPolicy::default(),
+            mcp_servers: Vec::new(),
         })
         .await
         .unwrap();
@@ -1635,6 +1725,7 @@ mod tests {
                 env: env_with_model(),
                 ttl_seconds: None,
                 network_policy: NetworkPolicy::default(),
+                mcp_servers: Vec::new(),
             })
             .await
             .unwrap();
@@ -1674,6 +1765,7 @@ mod tests {
                 env: env_with_model(),
                 ttl_seconds: None,
                 network_policy: NetworkPolicy::default(),
+                mcp_servers: Vec::new(),
             })
             .await
             .unwrap();
@@ -1713,6 +1805,7 @@ mod tests {
                 env: env_with_model(),
                 ttl_seconds: None,
                 network_policy: NetworkPolicy::default(),
+                mcp_servers: Vec::new(),
             })
             .await
             .unwrap();
@@ -1803,6 +1896,7 @@ mod tests {
             env: env_with_model(),
             ttl_seconds: None,
             network_policy: NetworkPolicy::default(),
+            mcp_servers: Vec::new(),
         })
         .await
         .unwrap();
@@ -1888,6 +1982,7 @@ mod tests {
             env: env_with_model(),
             ttl_seconds: None,
             network_policy: NetworkPolicy::default(),
+            mcp_servers: Vec::new(),
         })
         .await
         .unwrap();
@@ -1927,6 +2022,149 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_persists_mcp_specs_and_pushes_proxied_entries() {
+        // The whole feature: a hire that supplies MCP servers must
+        //   (1) seal the upstream URL + auth in user_secrets under the
+        //       owner's cipher (so a stolen sqlite row leaks nothing),
+        //   (2) build the dyson.json block with the SWARM proxy URL +
+        //       the per-instance bearer (so the agent never sees the
+        //       upstream URL or its credentials),
+        //   (3) ride the configure push as `mcp_servers` so the running
+        //       dyson reloads with MCP wired up on the next turn.
+        let pool = crate::db::open_in_memory().await.unwrap();
+        let cube = MockCube::new();
+        let tokens: Arc<dyn TokenStore> =
+            Arc::new(SqlxTokenStore::new(pool.clone()));
+        let instances: Arc<dyn InstanceStore> =
+            Arc::new(SqlxInstanceStore::new(pool.clone()));
+        let secrets_store: Arc<dyn SecretStore> =
+            Arc::new(SqlxSecretStore::new(pool.clone()));
+        let recorder = Arc::new(RecordingReconfigurer::default());
+        let tmp = tempfile::tempdir().unwrap();
+        let dir: Arc<dyn crate::envelope::CipherDirectory> =
+            Arc::new(crate::envelope::AgeCipherDirectory::new(tmp.path()).unwrap());
+        let user_store: Arc<dyn crate::traits::UserSecretStore> =
+            Arc::new(crate::db::secrets::SqlxUserSecretStore::new(pool.clone()));
+        let user_secrets = Arc::new(UserSecretsService::new(user_store, dir));
+        let svc = Arc::new(
+            InstanceService::new(
+                cube,
+                instances,
+                secrets_store,
+                tokens,
+                "https://dyson.example.com/llm",
+            )
+            .with_reconfigurer(recorder.clone())
+            .with_mcp_secrets(user_secrets.clone()),
+        );
+
+        // The age cipher rejects non-hex user ids ("legacy" is a sentinel
+        // the migration seeds; for this test we want a real owner whose
+        // id round-trips through `CipherDirectory::for_user`).
+        let owner = "deadbeef".repeat(4);
+        sqlx::query(
+            "INSERT INTO users (id, subject, status, created_at) VALUES (?, ?, 'active', ?)",
+        )
+        .bind(&owner)
+        .bind(&owner)
+        .bind(0i64)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let created = svc
+            .create(&owner, CreateRequest {
+                template_id: "tpl".into(),
+                name: Some("alice".into()),
+                task: Some("triage".into()),
+                env: env_with_model(),
+                ttl_seconds: None,
+                network_policy: NetworkPolicy::default(),
+                mcp_servers: vec![
+                    crate::mcp_servers::McpServerSpec {
+                        name: "linear".into(),
+                        url: "https://api.linear.app/mcp".into(),
+                        auth: crate::mcp_servers::McpAuthSpec::Bearer { token: "lin_secret".into() },
+                    },
+                    crate::mcp_servers::McpServerSpec {
+                        name: "no_auth".into(),
+                        url: "https://example/mcp".into(),
+                        auth: crate::mcp_servers::McpAuthSpec::None,
+                    },
+                ],
+            })
+            .await
+            .unwrap();
+
+        wait_for_pushes(&recorder, 1).await;
+        let pushed = recorder.pushed.lock().unwrap();
+        let (_, _, body) = &pushed[0];
+        let block = body
+            .mcp_servers
+            .as_ref()
+            .expect("mcp_servers must ride the configure push");
+        assert_eq!(block.len(), 2, "both servers must appear in the body");
+
+        let linear = &block["linear"];
+        let expected_url = format!(
+            "https://dyson.example.com/llm/mcp/{}/linear",
+            created.id,
+        );
+        assert_eq!(linear["url"], expected_url);
+        let header = linear["headers"]["Authorization"].as_str().unwrap();
+        let want_header = format!("Bearer {}", created.proxy_token);
+        assert_eq!(header, want_header,
+            "agent's MCP bearer must equal the per-instance proxy_token");
+
+        // Persistence: the upstream URL + bearer are sealed in user_secrets.
+        let entry = crate::mcp_servers::get(&user_secrets, &owner, &created.id, "linear")
+            .await
+            .unwrap()
+            .expect("linear entry must be persisted");
+        assert_eq!(entry.url, "https://api.linear.app/mcp");
+        match entry.auth {
+            crate::mcp_servers::McpAuthSpec::Bearer { token } => {
+                assert_eq!(token, "lin_secret",
+                    "real upstream token round-trips through user_secrets verbatim");
+            }
+            other => panic!("expected bearer auth, got {other:?}"),
+        }
+
+        // Index row lists every name attached to this instance.
+        let names = crate::mcp_servers::list_names(&user_secrets, &owner, &created.id)
+            .await
+            .unwrap();
+        let mut sorted = names;
+        sorted.sort();
+        assert_eq!(sorted, vec!["linear", "no_auth"]);
+    }
+
+    #[tokio::test]
+    async fn create_with_no_mcp_servers_omits_block_in_push() {
+        // No MCP specs means `mcp_servers: None` in the configure body
+        // — the dyson admin handler treats that as "leave existing
+        // block alone", so we never accidentally clobber a manually-
+        // patched dyson.json when the user hires without MCP.
+        let (svc, _cube, _tokens, _instances, recorder) = build_with_recorder().await;
+        svc.create("legacy", CreateRequest {
+            template_id: "tpl".into(),
+            name: None,
+            task: None,
+            env: env_with_model(),
+            ttl_seconds: None,
+            network_policy: NetworkPolicy::default(),
+            mcp_servers: Vec::new(),
+        })
+        .await
+        .unwrap();
+        wait_for_pushes(&recorder, 1).await;
+        let pushed = recorder.pushed.lock().unwrap();
+        let (_, _, body) = &pushed[0];
+        assert!(body.mcp_servers.is_none(),
+            "an empty hire-form mcp_servers must serialise as None, not Some({{}})");
+    }
+
+    #[tokio::test]
     async fn rewire_image_generation_visits_each_live_instance_with_its_token() {
         // Hire two dysons.  After the create-time pushes drain, run
         // the sweep — it must visit each one and stamp the SAME
@@ -1941,6 +2179,7 @@ mod tests {
                 env: env_with_model(),
                 ttl_seconds: None,
                 network_policy: NetworkPolicy::default(),
+                mcp_servers: Vec::new(),
             })
             .await
             .unwrap();
@@ -1951,6 +2190,7 @@ mod tests {
                 env: env_with_model(),
                 ttl_seconds: None,
                 network_policy: NetworkPolicy::default(),
+                mcp_servers: Vec::new(),
             })
             .await
             .unwrap();
@@ -2021,6 +2261,7 @@ mod tests {
             env: env_with_model(),
             ttl_seconds: None,
             network_policy: NetworkPolicy::default(),
+            mcp_servers: Vec::new(),
         })
         .await
         .unwrap();
@@ -2230,6 +2471,7 @@ mod tests {
             env: env_with_model(),
             ttl_seconds: None,
             network_policy: NetworkPolicy::default(),
+            mcp_servers: Vec::new(),
         })
         .await
         .unwrap();
@@ -2267,6 +2509,7 @@ mod tests {
                 env: env_with_model(),
                 ttl_seconds: None,
                 network_policy: NetworkPolicy::default(),
+                mcp_servers: Vec::new(),
             })
             .await
             .unwrap();
@@ -2278,6 +2521,7 @@ mod tests {
                 env: env_with_model(),
                 ttl_seconds: None,
                 network_policy: NetworkPolicy::default(),
+                mcp_servers: Vec::new(),
             })
             .await
             .unwrap();
@@ -2342,6 +2586,7 @@ mod tests {
                 env: env_with_model(),
                 ttl_seconds: None,
                 network_policy: NetworkPolicy::default(),
+                mcp_servers: Vec::new(),
             })
             .await
             .unwrap();
@@ -2416,6 +2661,7 @@ mod tests {
                 env: env_with_model(),
                 ttl_seconds: None,
                 network_policy: NetworkPolicy::default(),
+                mcp_servers: Vec::new(),
             })
             .await
             .unwrap();
@@ -2453,6 +2699,7 @@ mod tests {
             env: env_with_model(),
             ttl_seconds: None,
             network_policy: NetworkPolicy::default(),
+            mcp_servers: Vec::new(),
         })
         .await
         .unwrap();
@@ -2497,6 +2744,7 @@ mod tests {
             env: env_with_model(),
             ttl_seconds: None,
             network_policy: NetworkPolicy::Open,
+            mcp_servers: Vec::new(),
         })
         .await
         .unwrap();
@@ -2530,6 +2778,7 @@ mod tests {
             env: env_with_model(),
             ttl_seconds: None,
             network_policy: NetworkPolicy::Airgap,
+            mcp_servers: Vec::new(),
         })
         .await
         .unwrap();
@@ -2552,6 +2801,7 @@ mod tests {
             network_policy: NetworkPolicy::Allowlist {
                 entries: vec!["github.com".into(), "8.8.8.8/32".into()],
             },
+            mcp_servers: Vec::new(),
         })
         .await
         .unwrap();
@@ -2576,6 +2826,7 @@ mod tests {
             network_policy: NetworkPolicy::Denylist {
                 entries: vec!["evil.example".into(), "5.6.7.0/24".into()],
             },
+            mcp_servers: Vec::new(),
         })
         .await
         .unwrap();
@@ -2600,6 +2851,7 @@ mod tests {
                 env: env_with_model(),
                 ttl_seconds: None,
                 network_policy: NetworkPolicy::Airgap,
+                mcp_servers: Vec::new(),
             })
             .await
             .unwrap();
@@ -2623,6 +2875,7 @@ mod tests {
                 env: env_with_model(),
                 ttl_seconds: None,
                 network_policy: NetworkPolicy::Airgap,
+                mcp_servers: Vec::new(),
             })
             .await
             .unwrap_err();
@@ -2643,6 +2896,7 @@ mod tests {
                 network_policy: NetworkPolicy::Allowlist {
                     entries: vec!["1.2.3.4/99".into()],
                 },
+                mcp_servers: Vec::new(),
             })
             .await
             .unwrap_err();
@@ -2665,6 +2919,7 @@ mod tests {
                 env: env_with_model(),
                 ttl_seconds: None,
                 network_policy: NetworkPolicy::Airgap,
+                mcp_servers: Vec::new(),
             })
             .await
             .unwrap();
@@ -2700,6 +2955,7 @@ mod tests {
                 network_policy: NetworkPolicy::Allowlist {
                     entries: vec!["example.com".into()],
                 },
+                mcp_servers: Vec::new(),
             })
             .await
             .unwrap();
@@ -2742,6 +2998,7 @@ mod tests {
                 env: env_with_model(),
                 ttl_seconds: None,
                 network_policy: NetworkPolicy::Open,
+                mcp_servers: Vec::new(),
             })
             .await
             .unwrap();
@@ -2785,6 +3042,7 @@ mod tests {
                 env: env_with_model(),
                 ttl_seconds: None,
                 network_policy: NetworkPolicy::Open,
+                mcp_servers: Vec::new(),
             })
             .await
             .unwrap();
@@ -2812,6 +3070,7 @@ mod tests {
                 env: env_with_model(),
                 ttl_seconds: None,
                 network_policy: NetworkPolicy::Open,
+                mcp_servers: Vec::new(),
             })
             .await
             .unwrap();
@@ -2838,6 +3097,7 @@ mod tests {
                 env: env_with_model(),
                 ttl_seconds: None,
                 network_policy: NetworkPolicy::Open,
+                mcp_servers: Vec::new(),
             })
             .await
             .unwrap();
@@ -2866,6 +3126,7 @@ mod tests {
                 env: env_with_model(),
                 ttl_seconds: None,
                 network_policy: NetworkPolicy::Open,
+                mcp_servers: Vec::new(),
             })
             .await
             .unwrap();
@@ -2906,6 +3167,7 @@ mod tests {
                 env: env_with_model(),
                 ttl_seconds: None,
                 network_policy: NetworkPolicy::Open,
+                mcp_servers: Vec::new(),
             })
             .await
             .unwrap();

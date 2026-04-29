@@ -290,6 +290,7 @@ async fn full_walkthrough() {
         AuthState::dangerous_no_auth(),
         user_auth,
         llm_router_inner,
+        axum::Router::new(),
     );
     let swarm_url = spawn(app).await;
 

@@ -241,6 +241,10 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     if let Some(r) = &reconfigurer {
         instance_svc = instance_svc.with_reconfigurer(r.clone());
     }
+    // MCP server records are sealed under the user's own cipher so a
+    // stolen sqlite row leaks nothing without their age key — same
+    // posture as the OpenRouter BYOK path.
+    instance_svc = instance_svc.with_mcp_secrets(user_secrets_svc.clone());
     let instance_svc = Arc::new(instance_svc);
 
     // Image-generation rewire sweep.  Every swarm restart re-pushes
@@ -473,6 +477,32 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     let proxy_svc = Arc::new(proxy);
     let llm_router = proxy::http::router(proxy_svc);
 
+    // MCP-server proxy: bearer-protected JSON-RPC pass-through that lives
+    // alongside `/llm/*`, plus a small set of user-session routes for
+    // listing servers and starting OAuth flows.  Public origin is built
+    // from the swarm hostname (used as the OAuth redirect_uri the
+    // upstream provider sees); when no hostname is configured the
+    // OAuth-start handler returns 503 with a clear message.
+    let mcp_public_origin = cfg
+        .hostname
+        .as_deref()
+        .map(|h| format!("https://{}", h.trim_end_matches('/')));
+    let mcp_svc = match dyson_swarm::proxy::mcp::McpService::new(
+        tokens_store.clone(),
+        instances_store.clone(),
+        user_secrets_svc.clone(),
+        mcp_public_origin,
+    ) {
+        Ok(s) => Arc::new(s),
+        Err(err) => {
+            tracing::error!(error = %err, "mcp service init failed");
+            return ExitCode::from(2);
+        }
+    };
+    let mcp_router = dyson_swarm::proxy::mcp::router(mcp_svc.clone());
+    let mcp_user_router = dyson_swarm::proxy::mcp::user_router(mcp_svc);
+    let llm_router = llm_router.merge(mcp_router);
+
     // Authenticator chain: bearer first (cheap, in-DB lookup), then OIDC if
     // configured. Bearer claims everything that doesn't look like a JWT;
     // OIDC handles the JWT shape and is the primary path in production.
@@ -528,7 +558,7 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         user_or_keys,
         providers: providers_for_app,
     };
-    let app = http::router(app_state, auth, user_auth, llm_router);
+    let app = http::router(app_state, auth, user_auth, llm_router, mcp_user_router);
 
     let listener = match tokio::net::TcpListener::bind(&cfg.bind).await {
         Ok(l) => l,

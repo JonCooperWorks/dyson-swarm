@@ -305,6 +305,11 @@ function NewInstanceForm() {
     kind: 'nolocalnet',
     entries: [],
   });
+  // MCP servers attached at hire time.  Each row is
+  // { id, name, url, auth: { kind, ... } } where `id` is a local
+  // identifier for React keys; the server-side wire shape (without
+  // `id`) is built in `submit`.
+  const [mcpServers, setMcpServers] = React.useState([]);
   const [submitting, setSubmitting] = React.useState(false);
   const [error, setError] = React.useState(null);
 
@@ -339,6 +344,8 @@ function NewInstanceForm() {
       //   | { kind: "allowlist", entries: [...] }
       //   | { kind: "denylist", entries: [...] }
       req.network_policy = serializeNetworkPolicy(networkPolicy);
+      const mcp = serializeMcpServers(mcpServers);
+      if (mcp.length > 0) req.mcp_servers = mcp;
 
       setPhase('provisioning');
       // Server blocks until the sandbox is Live AND Caddy's TLS cert
@@ -419,6 +426,18 @@ function NewInstanceForm() {
       <section className="page-section">
         <h2 className="section-title">network access</h2>
         <NetworkPolicyPicker value={networkPolicy} onChange={setNetworkPolicy}/>
+      </section>
+
+      <section className="page-section">
+        <h2 className="section-title">MCP servers</h2>
+        <McpServersEditor value={mcpServers} onChange={setMcpServers}/>
+        <span className="hint muted small">
+          MCP traffic flows through swarm — the agent only sees a swarm
+          proxy URL, never your upstream URL or its credentials. Bearer
+          tokens and OAuth refresh tokens land in your encrypted user
+          secret store. OAuth connections finish in a browser tab after
+          you hire the dyson.
+        </span>
       </section>
 
       <section className="page-section">
@@ -528,8 +547,8 @@ const POLICY_OPTIONS = [
   },
   {
     kind: 'airgap',
-    label: 'Air-gapped (LLM only)',
-    help: 'No outbound traffic at all, except to the swarm /llm proxy. Use when the dyson should never touch the public internet.',
+    label: 'Air-gapped (LLM + MCP only)',
+    help: 'No outbound traffic at all, except to the swarm /llm and /mcp proxies. The dyson can still call its model and any attached MCP servers (swarm forwards on its behalf), but the public internet is closed.',
   },
   {
     kind: 'allowlist',
@@ -673,6 +692,282 @@ function serializeNetworkPolicy(p) {
   // allowlist / denylist — include the user's raw entries; the server
   // resolves hostnames and persists both raw + resolved.
   return { kind: p.kind, entries: p.entries || [] };
+}
+
+// ── MCP servers ──────────────────────────────────────────────────
+//
+// Wire shape mirrors `McpServerSpec` / `McpAuthSpec` in
+// dyson-swarm/src/mcp_servers.rs:
+//   { name, url, auth: { kind: "none" } }
+//   { name, url, auth: { kind: "bearer", token } }
+//   { name, url, auth: { kind: "oauth", scopes, client_id?, client_secret?,
+//                        authorization_url?, token_url?, registration_url? } }
+//
+// The OAuth flow itself runs after hire (the agent talks to swarm,
+// swarm runs the dance, refresh tokens land in the user secret store).
+// The form just collects the metadata.
+export function serializeMcpServers(rows) {
+  return rows
+    .map(r => {
+      const name = (r.name || '').trim();
+      const url = (r.url || '').trim();
+      if (!name || !url) return null;
+      let auth;
+      if (r.auth?.kind === 'bearer') {
+        const token = (r.auth.token || '').trim();
+        if (!token) return null;
+        auth = { kind: 'bearer', token };
+      } else if (r.auth?.kind === 'oauth') {
+        const scopes = (r.auth.scopes || '')
+          .split(/[\s,]+/)
+          .map(s => s.trim())
+          .filter(Boolean);
+        auth = {
+          kind: 'oauth',
+          scopes,
+          client_id: r.auth.client_id?.trim() || null,
+          client_secret: r.auth.client_secret?.trim() || null,
+          authorization_url: r.auth.authorization_url?.trim() || null,
+          token_url: r.auth.token_url?.trim() || null,
+          registration_url: r.auth.registration_url?.trim() || null,
+        };
+        // Drop nulls so the wire JSON is clean.
+        for (const k of Object.keys(auth)) if (auth[k] == null) delete auth[k];
+      } else {
+        auth = { kind: 'none' };
+      }
+      return { name, url, auth };
+    })
+    .filter(Boolean);
+}
+
+let mcpRowCounter = 0;
+function freshMcpRow() {
+  mcpRowCounter += 1;
+  return {
+    id: `mcp-${mcpRowCounter}-${Date.now()}`,
+    name: '',
+    url: '',
+    auth: { kind: 'none' },
+  };
+}
+
+function McpServersEditor({ value, onChange }) {
+  const rows = value || [];
+  const update = (id, patch) =>
+    onChange(rows.map(r => (r.id === id ? { ...r, ...patch } : r)));
+  const updateAuth = (id, patch) =>
+    onChange(
+      rows.map(r => (r.id === id ? { ...r, auth: { ...r.auth, ...patch } } : r)),
+    );
+  const remove = id => onChange(rows.filter(r => r.id !== id));
+  const add = () => onChange([...rows, freshMcpRow()]);
+
+  if (rows.length === 0) {
+    return (
+      <div className="mcp-empty">
+        <p className="muted small" style={{ margin: 0 }}>
+          No MCP servers attached. The dyson hires fine without any —
+          add one if you want it to call out to Linear, GitHub, your
+          own server, or anything that speaks streamable-HTTP MCP.
+        </p>
+        <button type="button" className="btn btn-ghost btn-sm" onClick={add}>
+          + add MCP server
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="mcp-list">
+      {rows.map(row => (
+        <McpServerCard
+          key={row.id}
+          row={row}
+          onChange={patch => update(row.id, patch)}
+          onChangeAuth={patch => updateAuth(row.id, patch)}
+          onRemove={() => remove(row.id)}
+        />
+      ))}
+      <button type="button" className="btn btn-ghost btn-sm mcp-add" onClick={add}>
+        + add another
+      </button>
+    </div>
+  );
+}
+
+function McpServerCard({ row, onChange, onChangeAuth, onRemove }) {
+  const authKind = row.auth?.kind || 'none';
+  return (
+    <div className="mcp-card panel">
+      <div className="mcp-card-head">
+        <div className="mcp-card-title">
+          <code className="mcp-card-name">
+            {row.name?.trim() || 'unnamed'}
+          </code>
+          <span className={`mcp-auth-pill mcp-auth-${authKind}`}>{authKind}</span>
+        </div>
+        <button
+          type="button"
+          className="mcp-remove"
+          onClick={onRemove}
+          aria-label="remove server"
+          title="remove"
+        >
+          ×
+        </button>
+      </div>
+      <div className="mcp-card-body">
+        <label className="field">
+          <span>name</span>
+          <input
+            value={row.name}
+            onChange={e => onChange({ name: e.target.value })}
+            placeholder="linear"
+            autoComplete="off"
+          />
+          <span className="hint muted small">
+            Identifier the agent uses when calling tools. Lowercase,
+            no spaces.
+          </span>
+        </label>
+        <label className="field">
+          <span>URL</span>
+          <input
+            value={row.url}
+            onChange={e => onChange({ url: e.target.value })}
+            placeholder="https://api.linear.app/mcp"
+            autoComplete="off"
+          />
+        </label>
+        <label className="field">
+          <span>authentication</span>
+          <select
+            value={authKind}
+            onChange={e => {
+              const kind = e.target.value;
+              if (kind === 'none') onChangeAuth({ kind: 'none' });
+              else if (kind === 'bearer') onChangeAuth({ kind: 'bearer', token: '' });
+              else if (kind === 'oauth')
+                onChangeAuth({
+                  kind: 'oauth',
+                  scopes: '',
+                  client_id: '',
+                  client_secret: '',
+                  authorization_url: '',
+                  token_url: '',
+                  registration_url: '',
+                });
+            }}
+          >
+            <option value="none">none</option>
+            <option value="bearer">bearer token</option>
+            <option value="oauth">OAuth 2.1 (PKCE)</option>
+          </select>
+        </label>
+        {authKind === 'bearer' ? (
+          <label className="field">
+            <span>token</span>
+            <input
+              type="password"
+              value={row.auth.token || ''}
+              onChange={e => onChangeAuth({ token: e.target.value })}
+              placeholder="lin_api_…"
+              autoComplete="off"
+            />
+            <span className="hint muted small">
+              Sent on every forwarded request as
+              <code> Authorization: Bearer …</code>. Sealed in your
+              user secret store; never reaches the agent.
+            </span>
+          </label>
+        ) : null}
+        {authKind === 'oauth' ? (
+          <McpOAuthFields auth={row.auth} onChangeAuth={onChangeAuth}/>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function McpOAuthFields({ auth, onChangeAuth }) {
+  const [advanced, setAdvanced] = React.useState(
+    Boolean(auth.client_id || auth.authorization_url || auth.token_url),
+  );
+  return (
+    <>
+      <label className="field">
+        <span>scopes</span>
+        <input
+          value={auth.scopes || ''}
+          onChange={e => onChangeAuth({ scopes: e.target.value })}
+          placeholder="read write"
+          autoComplete="off"
+        />
+        <span className="hint muted small">
+          Space- or comma-separated. Leave blank if the server doesn't
+          require scopes.
+        </span>
+      </label>
+      <button
+        type="button"
+        className="btn btn-ghost btn-sm mcp-advanced-toggle"
+        onClick={() => setAdvanced(a => !a)}
+      >
+        {advanced ? '− hide advanced' : '+ advanced (DCR / endpoints)'}
+      </button>
+      {advanced ? (
+        <div className="mcp-advanced">
+          <label className="field">
+            <span>client_id</span>
+            <input
+              value={auth.client_id || ''}
+              onChange={e => onChangeAuth({ client_id: e.target.value })}
+              placeholder="(empty = Dynamic Client Registration)"
+              autoComplete="off"
+            />
+          </label>
+          <label className="field">
+            <span>client_secret</span>
+            <input
+              type="password"
+              value={auth.client_secret || ''}
+              onChange={e => onChangeAuth({ client_secret: e.target.value })}
+              placeholder="(only if your provider requires it)"
+              autoComplete="off"
+            />
+          </label>
+          <label className="field">
+            <span>authorization_url</span>
+            <input
+              value={auth.authorization_url || ''}
+              onChange={e => onChangeAuth({ authorization_url: e.target.value })}
+              placeholder="(empty = .well-known discovery)"
+              autoComplete="off"
+            />
+          </label>
+          <label className="field">
+            <span>token_url</span>
+            <input
+              value={auth.token_url || ''}
+              onChange={e => onChangeAuth({ token_url: e.target.value })}
+              placeholder="(empty = .well-known discovery)"
+              autoComplete="off"
+            />
+          </label>
+          <label className="field">
+            <span>registration_url</span>
+            <input
+              value={auth.registration_url || ''}
+              onChange={e => onChangeAuth({ registration_url: e.target.value })}
+              placeholder="(only needed if discovery doesn't expose one)"
+              autoComplete="off"
+            />
+          </label>
+        </div>
+      ) : null}
+    </>
+  );
 }
 
 // Multi-select with two labelled suggestion sources: the swarm's

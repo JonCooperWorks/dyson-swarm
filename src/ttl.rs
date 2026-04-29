@@ -146,6 +146,7 @@ mod tests {
                 env: env_with_model(),
                 ttl_seconds: Some(1),
                 network_policy: crate::network_policy::NetworkPolicy::default(),
+                mcp_servers: Vec::new(),
             })
             .await
             .unwrap();
@@ -159,6 +160,7 @@ mod tests {
                 env: env_with_model(),
                 ttl_seconds: Some(1),
                 network_policy: crate::network_policy::NetworkPolicy::default(),
+                mcp_servers: Vec::new(),
             })
             .await
             .unwrap();
@@ -173,6 +175,7 @@ mod tests {
                 env: env_with_model(),
                 ttl_seconds: Some(10_000),
                 network_policy: crate::network_policy::NetworkPolicy::default(),
+                mcp_servers: Vec::new(),
             })
             .await
             .unwrap();

@@ -11,6 +11,7 @@
 pub mod adapters;
 pub mod byok;
 pub mod http;
+pub mod mcp;
 pub mod policy_check;
 pub mod recording_body;
 pub mod validate;

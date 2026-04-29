@@ -13,6 +13,12 @@
 //! `openai/gpt-4o`, …) so it's effectively a multi-provider list
 //! anyway.
 //!
+//! No api_key required: OR's `/v1/models` is publicly readable.  We
+//! send the platform-managed key as a Bearer when one is configured
+//! (fewer rate-limit hiccups), and call the endpoint unauthenticated
+//! when the operator runs in Stage 6 / per-user-mint mode where only
+//! a Provisioning key is on file.
+//!
 //! Mounted on the tenant tier (OIDC users only); admin/bearer
 //! callers don't need it because they don't drive the create form.
 
@@ -70,30 +76,28 @@ async fn handler(State(state): State<AppState>) -> Result<Json<ModelsResponse>, 
     }
 
     // OR is the only platform-managed provider; without it we have
-    // nothing to show.  Operators on a BYOK-only deployment can run
-    // without OR — the SPA renders a "no upstream provider
-    // configured" message off the 503 and the picker becomes a
-    // free-text input the agent can still drive with any id it
-    // knows.
+    // nothing to show.  503 the BYOK-only deployments — the SPA
+    // renders a "no upstream provider configured" message off the
+    // status and the picker stays a free-text input.
+    //
+    // OR's `/v1/models` catalogue is publicly readable, so we fetch
+    // it without auth when no static api_key is on file.  A platform-
+    // managed key is optional (operators on a Stage 6 / per-user-mint
+    // deployment have only a Provisioning key), but we send it as a
+    // Bearer when present — fewer rate-limit hiccups under burst.
     let Some(cfg) = state.providers.get("openrouter") else {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     };
-    let Some(api_key) = cfg.api_key.as_deref() else {
-        return Err(StatusCode::SERVICE_UNAVAILABLE);
-    };
-    if api_key.is_empty() {
-        return Err(StatusCode::SERVICE_UNAVAILABLE);
-    }
     let upstream = cfg.upstream.trim_end_matches('/');
 
     let url = format!("{upstream}/v1/models");
-    let resp = match state
-        .dyson_http
-        .get(&url)
-        .bearer_auth(api_key)
-        .send()
-        .await
+    let mut req = state.dyson_http.get(&url);
+    if let Some(key) = cfg.api_key.as_deref()
+        && !key.is_empty()
     {
+        req = req.bearer_auth(key);
+    }
+    let resp = match req.send().await {
         Ok(r) => r,
         Err(err) => {
             tracing::warn!(error = %err, url = %url, "list_models: openrouter fetch failed");

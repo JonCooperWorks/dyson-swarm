@@ -103,13 +103,34 @@ function setSessionCookie(token, expiresAtMs) {
   });
   document.cookie = [`${COOKIE_NAME}=${encodeURIComponent(token)}`, ...attrs].join('; ');
 }
+// Domain values to issue delete-cookie writes against on logout.  Returns
+// the host-only scope (null) plus every parent up to (but not including)
+// the bare TLD, in both bare and leading-dot forms.  Sweeping the parents
+// matters because an earlier version of this SPA scoped the cookie to the
+// eTLD+1 (e.g. `myprivate.network`) — a fresh login on the apex sets a
+// host-scoped cookie but the browser keeps sending the parent-scoped one
+// alongside it, dyson_proxy reads whichever appears first in the Cookie
+// header, and the operator gets a confusing 401.  Clearing both scopes on
+// logout makes "sign out, sign in" a one-shot recovery.
+export function cookieDomainsToClear(host) {
+  const out = [null];
+  if (!host || !host.includes('.') || /^[\d.]+$/.test(host)) return out;
+  const labels = host.split('.');
+  // Walk leftmost-label-off until 2 labels remain (skip bare TLD).
+  for (let i = 0; i + 2 <= labels.length; i++) {
+    const dom = labels.slice(i).join('.');
+    out.push(dom, `.${dom}`);
+  }
+  return out;
+}
+
 function clearSessionCookie() {
-  const attrs = computeCookieAttributes({
-    host: window.location.hostname,
-    protocol: window.location.protocol,
-    expiresAtMs: Date.parse('1970-01-01T00:00:00Z'),
-  });
-  document.cookie = [`${COOKIE_NAME}=`, ...attrs].join('; ');
+  const expired = `Expires=${new Date(0).toUTCString()}`;
+  const secure = window.location.protocol === 'https:' ? '; Secure' : '';
+  for (const dom of cookieDomainsToClear(window.location.hostname)) {
+    const domAttr = dom ? `; Domain=${dom}` : '';
+    document.cookie = `${COOKIE_NAME}=; Path=/; SameSite=Lax; ${expired}${secure}${domAttr}`;
+  }
 }
 
 function readPending() {

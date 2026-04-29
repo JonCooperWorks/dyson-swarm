@@ -7,7 +7,7 @@
  */
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
-import { computeCookieDomain, computeCookieAttributes } from './auth.js';
+import { computeCookieDomain, computeCookieAttributes, cookieDomainsToClear } from './auth.js';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -40,6 +40,37 @@ describe('computeCookieDomain', () => {
   test('four-label deployments still scope to their own apex', () => {
     expect(computeCookieDomain('swarm.myprivate.network')).toBe('swarm.myprivate.network');
     expect(computeCookieDomain('a.b.c.example.com')).toBe('a.b.c.example.com');
+  });
+});
+
+describe('cookieDomainsToClear', () => {
+  test('localhost / single-label only sweeps the host-only scope', () => {
+    expect(cookieDomainsToClear('localhost')).toEqual([null]);
+  });
+
+  test('bare IPv4 only sweeps the host-only scope', () => {
+    expect(cookieDomainsToClear('192.168.1.10')).toEqual([null]);
+  });
+
+  test('three-label apex sweeps host + parent (eTLD+1) but skips bare TLD', () => {
+    // The parent sweep is the load-bearing one: an earlier SPA bug set
+    // Domain=myprivate.network on every login, and those zombie cookies
+    // shadow the new host-scoped one and surface as a stale-aud 401.
+    expect(cookieDomainsToClear('swarm.myprivate.network')).toEqual([
+      null,
+      'swarm.myprivate.network', '.swarm.myprivate.network',
+      'myprivate.network', '.myprivate.network',
+    ]);
+  });
+
+  test('deeper hosts walk every parent down to eTLD+1', () => {
+    expect(cookieDomainsToClear('a.b.c.example.com')).toEqual([
+      null,
+      'a.b.c.example.com', '.a.b.c.example.com',
+      'b.c.example.com', '.b.c.example.com',
+      'c.example.com', '.c.example.com',
+      'example.com', '.example.com',
+    ]);
   });
 });
 

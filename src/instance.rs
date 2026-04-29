@@ -466,6 +466,37 @@ impl InstanceService {
                     continue;
                 }
             };
+            // Re-render the mcp_servers block on every sweep so any
+            // change to the proxied URL (e.g. swarm hostname rotation,
+            // the `/llm` strip fix) propagates into running dysons
+            // without operator intervention.  When the instance has
+            // no attached MCP servers and no mcp_secrets store is
+            // configured, this stays None and the dyson handler skips
+            // the patch.
+            let mcp_servers = self
+                .mcp_secrets
+                .as_ref()
+                .map(|secrets| async {
+                    match mcp_servers::list_names(secrets, &row.owner_id, &row.id).await {
+                        Ok(names) if !names.is_empty() => {
+                            let mut block = serde_json::Map::with_capacity(names.len());
+                            for name in names {
+                                block.insert(
+                                    name.clone(),
+                                    mcp_servers::dyson_json_block(
+                                        &row.id, &name, &self.proxy_base, &token,
+                                    ),
+                                );
+                            }
+                            Some(block)
+                        }
+                        _ => None,
+                    }
+                });
+            let mcp_servers = match mcp_servers {
+                Some(fut) => fut.await,
+                None => None,
+            };
             let body = ReconfigureBody {
                 image_provider_name: Some(defaults.provider_name.clone()),
                 image_provider_block: Some(defaults.provider_block(&proxy_base, &token)),
@@ -478,6 +509,7 @@ impl InstanceService {
                 // returns `skills_reset: false` and the JSON file
                 // doesn't get rewritten).
                 reset_skills: true,
+                mcp_servers,
                 ..Default::default()
             };
             match reconfigurer.push(&row.id, sandbox_id, &body).await {
@@ -2342,8 +2374,10 @@ mod tests {
         assert_eq!(block.len(), 2, "both servers must appear in the body");
 
         let linear = &block["linear"];
+        // Origin only — `/llm` is stripped because LLM and MCP mount
+        // off the same swarm origin.  See `dyson_json_block`.
         let expected_url = format!(
-            "https://dyson.example.com/llm/mcp/{}/linear",
+            "https://dyson.example.com/mcp/{}/linear",
             created.id,
         );
         assert_eq!(linear["url"], expected_url);

@@ -247,9 +247,13 @@ pub async fn forget_all(
 /// swarm-internal proxy URL + bearer header — never the user's real
 /// upstream URL or credentials.
 ///
-/// `proxy_base` is the swarm's external `https://<host>` (the same
-/// origin that fronts `/llm`).  `proxy_token` is the per-instance
-/// bearer the agent already uses for `/llm`.
+/// `proxy_base` is the same value the agent already uses for `/llm`
+/// (e.g. `http://10.20.18.1:8080/llm` or `https://swarm.example/llm`).
+/// We strip the trailing `/llm` segment so the MCP URL lands at
+/// `<origin>/mcp/<instance>/<name>` — the LLM proxy lives at `/llm`
+/// and the MCP proxy at `/mcp`, both off the same swarm origin.
+/// Without this strip the agent's handshake hits `/llm/mcp/...` which
+/// the LLM router rejects, and the skill registers with zero tools.
 pub fn dyson_json_block(
     instance_id: &str,
     name: &str,
@@ -258,7 +262,7 @@ pub fn dyson_json_block(
 ) -> serde_json::Value {
     let url = format!(
         "{}/mcp/{}/{}",
-        proxy_base.trim_end_matches('/'),
+        swarm_origin_from_proxy_base(proxy_base),
         instance_id,
         name,
     );
@@ -268,6 +272,17 @@ pub fn dyson_json_block(
             "Authorization": format!("Bearer {proxy_token}"),
         },
     })
+}
+
+/// Strip the trailing `/llm` (with optional trailing slash) from the
+/// proxy_base the InstanceService was constructed with, leaving the
+/// swarm origin both `/llm` and `/mcp` mount off.  Tolerates a
+/// `proxy_base` that doesn't end in `/llm` (returns it as-is, minus
+/// any trailing slash) so future callers passing a bare origin
+/// still work.
+fn swarm_origin_from_proxy_base(proxy_base: &str) -> &str {
+    let trimmed = proxy_base.trim_end_matches('/');
+    trimmed.strip_suffix("/llm").unwrap_or(trimmed)
 }
 
 // ───────────────────────────────────────────────────────────────────
@@ -643,6 +658,24 @@ mod tests {
         let block = dyson_json_block("i-abc", "linear", "https://swarm.example/", "tok-1");
         assert_eq!(block["url"], "https://swarm.example/mcp/i-abc/linear");
         assert_eq!(block["headers"]["Authorization"], "Bearer tok-1");
+    }
+
+    #[test]
+    fn dyson_json_block_strips_trailing_llm_segment() {
+        // Regression: the InstanceService's proxy_base is the LLM
+        // proxy URL (`<origin>/llm`).  MCP mounts at `<origin>/mcp`,
+        // not `<origin>/llm/mcp` — without stripping `/llm` the
+        // agent's handshake 404s and the skill registers zero tools.
+        let block = dyson_json_block("i-1", "ctx", "http://10.0.0.1:8080/llm", "tok");
+        assert_eq!(block["url"], "http://10.0.0.1:8080/mcp/i-1/ctx");
+
+        // Trailing slash on `/llm/` also stripped so the URL is clean.
+        let block = dyson_json_block("i-1", "ctx", "https://swarm.example/llm/", "tok");
+        assert_eq!(block["url"], "https://swarm.example/mcp/i-1/ctx");
+
+        // Bare origin (no `/llm`) still works — strip is a no-op.
+        let block = dyson_json_block("i-1", "ctx", "https://swarm.example", "tok");
+        assert_eq!(block["url"], "https://swarm.example/mcp/i-1/ctx");
     }
 
     #[test]

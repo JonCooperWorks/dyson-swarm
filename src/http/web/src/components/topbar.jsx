@@ -16,11 +16,14 @@ export function TopBar({ view }) {
   // non-admins (see require_admin_role on the swarm side), so a
   // visible link would just dead-end into a missing-page error.
   const onAdminRoute = view?.name === 'admin';
+  const onByokRoute = view?.name === 'byok';
+  const onInstancesRoute = !onAdminRoute && !onByokRoute;
   return (
     <header className="topbar">
       <div className="topbar-brand">swarm</div>
       <nav className="topbar-nav">
-        <a className={!onAdminRoute ? 'active' : ''} href="#/">instances</a>
+        <a className={onInstancesRoute ? 'active' : ''} href="#/">instances</a>
+        <a className={onByokRoute ? 'active' : ''} href="#/keys">keys</a>
         {auth.isAdmin ? (
           <a className={onAdminRoute ? 'active' : ''} href="#/admin">admin</a>
         ) : null}

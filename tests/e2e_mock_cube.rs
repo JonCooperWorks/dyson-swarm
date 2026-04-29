@@ -223,17 +223,15 @@ async fn full_walkthrough() {
         monthly_usd_budget: None,
         rps_limit: None,
     };
-    let providers = Providers {
-        anthropic: None,
-        openai: Some(ProviderConfig {
+    let mut providers = Providers::default();
+    providers.insert(
+        "openai",
+        ProviderConfig {
             api_key: Some("sk-real".into()),
             upstream: llm_url.clone(),
             anthropic_version: None,
-        }),
-        gemini: None,
-        openrouter: None,
-        ollama: None,
-    };
+        },
+    );
     let proxy_svc = Arc::new(
         ProxyService::new(
             tokens_store.clone(),
@@ -271,6 +269,7 @@ async fn full_walkthrough() {
         models_cache: http::models::ModelsCache::new(),
         openrouter_provisioning: None,
         user_or_keys: None,
+        providers: std::sync::Arc::new(dyson_swarm::config::Providers::default()),
     };
     // Stage 5 retired the legacy `admin-token` shared bearer; this e2e
     // exercises admin endpoints via `--dangerous-no-auth`, the same

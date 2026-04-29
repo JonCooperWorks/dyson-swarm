@@ -6,10 +6,14 @@
 //! place; the proxy router passes the live request mutably.
 
 pub mod anthropic;
+pub mod byo;
+pub mod deepseek;
 pub mod gemini;
+pub mod groq;
 pub mod ollama;
 pub mod openai;
 pub mod openrouter;
+pub mod xai;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -25,5 +29,9 @@ pub fn registry() -> HashMap<&'static str, Arc<dyn ProviderAdapter>> {
     m.insert("anthropic", Arc::new(anthropic::AnthropicAdapter));
     m.insert("gemini", Arc::new(gemini::GeminiAdapter));
     m.insert("ollama", Arc::new(ollama::OllamaAdapter));
+    m.insert("groq", Arc::new(groq::GroqAdapter));
+    m.insert("deepseek", Arc::new(deepseek::DeepSeekAdapter));
+    m.insert("xai", Arc::new(xai::XaiAdapter));
+    m.insert("byo", Arc::new(byo::ByoAdapter));
     m
 }

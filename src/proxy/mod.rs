@@ -9,8 +9,10 @@
 //! carry its own auth posture and not touch the admin auth path.
 
 pub mod adapters;
+pub mod byok;
 pub mod http;
 pub mod policy_check;
+pub mod validate;
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -42,6 +44,12 @@ pub struct ProxyService {
     /// (used in tests + deployments without the OR Provisioning API
     /// configured).
     pub user_or_keys: Option<Arc<crate::openrouter::UserOrKeyResolver>>,
+    /// Per-user encrypted secret store backing BYOK (`byok_<provider>`
+    /// rows).  When `None`, the BYOK lookup branch is skipped and the
+    /// resolver falls back to OR lazy-mint / platform key directly —
+    /// preserves the pre-BYOK behaviour for tests that don't seed the
+    /// store.
+    pub user_secrets: Option<Arc<crate::secrets::UserSecretsService>>,
     rate: Arc<RateWindow>,
 }
 
@@ -67,6 +75,7 @@ impl ProxyService {
             http,
             default_policy,
             user_or_keys: None,
+            user_secrets: None,
             rate: Arc::new(RateWindow::default()),
         })
     }
@@ -81,17 +90,21 @@ impl ProxyService {
         self
     }
 
+    /// Builder-style setter for the per-user secrets backing BYOK.
+    /// Same shape as `with_user_or_keys` so main.rs wires both at once
+    /// and tests opt in only when they need BYOK behaviour.
+    pub fn with_user_secrets(
+        mut self,
+        secrets: Arc<crate::secrets::UserSecretsService>,
+    ) -> Self {
+        self.user_secrets = Some(secrets);
+        self
+    }
+
     /// Resolve a provider name to its config. Returns an owned clone because
     /// the adapter's `upstream_base_url` borrows from it.
     pub fn provider_config(&self, name: &str) -> Option<ProviderConfig> {
-        match name {
-            "anthropic" => self.providers.anthropic.clone(),
-            "openai" => self.providers.openai.clone(),
-            "gemini" => self.providers.gemini.clone(),
-            "openrouter" => self.providers.openrouter.clone(),
-            "ollama" => self.providers.ollama.clone(),
-            _ => None,
-        }
+        self.providers.get(name).cloned()
     }
 
     /// Build a [`UsageSnapshot`] for `subject` (instance_id today,

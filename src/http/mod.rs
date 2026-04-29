@@ -15,6 +15,7 @@
 pub mod admin_users;
 pub mod assets;
 pub mod auth_config;
+pub mod byok;
 pub mod dyson_proxy;
 pub mod healthz;
 pub mod instances;
@@ -84,6 +85,11 @@ pub struct AppState {
     /// surfaced here so admin endpoints can mint/rotate without
     /// duplicating the lazy logic.
     pub user_or_keys: Option<Arc<crate::openrouter::UserOrKeyResolver>>,
+    /// Provider configs from `[providers.*]` TOML.  Mirror of the value
+    /// inside `ProxyService` — surfaced here so the BYOK routes can
+    /// list configured providers (`GET /v1/providers`) and run the
+    /// upstream validator against the right URL on PUT.
+    pub providers: Arc<crate::config::Providers>,
 }
 
 /// Build the public `Router`.
@@ -137,6 +143,7 @@ pub fn router(
         .merge(instances::router(state.clone()))
         .merge(snapshots::router(state.clone()))
         .merge(secrets::router(state.clone()))
+        .merge(byok::router(state.clone()))
         .merge(models::router(state.clone()))
         .layer(middleware::from_fn_with_state(user_auth.clone(), user_middleware));
 
@@ -275,6 +282,7 @@ mod tests {
             models_cache: models::ModelsCache::new(),
             openrouter_provisioning: None,
             user_or_keys: None,
+            providers: Arc::new(crate::config::Providers::default()),
         };
         (state, users_store)
     }

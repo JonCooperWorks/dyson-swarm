@@ -1,7 +1,7 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
@@ -50,9 +50,22 @@ pub struct Config {
 
     /// Default cube template id the SPA's hire form pre-fills. Surfaced
     /// via `/auth/config` so the React bundle doesn't need to be
-    /// rebuilt per deployment.
+    /// rebuilt per deployment.  In the multi-profile world this should
+    /// be the template id of the first entry in `cube_profiles`;
+    /// `bring-up.sh` keeps them in sync, but swarm trusts whatever the
+    /// operator wrote in the toml.
     #[serde(default)]
     pub default_template_id: Option<String>,
+
+    /// Cube cell tiering profiles surfaced to the SPA via /auth/config.
+    /// Each profile maps a human name (e.g. `default`, `large`) to a
+    /// pre-registered Cube template id plus the resources baked into
+    /// that template.  The hire form renders a dropdown from this list;
+    /// picking a profile fills the `template_id` of the create request.
+    /// Empty list = profile picker hidden, hire form falls back to the
+    /// legacy single-template UX.
+    #[serde(default, rename = "cube_profiles")]
+    pub cube_profiles: Vec<CubeProfile>,
 
     /// Suggested model ids the SPA offers in the hire form, e.g.
     /// `["deepseek/deepseek-v4-pro", "moonshotai/kimi-k2.6"]`. First
@@ -93,6 +106,35 @@ pub struct Config {
     /// it off and run rotation by hand.
     #[serde(default)]
     pub rotate_binary_on_startup: bool,
+}
+
+/// One cube cell tiering profile.  Renders to a single
+/// `[[server.cube_profiles]]` TOML table; serializes to the same shape
+/// in /auth/config so the SPA can render a dropdown without an extra
+/// translation step.  Resources are advisory metadata — Cube freezes
+/// the actual cell at template-registration time, so two profiles
+/// referencing the same `template_id` would surface as duplicates here
+/// even though they'd hire identical cubes.  bring-up.sh's
+/// `register_all_cube_profiles` enforces unique (name, template_id)
+/// pairs upstream.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct CubeProfile {
+    /// Stable, lowercase, DNS-safe label the operator and the SPA show
+    /// the user — e.g. `default`, `large`, `xl`.  Embedded in nothing
+    /// machine-parsed; pure UX surface.
+    pub name: String,
+    /// Cube template id (the `tpl-...` string `cubemastercli tpl
+    /// create-from-image` mints).  This is what the create request
+    /// actually carries; `name` is just the dropdown label.
+    pub template_id: String,
+    /// Writable disk in GiB (cubemastercli's `--writable-layer-size`).
+    pub disk_gb: u32,
+    /// CPU millicores baked in at registration (cubemastercli's
+    /// `--cpu`).  2000 = 2 vCPU.
+    pub cpu_millicores: u32,
+    /// RAM in MiB baked in at registration (cubemastercli's
+    /// `--memory`).
+    pub memory_mb: u32,
 }
 
 /// OpenRouter Provisioning configuration.  The provisioning key is a
@@ -206,13 +248,42 @@ pub struct DefaultPolicy {
     pub rps_limit: Option<u32>,
 }
 
+/// Provider configs keyed by name.  Transparent newtype around a
+/// `HashMap` so adding a new upstream (Groq, DeepSeek, xAI, …) is a
+/// TOML stanza, not a struct edit:
+///
+/// ```toml
+/// [providers.openai]
+/// upstream = "https://api.openai.com"
+/// [providers.groq]
+/// upstream = "https://api.groq.com/openai"
+/// ```
+///
+/// Provider names are URL path segments (lowercase, no spaces) — they
+/// appear directly in `/llm/<name>/...`.  The `byo` slot is reserved
+/// for per-user upstream overrides and intentionally has no platform
+/// stanza — declaring `[providers.byo]` is harmless but ignored by the
+/// proxy because the `byo` resolver demands a per-user blob.
 #[derive(Debug, Clone, Default, Deserialize)]
-pub struct Providers {
-    pub anthropic: Option<ProviderConfig>,
-    pub openai: Option<ProviderConfig>,
-    pub gemini: Option<ProviderConfig>,
-    pub openrouter: Option<ProviderConfig>,
-    pub ollama: Option<ProviderConfig>,
+#[serde(transparent)]
+pub struct Providers(pub HashMap<String, ProviderConfig>);
+
+impl Providers {
+    pub fn get(&self, name: &str) -> Option<&ProviderConfig> {
+        self.0.get(name)
+    }
+
+    pub fn get_mut(&mut self, name: &str) -> Option<&mut ProviderConfig> {
+        self.0.get_mut(name)
+    }
+
+    pub fn insert(&mut self, name: impl Into<String>, cfg: ProviderConfig) -> Option<ProviderConfig> {
+        self.0.insert(name.into(), cfg)
+    }
+
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.0.keys().map(String::as_str)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -330,22 +401,26 @@ impl Config {
             self.cube.sandbox_domain.clone_from(v);
         }
 
-        for (provider, slot) in [
-            ("ANTHROPIC", &mut self.providers.anthropic),
-            ("OPENAI", &mut self.providers.openai),
-            ("GEMINI", &mut self.providers.gemini),
-            ("OPENROUTER", &mut self.providers.openrouter),
-            ("OLLAMA", &mut self.providers.ollama),
-        ] {
-            let key = format!("SWARM_PROVIDERS_{provider}_API_KEY");
-            let upstream_key = format!("SWARM_PROVIDERS_{provider}_UPSTREAM");
-            if let Some(p) = slot.as_mut() {
-                if let Some(v) = env.get(&key) {
-                    p.api_key = Some(v.clone());
-                }
-                if let Some(v) = env.get(&upstream_key) {
-                    p.upstream.clone_from(v);
-                }
+        // Generic env override: `SWARM_PROVIDERS_<NAME>_API_KEY` /
+        // `SWARM_PROVIDERS_<NAME>_UPSTREAM` for any provider already
+        // declared in TOML.  Walk the env map (not the providers map)
+        // so an env var with no matching stanza is a no-op rather
+        // than an error — same back-compat semantics as before.
+        for (env_key, env_val) in env {
+            let Some(rest) = env_key.strip_prefix("SWARM_PROVIDERS_") else { continue };
+            let (name_upper, field) = if let Some(n) = rest.strip_suffix("_API_KEY") {
+                (n, "api_key")
+            } else if let Some(n) = rest.strip_suffix("_UPSTREAM") {
+                (n, "upstream")
+            } else {
+                continue;
+            };
+            let name = name_upper.to_lowercase();
+            let Some(slot) = self.providers.get_mut(&name) else { continue };
+            match field {
+                "api_key" => slot.api_key = Some(env_val.clone()),
+                "upstream" => slot.upstream.clone_from(env_val),
+                _ => unreachable!(),
             }
         }
 
@@ -473,7 +548,7 @@ local_cache_dir = "/tmp/cache"
         assert_eq!(cfg.cube.api_key, "k");
         assert_eq!(cfg.health_probe_interval_seconds, 60);
         assert_eq!(cfg.backup.sink, BackupSinkKind::Local);
-        assert_eq!(cfg.providers.anthropic.as_ref().unwrap().api_key.as_deref(), Some("a"));
+        assert_eq!(cfg.providers.get("anthropic").unwrap().api_key.as_deref(), Some("a"));
         std::fs::remove_file(&path).ok();
     }
 
@@ -486,7 +561,7 @@ local_cache_dir = "/tmp/cache"
         let cfg = Config::load(&path, &env, false).expect("loads");
         assert_eq!(cfg.cube.url, "https://override");
         assert_eq!(
-            cfg.providers.anthropic.as_ref().unwrap().api_key.as_deref(),
+            cfg.providers.get("anthropic").unwrap().api_key.as_deref(),
             Some("from-env")
         );
         std::fs::remove_file(&path).ok();

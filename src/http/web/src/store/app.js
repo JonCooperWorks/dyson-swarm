@@ -110,5 +110,6 @@ export function parseHashView() {
   if (m) return { name: 'instance', id: decodeURIComponent(m[1]) };
   if (h.startsWith('#/new')) return { name: 'instance-new', id: null };
   if (h.startsWith('#/admin')) return { name: 'admin', id: null };
+  if (h.startsWith('#/keys')) return { name: 'byok', id: null };
   return { name: 'instances', id: null };
 }

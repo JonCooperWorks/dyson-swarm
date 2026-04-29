@@ -430,6 +430,12 @@ pub struct AuditEntry {
     pub status_code: i64,
     pub duration_ms: i64,
     pub occurred_at: i64,
+    /// Which credential the proxy used to make the upstream call.
+    /// Closed enum: `"platform"`, `"byok"`, `"or_minted"`.  Audit rows
+    /// written before the BYOK path resolved (e.g. policy denials at
+    /// step 3) carry `"platform"` as a placeholder — the call never
+    /// reached an upstream so the value is informational only.
+    pub key_source: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]

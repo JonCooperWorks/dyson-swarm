@@ -227,6 +227,45 @@ export class SwarmClient {
       { method: 'POST' },
     );
   }
+
+  // ─── Provider keys (BYOK) ──────────────────────────────────────────
+  //
+  // Stage 7: per-user keys for any provider in the registry, plus a
+  // single `byo` slot that carries both upstream URL and key.  Stored
+  // server-side in user_secrets, encrypted under the user's age key
+  // (same envelope used by the legacy lazy-minted OpenRouter key).
+
+  /// `[{name, has_byok, has_platform, supports_byo}, ...]` for every
+  /// provider in the adapter registry.  Drives the BYOK status table.
+  listProviders() {
+    return this._json('/v1/providers', { headers: { Accept: 'application/json' } });
+  }
+
+  /// `[{provider}, ...]` for the providers where the current caller
+  /// has a BYOK row set.  Names only — never returns plaintext.
+  listMyByok() {
+    return this._json('/v1/byok', { headers: { Accept: 'application/json' } });
+  }
+
+  /// PUT a BYOK key.  Body shape:
+  ///   - `{key}` for ordinary providers (anthropic, openai, groq, ...)
+  ///   - `{upstream, key}` for `byo` (the user's custom endpoint)
+  /// The server validates synchronously by probing the upstream — a
+  /// 422 means the provider rejected the key, 502 means we couldn't
+  /// reach the provider at all.
+  putByok(provider, { key, upstream } = {}) {
+    const body = upstream ? { key, upstream } : { key };
+    return this._json(`/v1/byok/${encodeURIComponent(provider)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  }
+
+  /// DELETE a BYOK row.  Idempotent — 204 even when no row existed.
+  deleteByok(provider) {
+    return this._json(`/v1/byok/${encodeURIComponent(provider)}`, { method: 'DELETE' });
+  }
 }
 
 // Surface HTTP status on the thrown error so callers can branch on

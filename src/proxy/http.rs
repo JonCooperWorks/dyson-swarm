@@ -24,9 +24,11 @@ use futures::TryStreamExt;
 use serde::Serialize;
 
 use crate::auth::extract_bearer;
+use crate::config::ProviderConfig;
 use crate::now_secs;
 use crate::policy::PolicyDenial;
 use crate::proxy::adapters::anthropic as anthropic_adapter;
+use crate::proxy::byok::{self, KeySource};
 use crate::proxy::policy_check::{enforce, EnforceContext};
 use crate::proxy::ProxyService;
 use crate::traits::{AuditEntry, TokenRecord};
@@ -121,6 +123,10 @@ async fn handle(
                 status_code: 403,
                 duration_ms: elapsed_ms(started),
                 occurred_at: now_secs(),
+                // Policy denial happens before key resolution, so we
+                // record `platform` as a placeholder.  The call never
+                // hit upstream; the value is informational.
+                key_source: KeySource::Platform.as_str().to_owned(),
             },
         )
         .await;
@@ -132,48 +138,48 @@ async fn handle(
         Some(a) => a.clone(),
         None => return error_response(StatusCode::NOT_FOUND, "unknown provider"),
     };
-    let Some(provider_cfg) = state.provider_config(&provider) else {
-        return error_response(StatusCode::SERVICE_UNAVAILABLE, "provider not configured");
-    };
-    // Stage 6: `/llm/openrouter/*` MUST use the caller's own per-user
-    // OR bearer.  We never fall back to the global `[providers.openrouter]
-    // api_key` — silently doing so would shift the user's spend onto
-    // the operator's plan and bypass the per-user budget cap entirely.
-    // The resolver lazy-mints on first call (`create if not exists`);
-    // anything that prevents that — resolver not configured, OR
-    // Provisioning API down, decrypt failure — is a 503 the agent can
-    // retry rather than a billing leak the operator catches a month
-    // late.
-    let real_key: String = if provider == "openrouter" {
-        let Some(resolver) = state.user_or_keys.as_ref() else {
+    // `byo` has no TOML stanza — its upstream comes from the user's
+    // `byok_byo` blob.  Use a default ProviderConfig as a placeholder
+    // so the adapter trait stays uniform.
+    let provider_cfg = state.provider_config(&provider).unwrap_or(ProviderConfig {
+        api_key: None,
+        upstream: String::new(),
+        anthropic_version: None,
+    });
+
+    // 4b. Resolve the real upstream key + (for byo) upstream URL.  See
+    // `proxy::byok` for the layered lookup: BYOK > OR-mint (legacy) >
+    // platform.  Failure is fail-closed 503 — never silently fall back
+    // through paths the operator hasn't authorised.
+    let resolved = match byok::resolve(&state, &provider, &owner_id).await {
+        Ok(r) => r,
+        Err(err) => {
             tracing::warn!(
+                error = %err,
                 user = %owner_id,
-                "openrouter request but no per-user resolver configured; failing closed",
+                provider = %provider,
+                "key resolution failed; failing closed",
             );
             return error_response(
                 StatusCode::SERVICE_UNAVAILABLE,
-                "openrouter per-user key unavailable",
+                "no provider key available",
             );
-        };
-        match resolver.resolve_plaintext(&owner_id).await {
-            Ok(k) => k,
-            Err(err) => {
-                tracing::warn!(
-                    error = %err,
-                    user = %owner_id,
-                    "openrouter per-user key resolve failed; failing closed",
-                );
-                return error_response(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "openrouter per-user key unavailable",
-                );
-            }
         }
-    } else {
-        provider_cfg.api_key.clone().unwrap_or_default()
     };
+    let real_key = resolved.key.clone();
+    let key_source_str = resolved.source.as_str().to_owned();
 
-    let upstream_base = adapter.upstream_base_url(&provider_cfg);
+    let upstream_base: String = match resolved.upstream_override.as_deref() {
+        Some(u) => u.to_owned(),
+        None => adapter.upstream_base_url(&provider_cfg).to_owned(),
+    };
+    if upstream_base.is_empty() {
+        // Defensive: every code path above should have populated this
+        // (platform stanza or byo override).  An empty string here
+        // means the operator declared neither — fail closed rather
+        // than ship a request to "/".
+        return error_response(StatusCode::SERVICE_UNAVAILABLE, "provider not configured");
+    }
     let rest_with_query = match parts.uri.query() {
         Some(q) => format!("/{rest}?{q}"),
         None => format!("/{rest}"),
@@ -222,6 +228,7 @@ async fn handle(
                     status_code: 502,
                     duration_ms: elapsed_ms(started),
                     occurred_at: now_secs(),
+                    key_source: key_source_str.clone(),
                 },
             )
             .await;
@@ -274,6 +281,7 @@ async fn handle(
             status_code: i64::from(upstream_status),
             duration_ms: elapsed_ms(started),
             occurred_at: now_secs(),
+            key_source: key_source_str,
         },
     )
     .await;
@@ -377,12 +385,35 @@ mod tests {
     use crate::traits::{InstanceRow, InstanceStatus, InstanceStore, TokenStore};
 
     async fn seed_instance_with_token(pool: &SqlitePool) -> (String, String) {
+        seed_instance_with_token_for(pool, "legacy").await
+    }
+
+    /// 32-char hex owner_id used by tests that seed BYOK rows.  The
+    /// `AgeCipherDirectory` rejects anything else — `"legacy"` is fine
+    /// for tests that don't touch the cipher (most pre-Stage-7 tests
+    /// fall in that bucket and call `seed_instance_with_token`).
+    const TEST_OWNER: &str = "00000000000000000000000000000001";
+
+    async fn seed_instance_with_token_for(pool: &SqlitePool, owner: &str) -> (String, String) {
+        // Pre-seed the user row so the instances.owner_id FK is
+        // satisfied.  "legacy" is migrated in by 0002 so we skip it.
+        if owner != "legacy" {
+            sqlx::query(
+                "INSERT OR IGNORE INTO users (id, subject, status, created_at) \
+                 VALUES (?, ?, 'active', 0)",
+            )
+            .bind(owner)
+            .bind(format!("subject-{owner}"))
+            .execute(pool)
+            .await
+            .unwrap();
+        }
         let store = SqlxInstanceStore::new(pool.clone());
         let id = "i-test".to_string();
         store
             .create(InstanceRow {
                 id: id.clone(),
-                owner_id: "legacy".into(),
+                owner_id: owner.into(),
             name: String::new(),
             task: String::new(),
                 cube_sandbox_id: Some("sb-1".into()),
@@ -450,10 +481,25 @@ mod tests {
     async fn spawn_streaming_upstream(
         payload: Vec<Vec<u8>>,
     ) -> (String, Arc<std::sync::atomic::AtomicU32>) {
+        let (url, _, calls) = spawn_streaming_upstream_full(payload).await;
+        (url, calls)
+    }
+
+    /// Variant of `spawn_streaming_upstream` that also returns the
+    /// captured-headers handle so BYOK tests can verify which
+    /// `Authorization` header reached the upstream.
+    async fn spawn_streaming_upstream_full(
+        payload: Vec<Vec<u8>>,
+    ) -> (
+        String,
+        Arc<std::sync::Mutex<Option<AxHeaderMap>>>,
+        Arc<std::sync::atomic::AtomicU32>,
+    ) {
+        let captured = Arc::new(std::sync::Mutex::new(None));
         let state = UpstreamState {
             calls: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             chunks: Arc::new(payload),
-            captured_headers: Arc::new(std::sync::Mutex::new(None)),
+            captured_headers: captured.clone(),
         };
         let calls = state.calls.clone();
         let app = AxRouter::new()
@@ -464,7 +510,7 @@ mod tests {
         tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
-        (format!("http://{addr}"), calls)
+        (format!("http://{addr}"), captured, calls)
     }
 
     /// Build a `ProxyService` whose only configured provider points at
@@ -491,37 +537,8 @@ mod tests {
             upstream: upstream_url,
             anthropic_version: None,
         };
-        let providers = match provider {
-            "openai" => Providers {
-                anthropic: None,
-                openai: Some(cfg),
-                gemini: None,
-                openrouter: None,
-                ollama: None,
-            },
-            "gemini" => Providers {
-                anthropic: None,
-                openai: None,
-                gemini: Some(cfg),
-                openrouter: None,
-                ollama: None,
-            },
-            "anthropic" => Providers {
-                anthropic: Some(cfg),
-                openai: None,
-                gemini: None,
-                openrouter: None,
-                ollama: None,
-            },
-            "openrouter" => Providers {
-                anthropic: None,
-                openai: None,
-                gemini: None,
-                openrouter: Some(cfg),
-                ollama: None,
-            },
-            other => panic!("build_service_for: unsupported provider {other}"),
-        };
+        let mut providers = Providers::default();
+        providers.insert(provider, cfg);
         let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(pool.clone()));
         let instances: Arc<dyn InstanceStore> =
             Arc::new(crate::db::instances::SqlxInstanceStore::new(pool.clone()));
@@ -533,6 +550,58 @@ mod tests {
             ProxyService::new(tokens, instances, policies, audit, providers, policy)
                 .expect("build proxy"),
         )
+    }
+
+    /// Variant that wires a real `UserSecretsService` into the
+    /// `ProxyService` so tests can pre-seed `byok_<provider>` rows
+    /// and exercise the BYOK > platform precedence.  Returns the
+    /// service and the user_secrets handle so the caller can `put`
+    /// rows for `owner_id = "legacy"` (the value
+    /// `seed_instance_with_token` uses).  Also returns the keys-dir
+    /// guard so it stays alive for the test's lifetime.
+    fn build_service_with_byok(
+        pool: SqlitePool,
+        provider: &str,
+        upstream_url: String,
+        real_key: Option<&str>,
+        policy: InstancePolicy,
+    ) -> (
+        Arc<ProxyService>,
+        Arc<crate::secrets::UserSecretsService>,
+        tempfile::TempDir,
+    ) {
+        let cfg = ProviderConfig {
+            api_key: real_key.map(str::to_owned),
+            upstream: upstream_url,
+            anthropic_version: None,
+        };
+        let mut providers = Providers::default();
+        providers.insert(provider, cfg);
+        let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(pool.clone()));
+        let instances: Arc<dyn InstanceStore> =
+            Arc::new(crate::db::instances::SqlxInstanceStore::new(pool.clone()));
+        let policies: Arc<dyn crate::traits::PolicyStore> =
+            Arc::new(crate::db::policies::SqlitePolicyStore::new(pool.clone()));
+        let audit: Arc<dyn crate::traits::AuditStore> =
+            Arc::new(crate::db::audit::SqliteAuditStore::new(pool.clone()));
+
+        // Per-test keys directory so encrypted user_secrets work.
+        let keys_tmp = tempfile::tempdir().unwrap();
+        let cipher_dir: Arc<dyn crate::envelope::CipherDirectory> =
+            Arc::new(crate::envelope::AgeCipherDirectory::new(keys_tmp.path()).unwrap());
+        let user_secret_store: Arc<dyn crate::traits::UserSecretStore> =
+            Arc::new(crate::db::secrets::SqlxUserSecretStore::new(pool.clone()));
+        let user_secrets = Arc::new(crate::secrets::UserSecretsService::new(
+            user_secret_store,
+            cipher_dir,
+        ));
+
+        let svc = Arc::new(
+            ProxyService::new(tokens, instances, policies, audit, providers, policy)
+                .expect("build proxy")
+                .with_user_secrets(user_secrets.clone()),
+        );
+        (svc, user_secrets, keys_tmp)
     }
 
     async fn spawn_proxy(svc: Arc<ProxyService>) -> String {
@@ -695,14 +764,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn registry_has_five_adapters() {
+    async fn registry_has_all_adapters() {
         let r = adapters::registry();
-        assert!(r.contains_key("openrouter"));
-        assert!(r.contains_key("openai"));
-        assert!(r.contains_key("anthropic"));
-        assert!(r.contains_key("gemini"));
-        assert!(r.contains_key("ollama"));
-        assert_eq!(r.len(), 5);
+        for name in [
+            "openrouter", "openai", "anthropic", "gemini", "ollama",
+            "groq", "deepseek", "xai", "byo",
+        ] {
+            assert!(r.contains_key(name), "missing adapter `{name}`");
+        }
+        assert_eq!(r.len(), 9);
     }
 
     /// Regression: `/llm/openrouter/*` must NEVER use the global
@@ -797,5 +867,292 @@ mod tests {
         );
     }
 
+    // ── Stage 7 BYOK tests ───────────────────────────────────────────
+
+    /// Pull the captured `Authorization` header out of the
+    /// upstream-spy state.  Panics if no request was captured.
+    fn captured_auth(captured: &std::sync::Mutex<Option<AxHeaderMap>>) -> String {
+        let guard = captured.lock().unwrap();
+        let h = guard
+            .as_ref()
+            .expect("upstream never received a request");
+        h.get(axum::http::header::AUTHORIZATION)
+            .map(|v| v.to_str().unwrap().to_owned())
+            .unwrap_or_default()
+    }
+
+    /// BYOK takes precedence over the platform key: the user's stored
+    /// `byok_<provider>` value reaches the upstream, never the global
+    /// `[providers.X].api_key`.
+    #[tokio::test]
+    async fn byok_takes_precedence_over_platform() {
+        let (upstream_url, captured, _calls) =
+            spawn_streaming_upstream_full(vec![b"ok".to_vec()]).await;
+        let pool = open_in_memory().await.unwrap();
+        let (_id, token) = seed_instance_with_token_for(&pool, TEST_OWNER).await;
+        let (svc, user_secrets, _keys) = build_service_with_byok(
+            pool,
+            "openai",
+            upstream_url,
+            Some("sk-PLATFORM"),
+            permissive_policy(),
+        );
+        // Seed a BYOK row for the same owner_id the test fixture uses.
+        user_secrets
+            .put(TEST_OWNER, "byok_openai", b"sk-USER-BYOK")
+            .await
+            .unwrap();
+        let proxy_base = spawn_proxy(svc).await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("{proxy_base}/llm/openai/v1/chat/completions"))
+            .bearer_auth(&token)
+            .json(&serde_json::json!({"model": "gpt-4o"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        assert_eq!(captured_auth(&captured), "Bearer sk-USER-BYOK");
+    }
+
+    /// No BYOK row: fall back to the platform key.
+    #[tokio::test]
+    async fn no_byok_falls_back_to_platform() {
+        let (upstream_url, captured, _) =
+            spawn_streaming_upstream_full(vec![b"ok".to_vec()]).await;
+        let pool = open_in_memory().await.unwrap();
+        let (_id, token) = seed_instance_with_token(&pool).await;
+        let (svc, _user_secrets, _keys) = build_service_with_byok(
+            pool,
+            "openai",
+            upstream_url,
+            Some("sk-PLATFORM"),
+            permissive_policy(),
+        );
+        let proxy_base = spawn_proxy(svc).await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("{proxy_base}/llm/openai/v1/chat/completions"))
+            .bearer_auth(&token)
+            .json(&serde_json::json!({"model": "gpt-4o"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        assert_eq!(captured_auth(&captured), "Bearer sk-PLATFORM");
+    }
+
+    /// Neither BYOK nor platform → 503, no upstream traffic.
+    #[tokio::test]
+    async fn no_byok_no_platform_returns_503() {
+        let (upstream_url, _captured, calls) =
+            spawn_streaming_upstream_full(vec![b"x".to_vec()]).await;
+        let pool = open_in_memory().await.unwrap();
+        let (_id, token) = seed_instance_with_token(&pool).await;
+        let (svc, _user_secrets, _keys) = build_service_with_byok(
+            pool,
+            "openai",
+            upstream_url,
+            None, // no platform key
+            permissive_policy(),
+        );
+        let proxy_base = spawn_proxy(svc).await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("{proxy_base}/llm/openai/v1/chat/completions"))
+            .bearer_auth(&token)
+            .json(&serde_json::json!({"model": "gpt-4o"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    /// `byok_openrouter` short-circuits the lazy-mint resolver entirely.
+    /// Even when no resolver is configured (the case `openrouter_with_no_
+    /// resolver_fails_closed_with_503` pins) BYOK alone is enough.
+    #[tokio::test]
+    async fn openrouter_byok_skips_lazy_mint_and_overrides_503_path() {
+        let (upstream_url, captured, calls) =
+            spawn_streaming_upstream_full(vec![b"ok".to_vec()]).await;
+        let pool = open_in_memory().await.unwrap();
+        let (_id, token) = seed_instance_with_token_for(&pool, TEST_OWNER).await;
+        let (svc, user_secrets, _keys) = build_service_with_byok(
+            pool,
+            "openrouter",
+            upstream_url,
+            Some("sk-OR-PLATFORM-NEVER-USE"), // present but must NOT be used
+            permissive_policy(),
+        );
+        // Note: no UserOrKeyResolver is wired (svc was built without
+        // `with_user_or_keys`) — without BYOK this would 503.  With
+        // BYOK seeded, the resolver isn't consulted at all.
+        user_secrets
+            .put(TEST_OWNER, "byok_openrouter", b"sk-or-USER-BYOK")
+            .await
+            .unwrap();
+        let proxy_base = spawn_proxy(svc).await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("{proxy_base}/llm/openrouter/v1/chat/completions"))
+            .bearer_auth(&token)
+            .json(&serde_json::json!({"model": "anthropic/claude-haiku-4.5"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        assert_eq!(captured_auth(&captured), "Bearer sk-or-USER-BYOK");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// `byo` with a per-user blob routes the request to the
+    /// user-supplied upstream URL with the user-supplied bearer.  The
+    /// platform's "openai" upstream must NOT be hit.
+    #[tokio::test]
+    async fn byo_uses_user_supplied_upstream_and_key() {
+        // Two upstreams: A (platform openai) gets nothing; B (byo
+        // target) gets the request.
+        let (upstream_a, _capa, calls_a) =
+            spawn_streaming_upstream_full(vec![b"a".to_vec()]).await;
+        let (upstream_b, capb, calls_b) =
+            spawn_streaming_upstream_full(vec![b"b".to_vec()]).await;
+        let pool = open_in_memory().await.unwrap();
+        let (_id, token) = seed_instance_with_token_for(&pool, TEST_OWNER).await;
+        // We declare openai's platform stanza pointing at A; byo has
+        // none (only the user blob can populate it).
+        let (svc, user_secrets, _keys) = build_service_with_byok(
+            pool,
+            "openai",
+            upstream_a,
+            Some("sk-A"),
+            permissive_policy(),
+        );
+        let blob = serde_json::json!({
+            "upstream": upstream_b,
+            "api_key": "sk-USER-B",
+        });
+        user_secrets
+            .put(TEST_OWNER, "byok_byo", &serde_json::to_vec(&blob).unwrap())
+            .await
+            .unwrap();
+        let proxy_base = spawn_proxy(svc).await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("{proxy_base}/llm/byo/v1/chat/completions"))
+            .bearer_auth(&token)
+            .json(&serde_json::json!({"model": "any"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        assert_eq!(captured_auth(&capb), "Bearer sk-USER-B");
+        assert_eq!(calls_a.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(calls_b.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// `byo` without a per-user blob → 503; no upstream is contacted.
+    #[tokio::test]
+    async fn byo_without_blob_returns_503() {
+        let (upstream, _captured, calls) =
+            spawn_streaming_upstream_full(vec![b"x".to_vec()]).await;
+        let pool = open_in_memory().await.unwrap();
+        let (_id, token) = seed_instance_with_token(&pool).await;
+        let (svc, _user_secrets, _keys) = build_service_with_byok(
+            pool,
+            "openai", // unrelated stanza; byo has none
+            upstream,
+            Some("sk-A"),
+            permissive_policy(),
+        );
+        let proxy_base = spawn_proxy(svc).await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("{proxy_base}/llm/byo/v1/chat/completions"))
+            .bearer_auth(&token)
+            .json(&serde_json::json!({"model": "any"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    /// Audit row records `key_source = "byok"` when BYOK supplied
+    /// the credential, `"platform"` when the global key did.
+    #[tokio::test]
+    async fn audit_row_records_key_source_byok_vs_platform() {
+        let (upstream_url, _captured, _) =
+            spawn_streaming_upstream_full(vec![b"ok".to_vec()]).await;
+        let pool = open_in_memory().await.unwrap();
+        let (_id, token) = seed_instance_with_token_for(&pool, TEST_OWNER).await;
+        let (svc, user_secrets, _keys) = build_service_with_byok(
+            pool.clone(),
+            "openai",
+            upstream_url,
+            Some("sk-PLATFORM"),
+            permissive_policy(),
+        );
+        let proxy_base = spawn_proxy(svc).await;
+        let cli = reqwest::Client::new();
+
+        // Call 1: no BYOK → platform.
+        cli.post(format!("{proxy_base}/llm/openai/v1/chat/completions"))
+            .bearer_auth(&token)
+            .json(&serde_json::json!({"model": "gpt-4o"}))
+            .send()
+            .await
+            .unwrap();
+
+        // Call 2: BYOK row in place → byok.
+        user_secrets
+            .put(TEST_OWNER, "byok_openai", b"sk-USER")
+            .await
+            .unwrap();
+        cli.post(format!("{proxy_base}/llm/openai/v1/chat/completions"))
+            .bearer_auth(&token)
+            .json(&serde_json::json!({"model": "gpt-4o"}))
+            .send()
+            .await
+            .unwrap();
+
+        let row = sqlx::query("SELECT key_source FROM llm_audit ORDER BY id ASC")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        let sources: Vec<String> = row
+            .iter()
+            .map(|r| sqlx::Row::try_get::<String, _>(r, "key_source").unwrap())
+            .collect();
+        assert_eq!(sources, vec!["platform".to_string(), "byok".to_string()]);
+    }
+
+    /// Round-trip a request through one of the new providers (groq).
+    /// Pins the registry wiring + Bearer rewrite for the new
+    /// adapters.
+    #[tokio::test]
+    async fn new_provider_groq_round_trips_with_bearer_rewrite() {
+        let (upstream_url, captured, _) =
+            spawn_streaming_upstream_full(vec![b"ok".to_vec()]).await;
+        let pool = open_in_memory().await.unwrap();
+        let (_id, token) = seed_instance_with_token(&pool).await;
+        let svc = build_service_for(
+            pool,
+            "groq",
+            upstream_url,
+            "gsk-platform",
+            permissive_policy(),
+        );
+        let proxy_base = spawn_proxy(svc).await;
+        let resp = reqwest::Client::new()
+            .post(format!("{proxy_base}/llm/groq/openai/v1/chat/completions"))
+            .bearer_auth(&token)
+            .json(&serde_json::json!({"model": "llama-3.3-70b"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        assert_eq!(captured_auth(&captured), "Bearer gsk-platform");
+    }
 }
 

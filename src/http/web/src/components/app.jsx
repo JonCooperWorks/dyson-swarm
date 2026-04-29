@@ -12,6 +12,7 @@ import { setView, parseHashView } from '../store/app.js';
 import { TopBar } from './topbar.jsx';
 import { InstancesView, NewInstancePage, EditInstancePage } from './instances.jsx';
 import { AdminView } from './admin.jsx';
+import { ByokView } from './byok.jsx';
 
 export function App() {
   const view = useAppState(s => s.meta.view);
@@ -46,6 +47,8 @@ function renderView(view) {
       return <EditInstancePage instanceId={view.id}/>;
     case 'admin':
       return <AdminView/>;
+    case 'byok':
+      return <ByokView/>;
     default:
       return <InstancesView view={{ name: 'instances', id: null }}/>;
   }

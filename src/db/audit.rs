@@ -25,8 +25,8 @@ impl AuditStore for SqliteAuditStore {
     async fn insert(&self, entry: &AuditEntry) -> Result<(), StoreError> {
         sqlx::query(
             "INSERT INTO llm_audit \
-             (owner_id, instance_id, provider, model, prompt_tokens, output_tokens, status_code, duration_ms, occurred_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             (owner_id, instance_id, provider, model, prompt_tokens, output_tokens, status_code, duration_ms, occurred_at, key_source) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&entry.owner_id)
         .bind(&entry.instance_id)
@@ -37,6 +37,7 @@ impl AuditStore for SqliteAuditStore {
         .bind(entry.status_code)
         .bind(entry.duration_ms)
         .bind(entry.occurred_at)
+        .bind(&entry.key_source)
         .execute(&self.pool)
         .await
         .map_err(map_sqlx)?;
@@ -77,6 +78,7 @@ mod tests {
             status_code: 200,
             duration_ms: 100,
             occurred_at: when,
+            key_source: "platform".into(),
         }
     }
 

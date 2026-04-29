@@ -270,21 +270,23 @@ async fn build_stack(subject_for_no_bearer: &str) -> Stack {
 
     // OpenRouter is the provider the lazy-mint test exercises; openai
     // is included so generic-proxy tests have an upstream too.
-    let providers = Providers {
-        anthropic: None,
-        openai: Some(ProviderConfig {
+    let mut providers = Providers::default();
+    providers.insert(
+        "openai",
+        ProviderConfig {
             api_key: Some("sk-openai-global".into()),
             upstream: llm_url.clone(),
             anthropic_version: None,
-        }),
-        gemini: None,
-        openrouter: Some(ProviderConfig {
+        },
+    );
+    providers.insert(
+        "openrouter",
+        ProviderConfig {
             api_key: Some("sk-or-global-fallback".into()),
             upstream: llm_url.clone(),
             anthropic_version: None,
-        }),
-        ollama: None,
-    };
+        },
+    );
 
     let users_store: Arc<dyn UserStore> = Arc::new(
         dyson_swarm::db::users::SqlxUserStore::new(pool.clone(), cipher_dir.clone()),
@@ -347,6 +349,7 @@ async fn build_stack(subject_for_no_bearer: &str) -> Stack {
         models_cache: http::models::ModelsCache::new(),
         openrouter_provisioning: Some(or_prov.clone() as Arc<dyn Provisioning>),
         user_or_keys: Some(user_or_keys.clone()),
+        providers: Arc::new(dyson_swarm::config::Providers::default()),
     };
     let app = http::router(
         app_state,

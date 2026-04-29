@@ -288,6 +288,7 @@ mod tests {
             models_cache: crate::http::models::ModelsCache::new(),
             openrouter_provisioning: None,
             user_or_keys: None,
+            providers: Arc::new(crate::config::Providers::default()),
         };
         (state, raw, user_auth, user_id)
     }

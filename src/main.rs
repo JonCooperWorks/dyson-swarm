@@ -429,6 +429,7 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         }
     };
 
+    let providers_for_app = Arc::new(providers_resolved.clone());
     let mut proxy = match ProxyService::new(
         tokens_store.clone(),
         instances_store.clone(),
@@ -446,6 +447,7 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     if let Some(resolver) = &user_or_keys {
         proxy = proxy.with_user_or_keys(resolver.clone());
     }
+    proxy = proxy.with_user_secrets(user_secrets_svc.clone());
     let proxy_svc = Arc::new(proxy);
     let llm_router = proxy::http::router(proxy_svc);
 
@@ -492,16 +494,17 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
             cfg.oidc.as_ref(),
             cfg.default_template_id.clone(),
             cfg.default_models.clone(),
+            cfg.cube_profiles.clone(),
         )),
         dyson_http: http::dyson_proxy::build_client().expect("dyson http client init"),
         models_upstream: cfg
             .providers
-            .openrouter
-            .as_ref()
+            .get("openrouter")
             .map(|p| p.upstream.clone()),
         models_cache: http::models::ModelsCache::new(),
         openrouter_provisioning: or_provisioning,
         user_or_keys,
+        providers: providers_for_app,
     };
     let app = http::router(app_state, auth, user_auth, llm_router);
 
@@ -539,19 +542,14 @@ async fn overlay_provider_keys(
     mut providers: config::Providers,
     secrets: &dyson_swarm::secrets::SystemSecretsService,
 ) -> Result<config::Providers, String> {
-    for (name, slot) in [
-        ("anthropic", &mut providers.anthropic),
-        ("openai", &mut providers.openai),
-        ("gemini", &mut providers.gemini),
-        ("openrouter", &mut providers.openrouter),
-        ("ollama", &mut providers.ollama),
-    ] {
-        let Some(cfg) = slot.as_mut() else { continue };
+    let names: Vec<String> = providers.names().map(str::to_string).collect();
+    for name in names {
+        let Some(cfg) = providers.get_mut(&name) else { continue };
         let key = format!("provider.{name}.api_key");
         match secrets.get_str(&key).await {
             Ok(Some(value)) => {
                 tracing::info!(
-                    provider = name,
+                    provider = %name,
                     "stage 3: provider api_key sourced from system_secrets"
                 );
                 cfg.api_key = Some(value);
@@ -619,7 +617,7 @@ async fn resolve_or_provisioning_async(
         .openrouter
         .as_ref()
         .and_then(|o| o.upstream.clone())
-        .or_else(|| cfg.providers.openrouter.as_ref().map(|p| p.upstream.clone()))
+        .or_else(|| cfg.providers.get("openrouter").map(|p| p.upstream.clone()))
         .unwrap_or_else(|| "https://openrouter.ai/api".to_string());
     dyson_swarm::openrouter::OpenRouterProvisioning::new(upstream, key)
         .map(Some)

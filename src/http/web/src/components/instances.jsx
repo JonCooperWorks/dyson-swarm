@@ -239,6 +239,27 @@ export function NewInstancePage() {
   );
 }
 
+// Server-side `instances.create` returns once the cube is Live and
+// Caddy has its TLS cert, but the dyson process inside the cube can
+// still be a few seconds away from answering /healthz.  Poll the
+// probe endpoint until it reports Healthy so the user lands on a
+// working detail page instead of a 502.  Bounded at ~30s — past that
+// the agent is genuinely stuck and the detail page is a better place
+// to surface the unhealthy state (with the "probe" button to retry).
+async function waitUntilHealthy(client, id) {
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    try {
+      const r = await client.probeInstance(id);
+      if (r?.status === 'healthy') return;
+    } catch {
+      // Mid-boot the cube can answer 502 / connection refused; we
+      // just retry until the deadline.
+    }
+    await new Promise(res => setTimeout(res, 1000));
+  }
+}
+
 function NewInstanceForm() {
   const { client, auth } = useApi();
   const [name, setName] = React.useState('');
@@ -320,10 +341,15 @@ function NewInstanceForm() {
       setPhase('provisioning');
       // Server blocks until the sandbox is Live AND Caddy's TLS cert
       // is provisioned (pre-warmed inside instance.create()), so by
-      // the time this resolves the new dyson is fully reachable.
+      // the time this resolves the cube is reachable on the network.
+      // The dyson process inside the cube can still be a few seconds
+      // away from serving `/healthz` though — busy probing in the UI
+      // bridges that gap so the user lands on a live agent, not a
+      // 502/"warming up" detail page.
       const result = await client.createInstance(req);
 
       if (result?.id) {
+        await waitUntilHealthy(client, result.id);
         window.location.hash = `#/i/${encodeURIComponent(result.id)}`;
       } else {
         window.location.hash = '#/';

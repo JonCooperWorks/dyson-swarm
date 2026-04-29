@@ -296,11 +296,13 @@ function NewInstanceForm() {
       || (cubeProfiles.length === 1 ? cubeProfiles[0].template_id : '')
   );
   const [ttlSeconds, setTtlSeconds] = React.useState('');
-  // Network policy state.  Default Open matches the pre-feature
-  // behaviour and the row-side default — operators don't have to
-  // pick anything.  See src/network_policy.rs for the four profiles.
+  // Network policy state.  Default `nolocalnet` matches the row-side
+  // default (NetworkPolicy::default() in src/network_policy.rs) — full
+  // internet minus RFC1918/link-local/cloud-meta.  Operators don't
+  // have to pick anything.  See src/network_policy.rs for the five
+  // profiles.
   const [networkPolicy, setNetworkPolicy] = React.useState({
-    kind: 'open',
+    kind: 'nolocalnet',
     entries: [],
   });
   const [submitting, setSubmitting] = React.useState(false);
@@ -497,8 +499,12 @@ function NewInstanceForm() {
 
 // ─── Network-policy picker ────────────────────────────────────────
 //
-// Four profiles (mirrors the Rust enum in src/network_policy.rs):
-//   open       — full internet, default deny on RFC1918+linklocal.
+// Five profiles (mirrors the Rust enum in src/network_policy.rs):
+//   nolocalnet — full internet minus RFC1918/link-local/cloud-meta.
+//                Safe default — every fresh row lands here.
+//   open       — same as nolocalnet PLUS an explicit 0.0.0.0/0 allow
+//                that punches through the deny trie, granting LAN +
+//                cloud-metadata access.  Legacy / opt-in.
 //   airgap     — no egress except the swarm /llm proxy.
 //   allowlist  — LLM proxy + the listed networks (CIDR or hostname).
 //   denylist   — full internet minus the listed networks.
@@ -511,9 +517,14 @@ function NewInstanceForm() {
 
 const POLICY_OPTIONS = [
   {
-    kind: 'open',
+    kind: 'nolocalnet',
     label: 'Open (full internet)',
-    help: 'Everything the dyson asks for is allowed, except RFC1918 + link-local. The swarm default — pick this when the agent needs to research, fetch dependencies, or call external APIs.',
+    help: 'Everything the dyson asks for is allowed, except RFC1918 + link-local + cloud-metadata (169.254.169.254). The swarm default — pick this when the agent needs to research, fetch dependencies, or call external APIs but should never touch your LAN or the host.',
+  },
+  {
+    kind: 'open',
+    label: 'Open + internal LAN',
+    help: 'Same as Open, but ALSO permits access to private ranges (RFC1918, link-local, cloud-metadata). Pick this only when the dyson legitimately needs to reach a service on your LAN or the host. Do NOT use on cloud VMs — exposes the cloud-metadata service.',
   },
   {
     kind: 'airgap',
@@ -534,7 +545,7 @@ const POLICY_OPTIONS = [
 
 function NetworkPolicyPicker({ value, onChange }) {
   const setKind = (kind) => {
-    if (kind === 'open' || kind === 'airgap') {
+    if (kind === 'nolocalnet' || kind === 'open' || kind === 'airgap') {
       onChange({ kind, entries: [] });
     } else {
       onChange({ kind, entries: value.entries || [] });
@@ -655,8 +666,10 @@ function EntryChipInput({ entries, onChange, placeholder }) {
 }
 
 function serializeNetworkPolicy(p) {
-  if (!p || p.kind === 'open') return { kind: 'open' };
-  if (p.kind === 'airgap') return { kind: 'airgap' };
+  if (!p) return { kind: 'nolocalnet' };
+  if (p.kind === 'nolocalnet' || p.kind === 'open' || p.kind === 'airgap') {
+    return { kind: p.kind };
+  }
   // allowlist / denylist — include the user's raw entries; the server
   // resolves hostnames and persists both raw + resolved.
   return { kind: p.kind, entries: p.entries || [] };
@@ -1528,9 +1541,10 @@ function probeLabel(p) {
 
 function NetworkPolicyBadge({ instance }) {
   const p = instance?.network_policy;
-  const kind = p?.kind || 'open';
+  const kind = p?.kind || 'nolocalnet';
   const label = ({
-    open: 'open',
+    nolocalnet: 'open',
+    open: 'open + lan',
     airgap: 'air-gapped',
     allowlist: 'allowlist',
     denylist: 'denylist',
@@ -1545,7 +1559,10 @@ function NetworkPolicyBadge({ instance }) {
   if (cidrs.length) lines.push(`cidrs: ${cidrs.join(', ')}`);
   const title = lines.length ? lines.join('\n') : `network: ${label}`;
   const cls = kind === 'airgap' || kind === 'allowlist'
-    ? 'badge-warn' : kind === 'denylist' ? 'badge-info' : 'badge-ok';
+    ? 'badge-warn'
+    : kind === 'denylist' || kind === 'open'
+      ? 'badge-info'
+      : 'badge-ok';
   return <span className={`badge ${cls}`} title={title}>{label}</span>;
 }
 
@@ -1587,7 +1604,7 @@ function NetworkPolicyPanel({ instance, disabled }) {
   };
 
   const currentLabel =
-    POLICY_OPTIONS.find(o => o.kind === (instance.network_policy?.kind || 'open'))?.label
+    POLICY_OPTIONS.find(o => o.kind === (instance.network_policy?.kind || 'nolocalnet'))?.label
     || 'open';
   return (
     <section className="panel">
@@ -1659,7 +1676,9 @@ function NetworkPolicyPanel({ instance, disabled }) {
 }
 
 function normaliseInstancePolicy(p) {
-  if (!p) return { kind: 'open', entries: [] };
-  if (p.kind === 'open' || p.kind === 'airgap') return { kind: p.kind, entries: [] };
+  if (!p) return { kind: 'nolocalnet', entries: [] };
+  if (p.kind === 'nolocalnet' || p.kind === 'open' || p.kind === 'airgap') {
+    return { kind: p.kind, entries: [] };
+  }
   return { kind: p.kind, entries: Array.isArray(p.entries) ? p.entries : [] };
 }

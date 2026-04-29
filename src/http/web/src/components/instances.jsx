@@ -1386,6 +1386,12 @@ export function EditInstancePage({ instanceId }) {
               and the panel's "change" button gates on the same
               `disabled` prop. */}
           <NetworkPolicyPanel instance={row} disabled={row.status === 'destroyed'}/>
+          {/* MCP servers — same panel as the detail view.  Add /
+              edit / connect-OAuth / disconnect / remove all push
+              live to the running dyson via /api/admin/configure, so
+              the agent picks up tool-set changes on the next turn
+              without a re-hire. */}
+          <McpServersPanel instanceId={row.id} disabled={row.status === 'destroyed'}/>
         </>
       ) : (
         <div className="muted">loading…</div>

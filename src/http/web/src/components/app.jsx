@@ -10,7 +10,7 @@ import React from 'react';
 import { useAppState } from '../hooks/useAppState.js';
 import { setView, parseHashView } from '../store/app.js';
 import { TopBar } from './topbar.jsx';
-import { InstancesView, NewInstancePage } from './instances.jsx';
+import { InstancesView, NewInstancePage, EditInstancePage } from './instances.jsx';
 import { AdminView } from './admin.jsx';
 
 export function App() {
@@ -42,6 +42,8 @@ function renderView(view) {
       return <InstancesView view={view}/>;
     case 'instance-new':
       return <NewInstancePage/>;
+    case 'instance-edit':
+      return <EditInstancePage instanceId={view.id}/>;
     case 'admin':
       return <AdminView/>;
     default:

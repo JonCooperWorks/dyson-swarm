@@ -91,16 +91,21 @@ export function selectInstance(id) {
 //
 // Hash paths the SPA understands (mirrors what Dyson does — keeps a
 // single mount path so the IdP redirect stays one config entry):
-//   #/           → instances list (default)
-//   #/i/<id>     → instance detail
-//   #/new        → dedicated hire page (replaces the old CreateModal)
-//   #/admin      → admin (users, proxy tokens)  [phase 5]
+//   #/                 → instances list (default)
+//   #/i/<id>           → instance detail
+//   #/i/<id>/edit      → dedicated edit page (replaces the old EditEmployeeModal)
+//   #/new              → dedicated hire page (replaces the old CreateModal)
+//   #/admin            → admin (users, proxy tokens)
 //
-// Anything else falls back to the list.
+// Anything else falls back to the list.  Order matters: the edit
+// pattern is a strict prefix of the detail pattern, so it has to be
+// checked first or `#/i/foo/edit` would be parsed as `view.id = "foo"`.
 
 export function parseHashView() {
   if (typeof window === 'undefined') return { name: 'instances', id: null };
   const h = window.location.hash || '#/';
+  const edit = h.match(/^#\/i\/([^/?#]+)\/edit/);
+  if (edit) return { name: 'instance-edit', id: decodeURIComponent(edit[1]) };
   const m = h.match(/^#\/i\/([^/?#]+)/);
   if (m) return { name: 'instance', id: decodeURIComponent(m[1]) };
   if (h.startsWith('#/new')) return { name: 'instance-new', id: null };

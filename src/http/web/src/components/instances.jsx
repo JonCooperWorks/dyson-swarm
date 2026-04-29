@@ -749,12 +749,6 @@ function InstanceDetail({ id, onOpenSidebar, onNew }) {
   const totalInstances = useAppState(s => s.instances.order.length);
   const [busy, setBusy] = React.useState(false);
   const [err, setErr] = React.useState(null);
-  // Hoisted above the conditional returns so the hook order is stable
-  // across renders — otherwise React's useState slot count differs
-  // between the "no id / no row" early-return paths and the full
-  // render, which throws "rendered fewer hooks than expected" and
-  // leaves the pane blank.
-  const [editing, setEditing] = React.useState(false);
 
   // Pull fresh detail when selection changes (the list view's row is a
   // strict subset of the InstanceView shape, so re-fetching catches
@@ -924,7 +918,14 @@ function InstanceDetail({ id, onOpenSidebar, onNew }) {
           >
             open ↗
           </a>
-          <button className="btn btn-ghost" onClick={() => setEditing(true)} disabled={busy}>edit</button>
+          <a
+            className="btn btn-ghost"
+            href={`#/i/${encodeURIComponent(id)}/edit`}
+            aria-disabled={busy}
+            onClick={(e) => { if (busy) e.preventDefault(); }}
+          >
+            edit
+          </a>
           <button className="btn btn-ghost" onClick={probe} disabled={busy}>probe</button>
           <button className="btn btn-danger" onClick={destroy} disabled={busy || row.status === 'destroyed'}>
             destroy
@@ -949,24 +950,69 @@ function InstanceDetail({ id, onOpenSidebar, onNew }) {
       <SnapshotsPanel instanceId={id} disabled={row.status === 'destroyed'}/>
       <NetworkPolicyPanel instance={row} disabled={row.status === 'destroyed'}/>
       <SecretsPanel instanceId={id}/>
-
-      {editing ? (
-        <EditEmployeeModal
-          instance={row}
-          onClose={() => setEditing(false)}
-          onSaved={(updated) => {
-            upsertInstance(updated);
-            setEditing(false);
-          }}
-        />
-      ) : null}
     </main>
   );
 }
 
-// ─── Edit name + task ─────────────────────────────────────────────
+// ─── Edit instance — dedicated page ───────────────────────────────
+//
+// Promoted from a modal to a dedicated page for parity with the
+// hire flow (#/new) — gives the form room to grow (e.g. a future
+// network-policy editor) and gets the user a direct-linkable URL
+// for the edit screen.
 
-function EditEmployeeModal({ instance, onClose, onSaved }) {
+export function EditInstancePage({ instanceId }) {
+  const { client } = useApi();
+  const row = useAppState(s => (instanceId ? s.instances.byId[instanceId] : null));
+  const [err, setErr] = React.useState(null);
+  const backHref = `#/i/${encodeURIComponent(instanceId || '')}`;
+
+  // Hot-fetch the row in case the operator deep-linked into the edit
+  // URL without going through the detail view first (refresh, paste
+  // from chat, etc.).  Same pattern as InstanceDetail.
+  React.useEffect(() => {
+    if (!instanceId) return;
+    let cancelled = false;
+    client.getInstance(instanceId).then(detail => {
+      if (!cancelled && detail) upsertInstance(detail);
+    }).catch(e => {
+      if (!cancelled) setErr(e?.message || 'fetch failed');
+    });
+    return () => { cancelled = true; };
+  }, [client, instanceId]);
+
+  // ESC navigates back to the detail view — same affordance the
+  // modal had, preserved on the page so muscle memory still works.
+  React.useEffect(() => {
+    const onKey = (e) => {
+      if (e.key === 'Escape') window.location.hash = backHref;
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [backHref]);
+
+  return (
+    <main className="page page-edit">
+      <header className="page-header">
+        <a className="btn btn-ghost btn-sm" href={backHref}>← back</a>
+        <h1 className="page-title">edit dyson</h1>
+        <p className="page-sub muted">
+          Change the dyson's name, mission, or model list.  Saving
+          rewrites IDENTITY.md via /api/admin/configure — the agent
+          picks it up on the next turn (no restart).
+        </p>
+      </header>
+      {err ? <div className="error">{err}</div> : null}
+      {row ? (
+        <EditInstanceForm instance={row} backHref={backHref}/>
+      ) : (
+        <div className="muted">loading…</div>
+      )}
+    </main>
+  );
+}
+
+function EditInstanceForm({ instance, backHref }) {
   const { client, auth } = useApi();
   const [name, setName] = React.useState(instance.name || '');
   const [task, setTask] = React.useState(instance.task || '');
@@ -992,7 +1038,8 @@ function EditEmployeeModal({ instance, onClose, onSaved }) {
       // backend treats missing/empty as "leave unchanged".
       if (models.length > 0) payload.models = models;
       const updated = await client.updateInstance(instance.id, payload);
-      onSaved && onSaved(updated);
+      upsertInstance(updated);
+      window.location.hash = backHref;
     } catch (err) {
       setError(err?.detail || err?.message || 'save failed');
     } finally {
@@ -1001,45 +1048,38 @@ function EditEmployeeModal({ instance, onClose, onSaved }) {
   };
 
   return (
-    <ModalShell onClose={onClose} title="edit employee">
-      <form onSubmit={submit} className="form">
-        <label className="field">
-          <span>name</span>
-          <input
-            value={name}
-            onChange={e => setName(e.target.value)}
-            placeholder="PR reviewer for foo/bar"
-            autoFocus
-          />
-        </label>
-        <label className="field">
-          <span>task</span>
-          <textarea
-            className="textarea"
-            value={task}
-            onChange={e => setTask(e.target.value)}
-            rows={6}
-          />
-          <span className="hint muted small">
-            Saving rewrites the dyson's IDENTITY.md (mission section)
-            via /api/admin/configure — the agent picks it up on the
-            next turn (no restart).
-          </span>
-        </label>
-        <ModelMultiPicker
-          defaultModels={defaultModels}
-          selected={models}
-          onChange={setModels}
+    <form onSubmit={submit} className="form">
+      <label className="field">
+        <span>name</span>
+        <input
+          value={name}
+          onChange={e => setName(e.target.value)}
+          placeholder="PR reviewer for foo/bar"
+          autoFocus
         />
-        {error ? <div className="error">{error}</div> : null}
-        <div className="modal-actions">
-          <button type="submit" className="btn btn-primary" disabled={submitting}>
-            {submitting ? 'saving…' : 'save'}
-          </button>
-          <button type="button" className="btn btn-ghost" onClick={onClose}>cancel</button>
-        </div>
-      </form>
-    </ModalShell>
+      </label>
+      <label className="field">
+        <span>task</span>
+        <textarea
+          className="textarea"
+          value={task}
+          onChange={e => setTask(e.target.value)}
+          rows={6}
+        />
+      </label>
+      <ModelMultiPicker
+        defaultModels={defaultModels}
+        selected={models}
+        onChange={setModels}
+      />
+      {error ? <div className="error">{error}</div> : null}
+      <div className="form-actions">
+        <button type="submit" className="btn btn-primary" disabled={submitting}>
+          {submitting ? 'saving…' : 'save'}
+        </button>
+        <a className="btn btn-ghost" href={backHref}>cancel</a>
+      </div>
+    </form>
   );
 }
 

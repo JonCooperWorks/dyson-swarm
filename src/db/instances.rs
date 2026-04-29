@@ -70,6 +70,9 @@ fn row_to_instance(row: &sqlx::sqlite::SqliteRow) -> Result<InstanceRow, StoreEr
     let entries_csv: String = row.try_get("network_policy_entries").map_err(map_sqlx)?;
     let cidrs_csv: String = row.try_get("network_policy_cidrs").map_err(map_sqlx)?;
     let (network_policy, network_policy_cidrs) = decode_policy(&kind, &entries_csv, &cidrs_csv);
+    let models_json: String = row.try_get("models").map_err(map_sqlx)?;
+    let models: Vec<String> = serde_json::from_str(&models_json)
+        .map_err(|e| StoreError::Malformed(format!("models: {e}")))?;
     Ok(InstanceRow {
         id: row.try_get("id").map_err(map_sqlx)?,
         owner_id: row.try_get("owner_id").map_err(map_sqlx)?,
@@ -89,6 +92,7 @@ fn row_to_instance(row: &sqlx::sqlite::SqliteRow) -> Result<InstanceRow, StoreEr
         rotated_to: row.try_get("rotated_to").map_err(map_sqlx)?,
         network_policy,
         network_policy_cidrs,
+        models,
     })
 }
 
@@ -102,13 +106,15 @@ impl InstanceStore for SqlxInstanceStore {
         let kind = row.network_policy.kind_str().to_owned();
         let entries_csv = vec_to_csv(row.network_policy.entries());
         let cidrs_csv = vec_to_csv(&row.network_policy_cidrs);
+        let models_json = serde_json::to_string(&row.models)
+            .map_err(|e| StoreError::Io(format!("models encode: {e}")))?;
         sqlx::query(
             "INSERT INTO instances \
              (id, owner_id, name, task, cube_sandbox_id, template_id, status, bearer_token, \
               pinned, expires_at, last_active_at, last_probe_at, last_probe_status, \
               created_at, destroyed_at, rotated_to, \
-              network_policy_kind, network_policy_entries, network_policy_cidrs) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              network_policy_kind, network_policy_entries, network_policy_cidrs, models) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&row.id)
         .bind(&row.owner_id)
@@ -129,6 +135,7 @@ impl InstanceStore for SqlxInstanceStore {
         .bind(kind)
         .bind(entries_csv)
         .bind(cidrs_csv)
+        .bind(models_json)
         .execute(&self.pool)
         .await
         .map_err(map_sqlx)?;
@@ -317,6 +324,21 @@ impl InstanceStore for SqlxInstanceStore {
         Ok(())
     }
 
+    async fn set_models(&self, id: &str, models: &[String]) -> Result<(), StoreError> {
+        let json = serde_json::to_string(models)
+            .map_err(|e| StoreError::Io(format!("models encode: {e}")))?;
+        let result = sqlx::query("UPDATE instances SET models = ? WHERE id = ?")
+            .bind(json)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+        if result.rows_affected() == 0 {
+            return Err(StoreError::NotFound);
+        }
+        Ok(())
+    }
+
     async fn expired(&self, now: i64) -> Result<Vec<InstanceRow>, StoreError> {
         let rows = sqlx::query(
             "SELECT * FROM instances \
@@ -358,6 +380,7 @@ mod tests {
             rotated_to: None,
                 network_policy: crate::network_policy::NetworkPolicy::Open,
                 network_policy_cidrs: Vec::new(),
+                models: Vec::new(),
         }
     }
 

@@ -253,6 +253,11 @@ impl SnapshotService {
                     // Carry the source's network profile through too —
                     // a snapshot+restore must not silently widen egress.
                     network_policy: source.network_policy,
+                    // Same for the model list: the restored employee
+                    // keeps its primary + failover models so the
+                    // first /api/admin/configure push after restore
+                    // matches what the source dyson was running.
+                    models: source.models,
                 },
             )
             .await

@@ -355,6 +355,12 @@ pub struct InstanceView {
     /// SPA shows this alongside `network_policy.entries` so the
     /// operator sees both "what you typed" and "what's enforced".
     pub network_policy_cidrs: Vec<String>,
+    /// Model id list last persisted for this instance — primary
+    /// first, then any failover entries.  The SPA's edit form
+    /// pre-fills its picker from this; an empty vec means the
+    /// instance predates the column or was hired without a model
+    /// list (legacy create paths) and the user must repick.
+    pub models: Vec<String>,
 }
 
 impl InstanceView {
@@ -382,6 +388,7 @@ impl InstanceView {
             open_url,
             network_policy: r.network_policy,
             network_policy_cidrs: r.network_policy_cidrs,
+            models: r.models,
         }
     }
 }

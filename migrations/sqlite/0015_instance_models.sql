@@ -1,0 +1,13 @@
+-- Persist the agent's model list on the instance row so the edit
+-- page (and any other read-side caller) can recover what was last
+-- configured.  Pre-Stage-8 the models lived only in dyson.json
+-- inside the running cube; swarm pushed them via /api/admin/configure
+-- but never kept a copy, which meant the SPA edit form pre-filled
+-- with an empty picker on every visit.
+--
+-- Storage shape: JSON-encoded array of model id strings ('[]' when
+-- empty).  Sticking with TEXT + JSON keeps the migration trivial and
+-- mirrors the rest of the swarm schema (status, last_probe_status,
+-- network_policy_entries).  The first chip is the primary model
+-- (failover/A-B callers split additional entries).
+ALTER TABLE instances ADD COLUMN models TEXT NOT NULL DEFAULT '[]';

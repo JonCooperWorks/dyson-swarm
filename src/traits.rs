@@ -222,6 +222,14 @@ pub struct InstanceRow {
     /// the operator both "what you typed" and "what the cube sees".
     /// Empty for `Open` and `Airgap` rows.
     pub network_policy_cidrs: Vec<String>,
+    /// Model id list last pushed to the running dyson via
+    /// `/api/admin/configure`.  Populated at hire time from the
+    /// create request and rewritten by `update_models`.  The first
+    /// entry is the primary; later entries (failover / A-B) are
+    /// preserved in order.  Empty `Vec` for legacy rows written
+    /// before the column existed.  Read-only on the cube side —
+    /// the source of truth at runtime is dyson's `dyson.json`.
+    pub models: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -347,6 +355,13 @@ pub trait InstanceStore: Send + Sync {
     /// source after a successful snapshot+restore, before the destroy
     /// step.  Re-running with the same target is a no-op write.
     async fn set_rotated_to(&self, id: &str, target_id: &str) -> Result<(), StoreError>;
+    /// Persist the agent's model list (primary + failover) to the
+    /// row.  Called at hire time after the row insert, and again on
+    /// every `update_models` so the read-side recovers what the
+    /// running dyson was last reconfigured to.  Empty `models` is
+    /// rejected by the service layer, not here — the store accepts
+    /// any vec and serialises it as JSON.
+    async fn set_models(&self, id: &str, models: &[String]) -> Result<(), StoreError>;
 }
 
 /// Per-instance secrets — opaque ciphertexts stored against an instance row.

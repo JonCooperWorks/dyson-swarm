@@ -560,6 +560,7 @@ mod tests {
                 rotated_to: None,
                 network_policy: crate::network_policy::NetworkPolicy::Open,
                 network_policy_cidrs: Vec::new(),
+                models: Vec::new(),
             })
             .await
             .unwrap();

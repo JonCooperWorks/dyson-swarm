@@ -676,6 +676,9 @@ impl InstanceService {
                     // the successor — a binary rotation must NOT
                     // silently widen egress.
                     network_policy: source.network_policy.clone(),
+                    // Same for the model list, so the rotated dyson
+                    // boots with the same primary + failover models.
+                    models: source.models.clone(),
                 })
                 .await
                 .map_err(|e| format!("restore: {e}"))?;
@@ -795,6 +798,7 @@ impl InstanceService {
                 env: BTreeMap::new(),
                 ttl_seconds: None,
                 network_policy: new_policy.clone(),
+                models: source.models.clone(),
             })
             .await?;
         tracing::info!(
@@ -861,6 +865,23 @@ impl InstanceService {
         )
         .await?;
 
+        // Decode the model list once: SWARM_MODELS (CSV) is the
+        // multi-model wire shape; legacy clients still pass the
+        // single SWARM_MODEL.  We persist the same vec the
+        // reconfigurer push uses below so the read-side recovers
+        // exactly what the running dyson was hired with.
+        let mut models: Vec<String> = req
+            .env
+            .get(ENV_MODELS)
+            .map(|s| s.split(',').map(|m| m.trim().to_owned()).filter(|m| !m.is_empty()).collect())
+            .unwrap_or_default();
+        if models.is_empty()
+            && let Some(m) = req.env.get(ENV_MODEL).map(|s| s.trim().to_owned())
+            && !m.is_empty()
+        {
+            models.push(m);
+        }
+
         // Insert the instance row first so the FK target exists; mint the
         // proxy token; then call Cube. If Cube fails we mark the row
         // destroyed to keep state consistent.
@@ -883,6 +904,7 @@ impl InstanceService {
             rotated_to: None,
             network_policy: req.network_policy.clone(),
             network_policy_cidrs: resolved_policy.allow_out.clone(),
+            models: models.clone(),
         };
         self.instances.create(row).await?;
 
@@ -958,24 +980,10 @@ impl InstanceService {
         // sandbox is Live by here but the dyson HTTP server inside
         // can take a beat to settle, especially on cold cubeproxy.
         if let Some(reconfigurer) = self.reconfigurer.as_ref() {
-            let mut models: Vec<String> = req
-                .env
-                .get(ENV_MODELS)
-                .map(|s| s.split(',').map(|m| m.trim().to_owned()).filter(|m| !m.is_empty()).collect())
-                .unwrap_or_default();
-            // Fall back to the single SWARM_MODEL if SWARM_MODELS
-            // wasn't supplied — older clients might still only pass
-            // the legacy env.
-            if models.is_empty()
-                && let Some(m) = req.env.get(ENV_MODEL).map(|s| s.trim().to_owned())
-                && !m.is_empty()
-            {
-                models.push(m);
-            }
             let body = ReconfigureBody {
                 name: req.name.clone().filter(|s| !s.is_empty()),
                 task: req.task.clone().filter(|s| !s.is_empty()),
-                models,
+                models: models.clone(),
                 instance_id: Some(id.clone()),
                 // Push the freshly-minted proxy_token + the resolved
                 // /llm base URL into the running dyson's dyson.json so
@@ -1453,7 +1461,7 @@ impl InstanceService {
         let body = ReconfigureBody {
             name: None,
             task: None,
-            models,
+            models: models.clone(),
             instance_id: Some(id.to_owned()),
             // Edit-models-only path: provider config stays as-is.
             proxy_token: None,
@@ -1463,6 +1471,12 @@ impl InstanceService {
         push_with_retry(&**r, id, sandbox_id, &body)
             .await
             .map_err(SwarmError::PolicyDenied)?;
+        // Persist AFTER the push so the row records what dyson
+        // actually accepted.  Failure here means the cube agent has
+        // the new vec but our DB still shows the old one — rare and
+        // self-healing (the next save overwrites), so we surface the
+        // store error instead of swallowing it.
+        self.instances.set_models(id, &models).await?;
         Ok(())
     }
 
@@ -1564,6 +1578,7 @@ impl InstanceService {
             rotated_to: None,
             network_policy: req.network_policy.clone(),
             network_policy_cidrs: resolved_policy.allow_out.clone(),
+            models: req.models.clone(),
         };
         self.instances.create(row).await?;
 
@@ -1680,6 +1695,14 @@ pub struct RestoreRequest {
     /// blocks RFC1918 / link-local / cloud-metadata egress).
     #[serde(default)]
     pub network_policy: NetworkPolicy,
+    /// Model id list, carried from the source row by
+    /// `SnapshotService::restore` and the binary-rotation sweep so
+    /// the restored employee keeps its model selection.  Empty when
+    /// the source row predates the column or a raw HTTP restore
+    /// caller didn't supply one — the SPA edit form treats empty as
+    /// "user must pick before saving".
+    #[serde(default)]
+    pub models: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2089,6 +2112,7 @@ mod tests {
                 env: env_with_model(),
                 ttl_seconds: None,
                 network_policy: NetworkPolicy::default(),
+                models: Vec::new(),
             })
             .await
             .unwrap();
@@ -3149,6 +3173,7 @@ mod tests {
             rotated_to: None,
                 network_policy: crate::network_policy::NetworkPolicy::Open,
                 network_policy_cidrs: Vec::new(),
+                models: Vec::new(),
         };
         instances.create(row).await.unwrap();
 

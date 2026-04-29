@@ -552,6 +552,34 @@ mod tests {
         )
     }
 
+    /// Convenience for "happy path" success tests: seed a BYOK row
+    /// + an instance/token + build the service, all under
+    /// `TEST_OWNER`.  Returns the service, the bearer token, and a
+    /// `_keys` guard the caller must hold for the test's lifetime.
+    /// The non-OR resolver is now BYOK-or-503, so every test that
+    /// expects a 200 from `/llm/<provider>` must seed BYOK first.
+    async fn build_byok_seeded(
+        pool: SqlitePool,
+        provider: &str,
+        upstream_url: String,
+        byok_key: &str,
+        policy: InstancePolicy,
+    ) -> (Arc<ProxyService>, String, tempfile::TempDir) {
+        let (_id, token) = seed_instance_with_token_for(&pool, TEST_OWNER).await;
+        let (svc, user_secrets, keys) = build_service_with_byok(
+            pool,
+            provider,
+            upstream_url,
+            None,
+            policy,
+        );
+        user_secrets
+            .put(TEST_OWNER, &format!("byok_{provider}"), byok_key.as_bytes())
+            .await
+            .expect("seed byok");
+        (svc, token, keys)
+    }
+
     /// Variant that wires a real `UserSecretsService` into the
     /// `ProxyService` so tests can pre-seed `byok_<provider>` rows
     /// and exercise the BYOK > platform precedence.  Returns the
@@ -629,8 +657,13 @@ mod tests {
         let (upstream_url, upstream_calls) = spawn_streaming_upstream(chunks.clone()).await;
 
         let pool = open_in_memory().await.unwrap();
-        let (_id, token) = seed_instance_with_token(&pool).await;
-        let svc = build_service(pool, upstream_url, permissive_policy());
+        let (svc, token, _keys) = build_byok_seeded(
+            pool,
+            "openai",
+            upstream_url,
+            "sk-byok-test",
+            permissive_policy(),
+        ).await;
         let proxy_base = spawn_proxy(svc).await;
 
         let client = reqwest::Client::new();
@@ -735,9 +768,17 @@ mod tests {
     #[tokio::test]
     async fn audit_row_written_on_success() {
         let pool = open_in_memory().await.unwrap();
-        let (id, token) = seed_instance_with_token(&pool).await;
         let (upstream_url, _) = spawn_streaming_upstream(vec![b"ok".to_vec()]).await;
-        let svc = build_service(pool.clone(), upstream_url, permissive_policy());
+        let (svc, token, _keys) = build_byok_seeded(
+            pool.clone(),
+            "openai",
+            upstream_url,
+            "sk-byok-audit",
+            permissive_policy(),
+        ).await;
+        // build_byok_seeded uses a fixed instance id (`i-test`) under
+        // TEST_OWNER; recover it for the assertion below.
+        let id = "i-test".to_string();
         let base = spawn_proxy(svc).await;
         reqwest::Client::new()
             .post(format!("{base}/llm/openai/v1/chat/completions"))
@@ -836,14 +877,13 @@ mod tests {
 
         let real_key = "AIza-very-secret-real-key-do-not-leak";
         let pool = open_in_memory().await.unwrap();
-        let (_id, token) = seed_instance_with_token(&pool).await;
-        let svc = build_service_for(
+        let (svc, token, _keys) = build_byok_seeded(
             pool,
             "gemini",
             upstream_url.clone(),
             real_key,
             permissive_policy(),
-        );
+        ).await;
         let proxy_base = spawn_proxy(svc).await;
 
         let resp = reqwest::Client::new()
@@ -915,10 +955,18 @@ mod tests {
         assert_eq!(captured_auth(&captured), "Bearer sk-USER-BYOK");
     }
 
-    /// No BYOK row: fall back to the platform key.
+    /// Policy regression: non-OR providers are BYOK-or-503, even
+    /// when the operator left a platform `api_key` in TOML.
+    /// OpenRouter is the only provider where the operator backstops
+    /// spend (its API has reseller-shaped per-key caps via the
+    /// Provisioning API); for anything else, silently using the
+    /// global key would mean unbounded operator spend on a provider
+    /// that has no per-user spend controls.  This test pins that
+    /// behaviour at the integration layer so a future "make it
+    /// convenient" patch can't regress it without showing up here.
     #[tokio::test]
-    async fn no_byok_falls_back_to_platform() {
-        let (upstream_url, captured, _) =
+    async fn non_or_with_no_byok_ignores_platform_key_and_returns_503() {
+        let (upstream_url, _captured, calls) =
             spawn_streaming_upstream_full(vec![b"ok".to_vec()]).await;
         let pool = open_in_memory().await.unwrap();
         let (_id, token) = seed_instance_with_token(&pool).await;
@@ -926,7 +974,7 @@ mod tests {
             pool,
             "openai",
             upstream_url,
-            Some("sk-PLATFORM"),
+            Some("sk-PLATFORM-NEVER-USE"),
             permissive_policy(),
         );
         let proxy_base = spawn_proxy(svc).await;
@@ -938,8 +986,12 @@ mod tests {
             .send()
             .await
             .unwrap();
-        assert_eq!(resp.status(), 200);
-        assert_eq!(captured_auth(&captured), "Bearer sk-PLATFORM");
+        assert_eq!(resp.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "no upstream traffic should have been emitted with the platform key",
+        );
     }
 
     /// Neither BYOK nor platform → 503, no upstream traffic.
@@ -1078,10 +1130,14 @@ mod tests {
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
-    /// Audit row records `key_source = "byok"` when BYOK supplied
-    /// the credential, `"platform"` when the global key did.
+    /// Audit row records `key_source = "byok"` when the BYOK row
+    /// supplied the credential.  The "platform" path no longer
+    /// fires for non-OR providers (see
+    /// `non_or_with_no_byok_ignores_platform_key_and_returns_503`)
+    /// and a 503 from missing-credential doesn't produce an audit
+    /// row, so this test pins only the success-with-BYOK case.
     #[tokio::test]
-    async fn audit_row_records_key_source_byok_vs_platform() {
+    async fn audit_row_records_byok_key_source() {
         let (upstream_url, _captured, _) =
             spawn_streaming_upstream_full(vec![b"ok".to_vec()]).await;
         let pool = open_in_memory().await.unwrap();
@@ -1090,21 +1146,12 @@ mod tests {
             pool.clone(),
             "openai",
             upstream_url,
-            Some("sk-PLATFORM"),
+            None,
             permissive_policy(),
         );
         let proxy_base = spawn_proxy(svc).await;
         let cli = reqwest::Client::new();
 
-        // Call 1: no BYOK → platform.
-        cli.post(format!("{proxy_base}/llm/openai/v1/chat/completions"))
-            .bearer_auth(&token)
-            .json(&serde_json::json!({"model": "gpt-4o"}))
-            .send()
-            .await
-            .unwrap();
-
-        // Call 2: BYOK row in place → byok.
         user_secrets
             .put(TEST_OWNER, "byok_openai", b"sk-USER")
             .await
@@ -1124,7 +1171,7 @@ mod tests {
             .iter()
             .map(|r| sqlx::Row::try_get::<String, _>(r, "key_source").unwrap())
             .collect();
-        assert_eq!(sources, vec!["platform".to_string(), "byok".to_string()]);
+        assert_eq!(sources, vec!["byok".to_string()]);
     }
 
     /// Round-trip a request through one of the new providers (groq).
@@ -1135,14 +1182,13 @@ mod tests {
         let (upstream_url, captured, _) =
             spawn_streaming_upstream_full(vec![b"ok".to_vec()]).await;
         let pool = open_in_memory().await.unwrap();
-        let (_id, token) = seed_instance_with_token(&pool).await;
-        let svc = build_service_for(
+        let (svc, token, _keys) = build_byok_seeded(
             pool,
             "groq",
             upstream_url,
-            "gsk-platform",
+            "gsk-byok-test",
             permissive_policy(),
-        );
+        ).await;
         let proxy_base = spawn_proxy(svc).await;
         let resp = reqwest::Client::new()
             .post(format!("{proxy_base}/llm/groq/openai/v1/chat/completions"))
@@ -1152,7 +1198,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), 200);
-        assert_eq!(captured_auth(&captured), "Bearer gsk-platform");
+        assert_eq!(captured_auth(&captured), "Bearer gsk-byok-test");
     }
 }
 

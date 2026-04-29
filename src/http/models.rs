@@ -1,38 +1,21 @@
-//! `GET /v1/models` — aggregated list of model ids across every
-//! configured upstream the operator has wired up.  Used by the SPA's
+//! `GET /v1/models` — list of model ids exposed by OpenRouter, the
+//! single platform-managed default provider.  Used by the SPA's
 //! create-form picker so the user sees the full catalogue without
-//! the SPA hardcoding it or talking to providers directly.
+//! the SPA hardcoding it or talking to OR directly.
 //!
-//! Resolution order, per provider in `[providers.*]` with a platform
-//! `api_key`:
+//! Why OR-only: the BYOK policy is "OpenRouter is the default,
+//! everything else is BYOK-or-503" — see `proxy::byok` for the
+//! resolver that enforces this.  Non-OR providers don't have a
+//! platform-managed key the operator backstops, so there's no
+//! global catalogue to surface from them; per-user catalogues live
+//! behind the BYOK rows and aren't exposed here.  OR's catalogue
+//! already returns prefixed ids (`anthropic/claude-sonnet-4-5`,
+//! `openai/gpt-4o`, …) so it's effectively a multi-provider list
+//! anyway.
 //!
-//! - openrouter            → `GET /v1/models` (already returns prefixed
-//!                            ids like `anthropic/claude-sonnet-4-5`,
-//!                            so no extra prefixing on our side).
-//! - openai/groq/deepseek/xai/ollama → `GET /v1/models` Bearer auth;
-//!                            bare ids, we prefix with `<provider>/`
-//!                            so the picker can disambiguate.  Ollama
-//!                            here means Ollama Cloud — local
-//!                            `ollama serve` daemons live in the
-//!                            per-user `byo` slot.
-//! - anthropic             → `GET /v1/models` x-api-key + version;
-//!                            ids prefixed.
-//! - gemini                → `GET /v1beta/models?key=…`; names like
-//!                            `models/gemini-1.5-pro`, we strip the
-//!                            `models/` prefix and re-prefix with
-//!                            `gemini/`.
-//! - byo                   → skipped (per-user; we don't have user
-//!                            context at this endpoint).
-//!
-//! Results are merged in declaration order, deduped, and cached for 5
-//! minutes per process.  A failure on one provider doesn't fail the
-//! whole call: we log and skip that provider, so a flapping upstream
-//! can't take the picker offline.
-//!
-//! Mounted on the tenant tier (OIDC users only); admin/bearer callers
-//! don't need it because they don't drive the create form.
+//! Mounted on the tenant tier (OIDC users only); admin/bearer
+//! callers don't need it because they don't drive the create form.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -41,7 +24,6 @@ use serde::Serialize;
 use tokio::sync::Mutex;
 
 use super::AppState;
-use crate::config::ProviderConfig;
 
 /// 5 minutes — long enough to absorb burst opens of the create modal,
 /// short enough that a brand-new model becomes pickable on the same
@@ -87,114 +69,65 @@ async fn handler(State(state): State<AppState>) -> Result<Json<ModelsResponse>, 
         }
     }
 
-    // Iterate every configured provider with a platform key.  byo is
-    // skipped — it's per-user and we don't have user context at this
-    // endpoint.  A provider with no api_key is also skipped.
-    let mut all = Vec::new();
-    let mut seen: HashSet<String> = HashSet::new();
-    for name in state.providers.names() {
-        if name == "byo" {
-            continue;
-        }
-        let Some(cfg) = state.providers.get(name) else { continue };
-        let Some(api_key) = cfg.api_key.as_deref() else { continue };
-        if api_key.is_empty() {
-            continue;
-        }
-        match fetch_provider_models(&state.dyson_http, name, cfg, api_key).await {
-            Ok(ids) => {
-                for id in ids {
-                    if seen.insert(id.clone()) {
-                        all.push(id);
-                    }
-                }
-            }
-            Err(err) => {
-                // One bad provider must not take down the picker.
-                // Log + skip so the rest still aggregate.
-                tracing::warn!(provider = %name, error = %err, "list_models: provider fetch failed");
-            }
-        }
-    }
-
-    if all.is_empty() {
-        // Mirror the legacy single-upstream behaviour: 503 when there's
-        // nothing to show.  The SPA renders a "no upstream provider
-        // configured" message off this status.
+    // OR is the only platform-managed provider; without it we have
+    // nothing to show.  Operators on a BYOK-only deployment can run
+    // without OR — the SPA renders a "no upstream provider
+    // configured" message off the 503 and the picker becomes a
+    // free-text input the agent can still drive with any id it
+    // knows.
+    let Some(cfg) = state.providers.get("openrouter") else {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    };
+    let Some(api_key) = cfg.api_key.as_deref() else {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    };
+    if api_key.is_empty() {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
+    let upstream = cfg.upstream.trim_end_matches('/');
+
+    let url = format!("{upstream}/v1/models");
+    let resp = match state
+        .dyson_http
+        .get(&url)
+        .bearer_auth(api_key)
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(err) => {
+            tracing::warn!(error = %err, url = %url, "list_models: openrouter fetch failed");
+            return Err(StatusCode::BAD_GATEWAY);
+        }
+    };
+    if !resp.status().is_success() {
+        tracing::warn!(status = %resp.status(), url = %url, "list_models: non-2xx upstream");
+        return Err(StatusCode::BAD_GATEWAY);
+    }
+    let body: serde_json::Value = match resp.json().await {
+        Ok(v) => v,
+        Err(err) => {
+            tracing::warn!(error = %err, "list_models: openrouter body not JSON");
+            return Err(StatusCode::BAD_GATEWAY);
+        }
+    };
+    // OR returns OpenAI-shaped `{ data: [{ id, ... }] }` with model
+    // ids already prefixed (`anthropic/claude-…`, `openai/gpt-…`),
+    // so nothing to renormalise.
+    let ids: Vec<String> = parse_openai_shape(&body);
 
     {
         let mut guard = state.models_cache.inner.lock().await;
         *guard = Some(CachedEntry {
             fetched_at: Instant::now(),
-            ids: all.clone(),
+            ids: ids.clone(),
         });
     }
-    Ok(Json(ModelsResponse { models: all }))
+    Ok(Json(ModelsResponse { models: ids }))
 }
 
-/// Fetch a single provider's catalogue, normalising the model-id
-/// format to `<provider>/<model>` everywhere except OpenRouter (which
-/// already returns prefixed ids natively).  The id format is what the
-/// dyson agent uses to route — its provider segment becomes the
-/// `/llm/<provider>/...` URL component on outbound calls.
-async fn fetch_provider_models(
-    http: &reqwest::Client,
-    provider: &str,
-    cfg: &ProviderConfig,
-    api_key: &str,
-) -> Result<Vec<String>, FetchError> {
-    let base = cfg.upstream.trim_end_matches('/');
-    let req = match provider {
-        "openrouter" | "openai" | "groq" | "deepseek" | "xai" | "ollama" => http
-            .get(format!("{base}/v1/models"))
-            .bearer_auth(api_key),
-        "anthropic" => http
-            .get(format!("{base}/v1/models"))
-            .header("x-api-key", api_key)
-            .header(
-                "anthropic-version",
-                cfg.anthropic_version
-                    .as_deref()
-                    .unwrap_or("2023-06-01"),
-            ),
-        "gemini" => http
-            .get(format!("{base}/v1beta/models"))
-            .query(&[("key", api_key)]),
-        other => return Err(FetchError::Unsupported(other.to_string())),
-    };
-
-    let resp = req.send().await.map_err(FetchError::Network)?;
-    if !resp.status().is_success() {
-        return Err(FetchError::HttpStatus(resp.status().as_u16()));
-    }
-    let body: serde_json::Value = resp.json().await.map_err(FetchError::Network)?;
-
-    let ids = match provider {
-        "gemini" => parse_gemini(&body),
-        _ => parse_openai_shape(&body),
-    };
-
-    let prefixed = match provider {
-        // OpenRouter ids already carry the provider prefix natively.
-        "openrouter" => ids,
-        other => ids
-            .into_iter()
-            .map(|id| {
-                // Some providers may already namespace; keep idempotent.
-                if id.starts_with(&format!("{other}/")) {
-                    id
-                } else {
-                    format!("{other}/{id}")
-                }
-            })
-            .collect(),
-    };
-    Ok(prefixed)
-}
-
-/// `{ data: [{ id, ... }] }` — OpenAI-shaped catalogues.
+/// `{ data: [{ id, ... }] }` — OpenAI-shaped catalogues, which OR
+/// emits unchanged from upstream.
 fn parse_openai_shape(body: &serde_json::Value) -> Vec<String> {
     body.get("data")
         .and_then(|d| d.as_array())
@@ -204,31 +137,6 @@ fn parse_openai_shape(body: &serde_json::Value) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
-}
-
-/// `{ models: [{ name: "models/gemini-1.5-pro", ... }] }` — Gemini.
-/// The `models/` prefix is uninteresting; strip it so the caller sees
-/// just the model id.
-fn parse_gemini(body: &serde_json::Value) -> Vec<String> {
-    body.get("models")
-        .and_then(|d| d.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.get("name").and_then(|s| s.as_str()))
-                .map(|n| n.strip_prefix("models/").unwrap_or(n).to_owned())
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-#[derive(Debug, thiserror::Error)]
-enum FetchError {
-    #[error("provider {0} not supported by /v1/models aggregator")]
-    Unsupported(String),
-    #[error("network: {0}")]
-    Network(reqwest::Error),
-    #[error("upstream returned HTTP {0}")]
-    HttpStatus(u16),
 }
 
 #[cfg(test)]
@@ -250,28 +158,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_gemini_strips_models_prefix() {
-        let body = json!({
-            "models": [
-                {"name": "models/gemini-1.5-pro"},
-                {"name": "models/gemini-1.5-flash"},
-                {"name": "weird-no-prefix"},
-            ]
-        });
-        let ids = parse_gemini(&body);
-        assert_eq!(
-            ids,
-            vec![
-                "gemini-1.5-pro".to_string(),
-                "gemini-1.5-flash".to_string(),
-                "weird-no-prefix".to_string(),
-            ],
-        );
-    }
-
-    #[test]
     fn parse_handles_missing_keys_gracefully() {
         assert!(parse_openai_shape(&json!({})).is_empty());
-        assert!(parse_gemini(&json!({})).is_empty());
     }
 }

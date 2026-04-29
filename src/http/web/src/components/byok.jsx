@@ -43,14 +43,17 @@ const PROVIDER_ORDER = [
 ];
 
 /// Treats a provider as "configured" when the user has either
-/// pasted a BYOK key or the operator has wired a platform key.
+/// pasted a BYOK key or has an OR-minted key on file.  Platform
+/// keys are no longer a real fallback for non-OR providers (BYOK-
+/// or-503) so they don't count.
 function isConfigured(p) {
-  return p.has_byok || p.has_platform;
+  return p.has_byok || p.has_or_minted;
 }
 
-/// Sort: configured providers first (BYOK before platform-only so
-/// the user's own keys lead), then everything else in declaration
-/// order.  Stable within each bucket.
+/// Sort: BYOK first (your own key), then OR-minted (per-user but
+/// billed via the operator's OR Provisioning account), then
+/// everything else.  Stable within each bucket — declaration order
+/// from `PROVIDER_ORDER`.
 function sortProviders(rows) {
   const baseIdx = (n) => {
     const i = PROVIDER_ORDER.indexOf(n);
@@ -58,7 +61,7 @@ function sortProviders(rows) {
   };
   const bucket = (p) => {
     if (p.has_byok) return 0;
-    if (p.has_platform) return 1;
+    if (p.has_or_minted) return 1;
     return 2;
   };
   return [...rows].sort((a, b) => {
@@ -122,9 +125,9 @@ export function ByokView() {
         <p className="page-sub muted">
           Bring your own key. Pasted keys are validated against the
           provider, encrypted under your account, and used for every
-          call you make through the proxy. Without a personal key,
-          calls fall back to the operator's platform key — when one
-          is configured.
+          call you make through the proxy. OpenRouter is the only
+          platform-managed default — every other provider is
+          BYOK-only, so the operator never absorbs your spend.
         </p>
       </header>
 
@@ -160,23 +163,37 @@ export function ByokView() {
 }
 
 function ProviderRow({ provider, open, busy, onToggle, onEdit, onDelete }) {
-  const { name, has_byok, has_platform, supports_byo } = provider;
+  const { name, has_byok, has_or_minted, supports_byo } = provider;
   const meta = PROVIDER_META[name] || { label: name, blurb: '' };
 
   let badge;
   if (has_byok) {
     badge = <span className="badge badge-ok">your key</span>;
-  } else if (has_platform) {
-    badge = <span className="badge badge-info">platform key</span>;
+  } else if (has_or_minted) {
+    badge = <span className="badge badge-ok">minted for you</span>;
   } else if (supports_byo) {
     badge = <span className="badge badge-faint">no endpoint</span>;
+  } else if (name === 'openrouter') {
+    // OR has no per-user key yet — first /llm/openrouter call mints
+    // one (when the operator has Provisioning wired up).
+    badge = <span className="badge badge-faint">no key yet</span>;
   } else {
-    badge = <span className="badge badge-faint">not configured</span>;
+    // Every other provider is BYOK-or-503: the user must paste a
+    // key for it to work at all.  Use the warn colour so the
+    // status reads as "action needed", not just "info".
+    badge = <span className="badge badge-warn">BYOK required</span>;
   }
+
+  const accent = has_byok || has_or_minted;
+  const primaryLabel = has_byok
+    ? 'rotate key'
+    : has_or_minted
+      ? 'use my own key'
+      : (supports_byo ? 'configure endpoint' : 'add your key');
 
   // Header is a button so keyboard users can toggle with Space/Enter.
   return (
-    <article className={`byok-row ${open ? 'open' : ''} ${has_byok ? 'has-byok' : ''}`}>
+    <article className={`byok-row ${open ? 'open' : ''} ${accent ? 'has-byok' : ''}`}>
       <button
         type="button"
         className="byok-row-head"
@@ -201,7 +218,7 @@ function ProviderRow({ provider, open, busy, onToggle, onEdit, onDelete }) {
               onClick={onEdit}
               disabled={busy}
             >
-              {has_byok ? 'rotate key' : (supports_byo ? 'configure endpoint' : 'add your key')}
+              {primaryLabel}
             </button>
             {has_byok ? (
               <button
@@ -225,15 +242,24 @@ function explainStatus(p) {
   if (p.has_byok) {
     return p.name === 'byo'
       ? 'Your custom endpoint is active. Every /llm/byo/… call uses your URL and key.'
-      : 'Your key is active. Calls to this provider use it; the platform key (if any) is bypassed.';
+      : 'Your key is active. Every call to this provider uses it.';
   }
-  if (p.has_platform) {
-    return 'Calls fall through to the operator\'s platform key. Add your own to take over billing for this provider.';
+  if (p.has_or_minted) {
+    // OR-specific: a key was minted for the user via the operator's
+    // Provisioning account.  Calls work; billing flows through the
+    // operator (capped per-user).  Adding a BYOK overrides this.
+    return 'Swarm minted an OpenRouter key for you (billed through the operator, capped per-user). Calls work as-is. Add your own key to override and bill yourself directly.';
+  }
+  if (p.name === 'openrouter') {
+    // No BYOK, no minted key.  First /llm/openrouter call will mint
+    // a key when the operator has the Provisioning client wired up.
+    return 'No key on file yet. Your first OpenRouter call will mint one automatically when the operator has the Provisioning API enabled. Add your own key to skip the mint and bill yourself.';
   }
   if (p.name === 'byo') {
     return 'Set an upstream URL + key to point swarm at any OpenAI-compatible endpoint — including a local Ollama daemon.';
   }
-  return 'Not available on this deployment until you add a key — there\'s no platform fallback.';
+  // Every other provider is BYOK-or-503: no platform fallback.
+  return 'BYOK only — the operator does not backstop spend on this provider. Calls 503 until you paste a key. Your spend, your account.';
 }
 
 function ByokEditor({ provider, onClose, onSaved }) {

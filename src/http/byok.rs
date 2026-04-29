@@ -46,7 +46,21 @@ pub struct ProviderView {
     pub has_byok: bool,
     pub has_platform: bool,
     pub supports_byo: bool,
+    /// Set only for `openrouter` when the user has a Stage-6
+    /// lazy-minted key sitting in `user_secrets["openrouter_key"]`.
+    /// Distinct from `has_byok` — minted keys are billed against
+    /// the operator's OR Provisioning account (capped per-user),
+    /// BYOK keys are billed against the user's own OR account.  The
+    /// SPA renders these differently so a user with a working
+    /// minted key doesn't see "not configured".
+    pub has_or_minted: bool,
 }
+
+/// Legacy name the OpenRouter `UserOrKeyResolver` stores its
+/// lazy-minted plaintext key under.  Predates BYOK; kept distinct so
+/// the BYOK row (`byok_openrouter`) can coexist and short-circuit the
+/// mint path when set.
+const LEGACY_OR_MINT_NAME: &str = "openrouter_key";
 
 /// `GET /v1/byok` row.
 #[derive(Debug, Serialize)]
@@ -74,11 +88,14 @@ async fn list_providers(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let mut byok_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut has_or_minted = false;
     for name in names {
         if name == BYO_BLOB_NAME {
             byok_set.insert("byo".into());
         } else if let Some(stripped) = name.strip_prefix("byok_") {
             byok_set.insert(stripped.to_owned());
+        } else if name == LEGACY_OR_MINT_NAME {
+            has_or_minted = true;
         }
     }
 
@@ -94,6 +111,7 @@ async fn list_providers(
                 .and_then(|p| p.api_key.as_ref())
                 .is_some(),
             supports_byo: *name == "byo",
+            has_or_minted: *name == "openrouter" && has_or_minted,
         })
         .collect();
     rows.sort_by(|a, b| a.name.cmp(&b.name));

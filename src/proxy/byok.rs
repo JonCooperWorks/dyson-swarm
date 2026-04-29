@@ -1,20 +1,35 @@
 //! BYOK key resolution for the LLM proxy.
 //!
-//! The lookup is layered, fail-closed at the bottom:
+//! Policy (see `byok.md`):
 //!
-//! 1. **`byo`** is a special shape — the user supplies *both* an upstream
-//!    URL and a key, stored as a JSON blob under `byok_byo`.  No fallback;
-//!    if the user hasn't configured one, `/llm/byo/*` 503s.
-//! 2. **BYOK** — `byok_<provider>` row in `user_secrets`, sealed under the
-//!    user's age key.  Wins for every provider (including `openrouter`).
-//! 3. **OpenRouter lazy-mint** — legacy Stage-6 path.  Only fires when no
-//!    `byok_openrouter` is set *and* swarm has a Provisioning client
-//!    configured.  Mints a per-user OR key on first call and caches it.
-//! 4. **Platform key** — `[providers.<name>].api_key` from TOML.
-//! 5. **None of the above** → `NoKey`, mapped to 503 by the handler.
+//! - **OpenRouter is the only provider where the operator backstops
+//!   spend.**  Its API is reseller-shaped (per-user keys + USD caps via
+//!   the Provisioning API) so the operator can safely lazy-mint a
+//!   capped key on first use.
+//! - **Every other provider is BYOK-or-503.**  No platform fallback;
+//!   if the user hasn't pasted a key, the call fails closed rather
+//!   than silently spending against the operator's account on an API
+//!   that has no per-user spending controls.
 //!
-//! The resolver tags each result with [`KeySource`] so the audit row can
-//! attribute spend correctly (BYOK pays the user; platform pays ops).
+//! Resolution chain:
+//!
+//! 1. **`byo`** — JSON blob under `byok_byo` carrying both upstream
+//!    URL and key.  No fallback; missing → 503.
+//! 2. **BYOK** — `byok_<provider>` row in `user_secrets`, sealed
+//!    under the user's age key.  Wins for every provider (including
+//!    `openrouter`).
+//! 3. **OpenRouter lazy-mint** — legacy Stage-6 path.  Only fires
+//!    when no `byok_openrouter` is set *and* swarm has a Provisioning
+//!    client configured.  Mints a per-user OR key on first call and
+//!    caches it under `user_secrets["openrouter_key"]`.
+//! 4. **Anything else** → `NoKey`, mapped to 503.  The
+//!    `[providers.<name>].api_key` TOML field is ignored for non-OR
+//!    providers; it stays parseable for back-compat but never reaches
+//!    an upstream.
+//!
+//! The resolver tags each result with [`KeySource`] so the audit row
+//! can attribute spend correctly: BYOK pays the user, OrMinted pays
+//! the operator (capped per-user via OR).
 
 use serde::{Deserialize, Serialize};
 
@@ -126,7 +141,9 @@ pub async fn resolve(
         }
     }
 
-    // 3. OpenRouter lazy-mint, only when no BYOK is set.
+    // 3. OpenRouter lazy-mint, only when no BYOK is set.  OR is the
+    //    sole provider where the operator backstops spend, because
+    //    its Provisioning API gives us per-user keys with USD caps.
     if provider == "openrouter" {
         if let Some(resolver) = state.user_or_keys.as_ref() {
             let key = resolver
@@ -146,16 +163,17 @@ pub async fn resolve(
         return Err(ResolveError::NoKey);
     }
 
-    // 4. Platform fallback.
-    let cfg = state
-        .provider_config(provider)
-        .ok_or_else(|| ResolveError::UnknownProvider(provider.to_string()))?;
-    let key = cfg.api_key.ok_or(ResolveError::NoKey)?;
-    Ok(ResolvedKey {
-        key,
-        upstream_override: None,
-        source: KeySource::Platform,
-    })
+    // 4. Every other provider: BYOK-only.  Their APIs aren't
+    //    reseller-shaped — there's no per-user spend cap we can
+    //    enforce without the user's own account, so silently using
+    //    `[providers.<name>].api_key` would mean unbounded operator
+    //    spend.  Fail closed and let the SPA prompt for BYOK.  The
+    //    TOML field is still parseable (for back-compat with
+    //    deployments mid-migration) but never reaches an upstream.
+    if state.provider_config(provider).is_none() {
+        return Err(ResolveError::UnknownProvider(provider.to_string()));
+    }
+    Err(ResolveError::NoKey)
 }
 
 #[cfg(test)]

@@ -241,7 +241,8 @@ async fn full_walkthrough() {
             providers,
             default_policy,
         )
-        .unwrap(),
+        .unwrap()
+        .with_user_secrets(user_secrets_svc.clone()),
     );
     let llm_router_inner = proxy::http::router(proxy_svc);
 
@@ -249,8 +250,16 @@ async fn full_walkthrough() {
     let users_store: Arc<dyn dyson_swarm::traits::UserStore> = Arc::new(
         dyson_swarm::db::users::SqlxUserStore::new(pool.clone(), cipher_dir.clone()),
     );
-    let (user_auth, _user_id) =
+    let (user_auth, user_id) =
         dyson_swarm::auth::user::fixed_user_auth(users_store.clone(), "alice").await;
+    // Stage 7: non-OR providers are BYOK-or-503.  This e2e exercises
+    // a streaming `/llm/openai/...` call after a snapshot+restore;
+    // pre-seed a BYOK row on alice so resolve() succeeds and the
+    // upstream actually receives the swapped Authorization header.
+    user_secrets_svc
+        .put(&user_id, "byok_openai", b"sk-real")
+        .await
+        .expect("seed byok_openai for e2e");
     let app_state = http::AppState {
         secrets: secrets_svc,
         user_secrets: user_secrets_svc,

@@ -117,61 +117,18 @@
   flex-direction: column;
 }
 
-/* Mobile-only hamburger that pops the rail open.  Hidden on desktop;
-   the rail is permanently visible there. */
-.rail-toggle {
-  display: none;
-  align-self: flex-start;
-  background: var(--bg-2);
-  color: var(--fg);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 6px 10px;
-  font-size: 13px;
-  cursor: pointer;
-}
-
-/* Backdrop behind the slide-out rail on mobile.  Click closes. */
-.rail-scrim {
-  display: none;
-}
-
+/* Mobile collapses to one pane at a time.  The mode class on
+   .instances-pane (set by the JSX based on selection + roster size)
+   decides which pane occupies the viewport; the other is hidden.
+   Desktop ignores these classes and shows both side-by-side. */
 @media (max-width: 720px) {
   .instances-pane {
     grid-template-columns: 1fr;
   }
-  .left-rail {
-    position: fixed;
-    top: 0;
-    left: 0;
-    bottom: 0;
-    width: min(82vw, 320px);
-    z-index: 30;
-    transform: translateX(-100%);
-    transition: transform 180ms ease;
-    box-shadow: 2px 0 12px rgba(0, 0, 0, 0.4);
-  }
-  .instances-pane.rail-open .left-rail {
-    transform: translateX(0);
-  }
-  .rail-scrim {
-    display: block;
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.45);
-    z-index: 20;
-    opacity: 0;
-    pointer-events: none;
-    transition: opacity 180ms ease;
-  }
-  .instances-pane.rail-open .rail-scrim {
-    opacity: 1;
-    pointer-events: auto;
-  }
-  .rail-toggle {
-    display: inline-flex;
-    align-items: center;
-    margin-bottom: 8px;
+  .instances-pane.mobile-list .detail-pane,
+  .instances-pane.mobile-empty .left-rail,
+  .instances-pane.mobile-detail .left-rail {
+    display: none;
   }
 }
 

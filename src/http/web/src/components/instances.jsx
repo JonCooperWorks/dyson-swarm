@@ -1,10 +1,13 @@
 /* swarm — Instances view (list + detail + create modal).
  *
- * Two-pane layout: left rail lists every instance the caller owns,
- * the right pane shows whichever id the URL hash names.  Hash routing
- * keeps deep-links stable across IdP redirects (the OIDC return URL
- * is always `/`, so the hash is the only thing the IdP doesn't
- * mangle).
+ * Desktop is a two-pane layout: a left rail lists every instance the
+ * caller owns, and the right pane shows whichever id the URL hash
+ * names.  Mobile collapses to one pane at a time — the list is the
+ * page when nothing's selected, the detail pane takes over when a
+ * row is picked, and the empty hero shows on a brand-new account.
+ * Hash routing keeps deep-links stable across IdP redirects (the
+ * OIDC return URL is always `/`, so the hash is the only thing the
+ * IdP doesn't mangle).
  */
 
 import React from 'react';
@@ -33,13 +36,7 @@ export function InstancesView({ view }) {
     selectInstance(selectedId);
   }, [selectedId]);
 
-  // Mobile: rail is a slide-in drawer.  Desktop CSS pins it open and
-  // ignores this state.  Auto-close whenever the URL hash advances —
-  // tapping a row navigates and the drawer should get out of the way.
-  const [sidebarOpen, setSidebarOpen] = React.useState(false);
-  React.useEffect(() => {
-    setSidebarOpen(false);
-  }, [selectedId]);
+  const totalInstances = useAppState(s => s.instances.order.length);
 
   // "New" is a dedicated page (#/new) rather than a modal — gives the
   // configuration surface room to breathe (advanced options, future
@@ -47,30 +44,26 @@ export function InstancesView({ view }) {
   // detail pane's hero CTA navigate there.
   const goNew = () => { window.location.hash = '#/new'; };
 
+  // Mobile is single-pane: the list IS the page when nothing's
+  // selected (and the roster has anyone in it), the detail pane takes
+  // over when a row is picked, and the empty hero shows on a brand-new
+  // account.  CSS hides the off-mode pane via these mode classes.
+  // Desktop ignores the classes and renders both panes side-by-side.
+  const mobileMode = selectedId
+    ? 'detail'
+    : (totalInstances > 0 ? 'list' : 'empty');
+
   return (
-    <div className={`instances-pane ${sidebarOpen ? 'rail-open' : ''}`}>
-      <InstanceList
-        selectedId={selectedId}
-        onNavigate={() => setSidebarOpen(false)}
-        onNew={goNew}
-      />
-      <div
-        className="rail-scrim"
-        onClick={() => setSidebarOpen(false)}
-        aria-hidden="true"
-      />
-      <InstanceDetail
-        id={selectedId}
-        onOpenSidebar={() => setSidebarOpen(true)}
-        onNew={goNew}
-      />
+    <div className={`instances-pane mobile-${mobileMode}`}>
+      <InstanceList selectedId={selectedId} onNew={goNew}/>
+      <InstanceDetail id={selectedId} onNew={goNew}/>
     </div>
   );
 }
 
 // ─── List ─────────────────────────────────────────────────────────
 
-function InstanceList({ selectedId, onNavigate, onNew }) {
+function InstanceList({ selectedId, onNew }) {
   const { client } = useApi();
   const { byId, order } = useAppState(s => s.instances);
   const [refreshing, setRefreshing] = React.useState(false);
@@ -116,7 +109,7 @@ function InstanceList({ selectedId, onNavigate, onNew }) {
           const label = row.name && row.name.trim() ? row.name : '(unnamed)';
           return (
             <li key={id} className={`rail-row ${selectedId === id ? 'selected' : ''}`}>
-              <a href={`#/i/${encodeURIComponent(id)}`} onClick={() => onNavigate && onNavigate()}>
+              <a href={`#/i/${encodeURIComponent(id)}`}>
                 <div className="rail-row-name">{label}</div>
                 <div className="rail-row-id muted small">{shortId(id)}</div>
                 <div className="rail-row-meta">
@@ -1138,7 +1131,7 @@ function KvField({ label, value }) {
 
 // ─── Detail ───────────────────────────────────────────────────────
 
-function InstanceDetail({ id, onOpenSidebar, onNew }) {
+function InstanceDetail({ id, onNew }) {
   const { client } = useApi();
   const row = useAppState(s => (id ? s.instances.byId[id] : null));
   const totalInstances = useAppState(s => s.instances.order.length);
@@ -1193,14 +1186,12 @@ function InstanceDetail({ id, onOpenSidebar, onNew }) {
 
   if (!id) return (
     <EmptyDetail
-      onOpenSidebar={onOpenSidebar}
       onNew={onNew}
       hasInstances={totalInstances > 0}
     />
   );
   if (!row) return (
     <main className="detail-pane">
-      <MobileRailToggle onOpenSidebar={onOpenSidebar}/>
       <p className="muted">loading…</p>
     </main>
   );
@@ -1250,7 +1241,6 @@ function InstanceDetail({ id, onOpenSidebar, onNew }) {
 
   return (
     <main className="detail-pane">
-      <MobileRailToggle onOpenSidebar={onOpenSidebar}/>
       <header className="detail-header">
         <div className="employee-card">
           <h2 className="employee-name">{displayName}</h2>
@@ -1525,10 +1515,9 @@ function EditInstanceForm({ instance, backHref, formId }) {
   );
 }
 
-function EmptyDetail({ onOpenSidebar, onNew, hasInstances }) {
+function EmptyDetail({ onNew, hasInstances }) {
   return (
     <main className="detail-pane detail-empty">
-      <MobileRailToggle onOpenSidebar={onOpenSidebar}/>
       <div className="empty-hero">
         <DysonSphereGlyph/>
         {hasInstances ? (
@@ -1590,22 +1579,6 @@ function DysonSphereGlyph() {
         <circle cx="60" cy="60" r="6" fill="var(--accent)"/>
       </svg>
     </div>
-  );
-}
-
-// Hamburger that's only visible on mobile (CSS-gated).  Lives at the
-// top of the detail pane so the user can pop the rail open without
-// hunting for it; desktop layouts ignore the button entirely.
-function MobileRailToggle({ onOpenSidebar }) {
-  return (
-    <button
-      type="button"
-      className="rail-toggle"
-      onClick={() => onOpenSidebar && onOpenSidebar()}
-      aria-label="show instances list"
-    >
-      ☰ roster
-    </button>
   );
 }
 

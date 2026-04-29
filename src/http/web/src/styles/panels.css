@@ -9,10 +9,9 @@
 /* ── Top bar ────────────────────────────────────────────────────── */
 
 .topbar {
-  display: grid;
-  grid-template-columns: auto 1fr auto;
+  display: flex;
   align-items: center;
-  gap: 16px;
+  gap: 12px;
   padding: 8px 16px;
   border-bottom: 1px solid var(--border);
   background: var(--bg-1);
@@ -21,17 +20,14 @@
   font-family: var(--mono);
   font-weight: 600;
   font-size: 16px;
-}
-.topbar-view {
-  font-family: var(--mono);
-  font-size: 12px;
-  color: var(--fg-faint);
-  margin-left: 8px;
+  flex-shrink: 0;
 }
 .topbar-nav {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-width: 0;
 }
 .topbar-nav a {
   color: var(--fg-muted);
@@ -42,7 +38,11 @@
 }
 .topbar-nav a:hover { background: var(--bg-2); color: var(--fg); }
 .topbar-nav a.active { color: var(--fg); background: var(--bg-2); }
-.topbar-actions { display: flex; gap: 8px; }
+.topbar-actions { display: flex; gap: 8px; flex-shrink: 0; }
+@media (max-width: 480px) {
+  .topbar { padding: 6px 10px; gap: 8px; }
+  .topbar-nav a { padding: 4px 6px; font-size: 12px; }
+}
 
 /* ── Admin view ────────────────────────────────────────────── */
 
@@ -218,6 +218,11 @@
   flex-direction: column;
   gap: 16px;
 }
+@media (max-width: 720px) {
+  .detail-pane { padding: 12px 14px; gap: 12px; }
+  .page { padding: 16px 14px 64px; }
+  .page-section { padding: 12px; gap: 10px; }
+}
 .detail-empty {
   align-items: center;
   justify-content: center;
@@ -294,6 +299,7 @@
   align-items: flex-start;
   justify-content: space-between;
   gap: 16px;
+  flex-wrap: wrap;
 }
 .detail-id {
   font-family: var(--mono);
@@ -301,8 +307,58 @@
   font-size: 18px;
   margin: 0 0 4px;
 }
-.detail-sub { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.detail-actions { display: flex; gap: 8px; flex-shrink: 0; }
+.detail-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+}
+.detail-template {
+  margin-top: 4px;
+  font-size: 12px;
+}
+.detail-template code {
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 1px 5px;
+  background: var(--bg-2);
+  border-radius: 3px;
+}
+.detail-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+@media (max-width: 720px) {
+  .detail-header {
+    flex-direction: column;
+  }
+  .detail-actions {
+    width: 100%;
+  }
+  .detail-actions .btn { flex: 1 1 auto; min-width: 0; }
+}
+
+/* Compact tap-to-copy id pill — used in place of a raw 36-char UUID
+ * line in the detail header.  Looks like a badge, behaves like a
+ * button. */
+.id-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 1px 8px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: pointer;
+  font-family: inherit;
+  color: var(--fg-muted);
+}
+.id-chip:hover { color: var(--fg); border-color: var(--accent); }
+.id-chip code { font-size: 11px; }
+.id-chip-action { font-size: 10px; }
 
 /* ── Employee card (detail header) ─────────────────────────── */
 
@@ -434,7 +490,7 @@
 
 .kvrow {
   display: grid;
-  grid-template-columns: 140px 1fr;
+  grid-template-columns: 110px minmax(0, 1fr);
   gap: 8px;
   padding: 4px 0;
   font-size: 13px;
@@ -442,6 +498,12 @@
 }
 .kvrow:last-child { border-bottom: none; }
 .kvrow-label { color: var(--fg-muted); }
+.kvrow-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .kvrow-value code {
   font-family: var(--mono);
   font-size: 12px;

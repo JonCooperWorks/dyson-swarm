@@ -24,23 +24,12 @@ export function TopBar({ view }) {
         {auth.isAdmin ? (
           <a className={onAdminRoute ? 'active' : ''} href="#/admin">admin</a>
         ) : null}
-        <span className="topbar-view">· {viewLabel(view)}</span>
       </nav>
       <div className="topbar-actions">
         {auth.mode === 'oidc' ? (
-          <button className="btn btn-ghost" onClick={auth.logout}>sign out</button>
+          <button className="btn btn-ghost btn-sm" onClick={auth.logout}>sign out</button>
         ) : null}
       </div>
     </header>
   );
-}
-
-function viewLabel(view) {
-  if (!view) return '';
-  switch (view.name) {
-    case 'instances': return 'instances';
-    case 'instance':  return `instances · ${view.id}`;
-    case 'admin':     return 'admin';
-    default:          return '';
-  }
 }

@@ -113,7 +113,7 @@ function InstanceList({ selectedId, onNavigate, onNew }) {
           <li className="rail-empty muted small">your roster's empty — hire one →</li>
         ) : order.map(id => {
           const row = byId[id];
-          const label = row.name && row.name.trim() ? row.name : `(unnamed) ${shortId(id)}`;
+          const label = row.name && row.name.trim() ? row.name : '(unnamed)';
           return (
             <li key={id} className={`rail-row ${selectedId === id ? 'selected' : ''}`}>
               <a href={`#/i/${encodeURIComponent(id)}`} onClick={() => onNavigate && onNavigate()}>
@@ -139,6 +139,51 @@ function StatusBadge({ status }) {
             : 'warn';
   return <span className={`badge badge-${cls}`}>{status}</span>;
 }
+
+// Compact id presentation: shortened by default, click-to-copy.  The
+// raw UUID is bulky and steals horizontal space on mobile; the chip
+// keeps the affordance ("yes this row has an id") without dominating
+// the layout, and a tap copies the full value to the clipboard.
+function IdChip({ id }) {
+  const [copied, setCopied] = React.useState(false);
+  if (!id) return null;
+  const onClick = async (e) => {
+    e.preventDefault();
+    try {
+      await navigator.clipboard.writeText(id);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1100);
+    } catch { /* ignore */ }
+  };
+  return (
+    <button
+      type="button"
+      className="id-chip"
+      onClick={onClick}
+      title={copied ? 'copied!' : `${id} — tap to copy`}
+    >
+      <code className="mono-sm">{shortId(id)}</code>
+      <span className="id-chip-action muted small">{copied ? '✓' : 'copy'}</span>
+    </button>
+  );
+}
+
+// Memoised markdown render so non-task state changes (busy, error,
+// timer ticks) don't pay the parse+render cost on every re-render.
+// Mobile devices bear the brunt of this — remark-gfm + remark-breaks
+// are surprisingly expensive on a 6-paragraph task.
+const TaskProse = React.memo(function TaskProse({ markdown }) {
+  return (
+    <div className="task-prose">
+      <ReactMarkdown
+        remarkPlugins={TASK_MARKDOWN_PLUGINS}
+        components={TASK_MARKDOWN_COMPONENTS}
+      >
+        {markdown}
+      </ReactMarkdown>
+    </div>
+  );
+});
 
 // ─── New instance — dedicated page ─────────────────────────────────
 //
@@ -291,8 +336,8 @@ function NewInstanceForm() {
             className="textarea"
             value={task}
             onChange={e => setTask(e.target.value)}
-            placeholder="What this employee does, in prose. Example:\n\nWatch for new PRs in github.com/foo/bar. Comment with style-guide violations and link to the relevant section. Don't approve or merge."
-            rows={8}
+            placeholder={`What this employee does, in prose.\n\nExample: Watch for new PRs in github.com/foo/bar. Comment with style-guide violations and link to the relevant section. Don't approve or merge.`}
+            rows={6}
           />
           <span className="hint muted small">
             The agent reads this on first boot as <code>SWARM_TASK</code>.
@@ -754,14 +799,26 @@ function InstanceDetail({ id, onOpenSidebar, onNew }) {
     link.crossOrigin = 'use-credentials';
     document.head.appendChild(link);
 
+    // Defer the no-cors round-trip off the critical path.  On mobile
+    // the TLS handshake against a cold subdomain can fight the actual
+    // page render for the radio; we want first paint first, warm-up
+    // second.  requestIdleCallback when available, otherwise a small
+    // timeout so we still warm before the user's likely first tap.
     const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), 20_000);
-    fetch(openUrl, { mode: 'no-cors', credentials: 'include', signal: ctrl.signal })
-      .catch(() => { /* expected for cold cert / network blips */ })
-      .finally(() => clearTimeout(t));
+    let t;
+    const schedule = window.requestIdleCallback
+      || ((cb) => setTimeout(cb, 600));
+    const cancel = window.cancelIdleCallback || clearTimeout;
+    const handle = schedule(() => {
+      t = setTimeout(() => ctrl.abort(), 20_000);
+      fetch(openUrl, { mode: 'no-cors', credentials: 'include', signal: ctrl.signal })
+        .catch(() => { /* expected for cold cert / network blips */ })
+        .finally(() => clearTimeout(t));
+    }, { timeout: 4000 });
 
     return () => {
-      clearTimeout(t);
+      cancel(handle);
+      if (t) clearTimeout(t);
       ctrl.abort();
       link.remove();
     };
@@ -830,26 +887,21 @@ function InstanceDetail({ id, onOpenSidebar, onNew }) {
       <header className="detail-header">
         <div className="employee-card">
           <h2 className="employee-name">{displayName}</h2>
-          <div className="detail-sub muted small">
-            <code className="mono-sm">{row.id}</code> ·{' '}
-            <StatusBadge status={row.status}/>{' '}
+          <div className="detail-meta">
+            <StatusBadge status={row.status}/>
+            <NetworkPolicyBadge instance={row}/>
             {row.pinned ? <span className="badge badge-info">pinned</span> : null}
-            {' · '}template <code>{row.template_id}</code>
-            {' · '}<NetworkPolicyBadge instance={row}/>
+            <IdChip id={row.id}/>
+          </div>
+          <div className="detail-template muted small">
+            template <code className="mono-sm">{row.template_id}</code>
           </div>
           <div className="employee-task">
             {row.task && row.task.trim() ? (
-              <div className="task-prose">
-                <ReactMarkdown
-                  remarkPlugins={TASK_MARKDOWN_PLUGINS}
-                  components={TASK_MARKDOWN_COMPONENTS}
-                >
-                  {row.task}
-                </ReactMarkdown>
-              </div>
+              <TaskProse markdown={row.task}/>
             ) : (
               <p className="muted small">
-                no task description — click <em>edit</em> to write one.
+                no task description — tap <em>edit</em> to write one.
               </p>
             )}
           </div>
@@ -1070,7 +1122,7 @@ function MobileRailToggle({ onOpenSidebar }) {
       onClick={() => onOpenSidebar && onOpenSidebar()}
       aria-label="show instances list"
     >
-      ☰ instances
+      ☰ roster
     </button>
   );
 }
@@ -1079,7 +1131,9 @@ function KvRow({ label, value }) {
   return (
     <div className="kvrow">
       <div className="kvrow-label">{label}</div>
-      <div className="kvrow-value"><code>{value}</code></div>
+      <div className="kvrow-value" title={typeof value === 'string' ? value : undefined}>
+        <code>{value}</code>
+      </div>
     </div>
   );
 }
@@ -1379,7 +1433,7 @@ function NetworkPolicyBadge({ instance }) {
   const title = lines.length ? lines.join('\n') : `network: ${label}`;
   const cls = kind === 'airgap' || kind === 'allowlist'
     ? 'badge-warn' : kind === 'denylist' ? 'badge-info' : 'badge-ok';
-  return <span className={`badge ${cls}`} title={title}>net: {label}</span>;
+  return <span className={`badge ${cls}`} title={title}>{label}</span>;
 }
 
 function NetworkPolicyPanel({ instance, disabled }) {

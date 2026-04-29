@@ -48,6 +48,7 @@ fn row_to_instance(row: &sqlx::sqlite::SqliteRow) -> Result<InstanceRow, StoreEr
         last_probe_status,
         created_at: row.try_get("created_at").map_err(map_sqlx)?,
         destroyed_at: row.try_get("destroyed_at").map_err(map_sqlx)?,
+        rotated_to: row.try_get("rotated_to").map_err(map_sqlx)?,
     })
 }
 
@@ -62,8 +63,8 @@ impl InstanceStore for SqlxInstanceStore {
             "INSERT INTO instances \
              (id, owner_id, name, task, cube_sandbox_id, template_id, status, bearer_token, \
               pinned, expires_at, last_active_at, last_probe_at, last_probe_status, \
-              created_at, destroyed_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              created_at, destroyed_at, rotated_to) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&row.id)
         .bind(&row.owner_id)
@@ -80,6 +81,7 @@ impl InstanceStore for SqlxInstanceStore {
         .bind(probe_json)
         .bind(row.created_at)
         .bind(row.destroyed_at)
+        .bind(&row.rotated_to)
         .execute(&self.pool)
         .await
         .map_err(map_sqlx)?;
@@ -255,6 +257,19 @@ impl InstanceStore for SqlxInstanceStore {
         Ok(())
     }
 
+    async fn set_rotated_to(&self, id: &str, target_id: &str) -> Result<(), StoreError> {
+        let result = sqlx::query("UPDATE instances SET rotated_to = ? WHERE id = ?")
+            .bind(target_id)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+        if result.rows_affected() == 0 {
+            return Err(StoreError::NotFound);
+        }
+        Ok(())
+    }
+
     async fn expired(&self, now: i64) -> Result<Vec<InstanceRow>, StoreError> {
         let rows = sqlx::query(
             "SELECT * FROM instances \
@@ -293,6 +308,7 @@ mod tests {
             last_probe_status: None,
             created_at: 50,
             destroyed_at: None,
+            rotated_to: None,
         }
     }
 

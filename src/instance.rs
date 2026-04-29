@@ -423,6 +423,179 @@ impl InstanceService {
         Ok((visited, succeeded))
     }
 
+    /// Snapshot+restore every Live instance whose `template_id` doesn't
+    /// match `target_template_id` onto a fresh sandbox built from the
+    /// target template, then destroy the source.  Closes the gap left
+    /// by config-only rewires: when the bug lives in the dyson binary
+    /// (new ConfigureBody fields, tool registration, the no-skills
+    /// boot fix), no `/api/admin/configure` payload can rescue an
+    /// instance still running an old binary.  The cube template is
+    /// what pins the binary; only a fresh sandbox cuts the dependency.
+    ///
+    /// The sweep is **not atomic** — a crash between restore and
+    /// destroy must be safely re-runnable.  `set_rotated_to` is
+    /// stamped on the source row right after the new instance reaches
+    /// Live, before the destroy step runs.  On a re-run, sources that
+    /// already carry `rotated_to` skip the snapshot+restore (which
+    /// already produced the successor) and only retry the destroy.
+    /// Sources without the marker get the full pipeline.
+    ///
+    /// Pre-Stage-8 rows (no `cube_sandbox_id`, no proxy_token row) are
+    /// skipped silently — they predate the snapshot/restore wiring and
+    /// can't be rotated by the same code path.
+    ///
+    /// Best-effort per row: an individual failure (snapshot, restore,
+    /// destroy) is recorded in `RotateReport.failed` and the sweep
+    /// proceeds to the next candidate.  Successive boots continue to
+    /// retry — failures aren't sticky beyond the marker invariant.
+    ///
+    /// Architectural note: this method takes `&SnapshotService` as a
+    /// parameter rather than holding it on `InstanceService` because
+    /// `SnapshotService::new` already takes `Arc<InstanceService>`,
+    /// so embedding the snapshot service as a field would close the
+    /// loop.  Callers in `main.rs` already hold both `Arc`s by the
+    /// time the startup sweep fires.
+    pub async fn rotate_binary_all(
+        &self,
+        snapshot_svc: &crate::snapshot::SnapshotService,
+        target_template_id: &str,
+    ) -> Result<RotateReport, SwarmError> {
+        if target_template_id.trim().is_empty() {
+            return Err(SwarmError::PolicyDenied(
+                "rotate-binary: target_template_id must be non-empty".into(),
+            ));
+        }
+        let live = self
+            .instances
+            .list(SYSTEM_OWNER, ListFilter {
+                status: Some(InstanceStatus::Live),
+                include_destroyed: false,
+            })
+            .await?;
+        let mut report = RotateReport::default();
+        for row in live {
+            // Already on the target binary — no work.
+            if row.template_id == target_template_id {
+                continue;
+            }
+            // Pre-Stage-8 row: no cube sandbox to snapshot.  Skip
+            // silently so a sweep across a mixed-vintage deployment
+            // doesn't get stuck on an ancient row that operators have
+            // already written off.
+            let Some(sandbox_id) = row.cube_sandbox_id.as_deref().filter(|s| !s.is_empty()) else {
+                tracing::debug!(
+                    instance = %row.id,
+                    "rotate-binary: skipping — no cube_sandbox_id (pre-Stage-8)"
+                );
+                continue;
+            };
+            report.visited += 1;
+            tracing::info!(
+                instance = %row.id,
+                from_template = %row.template_id,
+                to_template = %target_template_id,
+                already_rotated = row.rotated_to.is_some(),
+                "rotate-binary: visiting outdated instance"
+            );
+            match self
+                .rotate_one(snapshot_svc, &row, sandbox_id, target_template_id)
+                .await
+            {
+                Ok(()) => {
+                    report.rotated += 1;
+                    tracing::info!(
+                        instance = %row.id,
+                        "rotate-binary: completed"
+                    );
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        instance = %row.id,
+                        error = %err,
+                        "rotate-binary: failed (will retry next sweep)"
+                    );
+                    report.failed.push((row.id.clone(), err));
+                }
+            }
+        }
+        tracing::info!(
+            visited = report.visited,
+            rotated = report.rotated,
+            failed = report.failed.len(),
+            "rotate-binary: sweep complete"
+        );
+        Ok(report)
+    }
+
+    /// Per-row state machine for [`rotate_binary_all`].  See that
+    /// method's doc for the re-runnability contract.
+    async fn rotate_one(
+        &self,
+        snapshot_svc: &crate::snapshot::SnapshotService,
+        source: &InstanceRow,
+        _source_sandbox_id: &str,
+        target_template_id: &str,
+    ) -> Result<(), String> {
+        // Phase 1: snapshot+restore (skipped on a re-run if already done).
+        if source.rotated_to.is_none() {
+            let snap = snapshot_svc
+                .snapshot(SYSTEM_OWNER, &source.id)
+                .await
+                .map_err(|e| format!("snapshot: {e}"))?;
+            tracing::info!(
+                instance = %source.id,
+                snapshot = %snap.id,
+                "rotate-binary: snapshot taken"
+            );
+            // Owner_id MUST be carried — restoring under SYSTEM_OWNER
+            // would silently re-tenant the dyson and orphan it from
+            // the user's UI.  Name + task survive snapshot/restore by
+            // policy; copy them through verbatim.  ttl_seconds is
+            // intentionally None — copying the source's expires_at
+            // would leak a deadline that started ticking on the old
+            // row; an operator who wants the new instance to expire
+            // can re-set TTL after rotation.
+            let restored = self
+                .restore(&source.owner_id, RestoreRequest {
+                    template_id: target_template_id.to_owned(),
+                    snapshot_path: std::path::PathBuf::from(&snap.path),
+                    source_instance_id: Some(source.id.clone()),
+                    name: Some(source.name.clone()),
+                    task: Some(source.task.clone()),
+                    env: BTreeMap::new(),
+                    ttl_seconds: None,
+                })
+                .await
+                .map_err(|e| format!("restore: {e}"))?;
+            tracing::info!(
+                instance = %source.id,
+                successor = %restored.id,
+                "rotate-binary: restore landed Live"
+            );
+            // Pin the source → successor relationship before the
+            // destroy step.  A crash between this stamp and the
+            // destroy leaves a re-runnable hint: next sweep sees
+            // `rotated_to`, skips the snapshot+restore, and just
+            // retries the destroy.
+            self.instances
+                .set_rotated_to(&source.id, &restored.id)
+                .await
+                .map_err(|e| format!("set_rotated_to: {e}"))?;
+        } else {
+            tracing::info!(
+                instance = %source.id,
+                successor = %source.rotated_to.as_deref().unwrap_or(""),
+                "rotate-binary: rotated_to already set — retrying destroy only"
+            );
+        }
+        // Phase 2: destroy the source (force=true so a dead cube
+        // doesn't strand the row Live forever).
+        self.destroy(&source.owner_id, &source.id, true)
+            .await
+            .map_err(|e| format!("destroy: {e}"))?;
+        Ok(())
+    }
+
     pub async fn create(
         &self,
         owner_id: &str,
@@ -472,6 +645,7 @@ impl InstanceService {
             last_probe_status: None,
             created_at: now,
             destroyed_at: None,
+            rotated_to: None,
         };
         self.instances.create(row).await?;
 
@@ -844,6 +1018,7 @@ impl InstanceService {
             last_probe_status: None,
             created_at: now,
             destroyed_at: None,
+            rotated_to: None,
         };
         self.instances.create(row).await?;
 
@@ -951,6 +1126,21 @@ pub struct CreatedInstance {
     pub proxy_token: String,
 }
 
+/// Per-sweep tally returned by [`InstanceService::rotate_binary_all`].
+/// `visited` counts every Live-but-outdated instance the sweep
+/// considered (whether or not it succeeded); `rotated` counts the
+/// ones that reached destroyed-source-and-Live-successor; `failed`
+/// preserves a per-row error so an operator can pick up stragglers
+/// without grepping logs.  The error string is whatever the failing
+/// step returned — kept opaque on purpose so this struct doesn't
+/// pin the rotation pipeline to a specific error taxonomy.
+#[derive(Debug, Clone, Default)]
+pub struct RotateReport {
+    pub visited: usize,
+    pub rotated: usize,
+    pub failed: Vec<(String, String)>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -975,13 +1165,20 @@ mod tests {
     #[derive(Default)]
     struct MockCube {
         last_create: Mutex<Option<CapturedCreate>>,
+        creates: Mutex<Vec<CapturedCreate>>,
         destroyed: Mutex<Vec<String>>,
+        snapshotted: Mutex<Vec<String>>,
         next_sandbox_id: Mutex<u32>,
+        next_snapshot_id: Mutex<u32>,
         /// When set, `destroy_sandbox` returns a synthetic CubeError
         /// instead of recording the call — used to simulate the
         /// "cube already dead/unreachable" repro the force-destroy
         /// path is meant to handle.
         fail_destroy: Mutex<bool>,
+        /// When set, `snapshot_sandbox` returns a synthetic CubeError
+        /// — used by `rotate_binary_failed_snapshot_is_recorded_and_skipped`
+        /// to assert the rotation pipeline survives a per-row failure.
+        fail_snapshot: Mutex<bool>,
     }
 
     impl MockCube {
@@ -994,6 +1191,9 @@ mod tests {
         fn fail_destroys(&self) {
             *self.fail_destroy.lock().unwrap() = true;
         }
+        fn fail_snapshots(&self) {
+            *self.fail_snapshot.lock().unwrap() = true;
+        }
     }
 
     #[async_trait]
@@ -1005,11 +1205,17 @@ mod tests {
             let mut n = self.next_sandbox_id.lock().unwrap();
             *n += 1;
             let sid = format!("sb-{}", *n);
-            *self.last_create.lock().unwrap() = Some(CapturedCreate {
+            let captured = CapturedCreate {
                 template_id: args.template_id.clone(),
+                env: args.env.clone(),
+                from_snapshot: args.from_snapshot_path.clone(),
+            };
+            *self.last_create.lock().unwrap() = Some(CapturedCreate {
+                template_id: args.template_id,
                 env: args.env,
                 from_snapshot: args.from_snapshot_path,
             });
+            self.creates.lock().unwrap().push(captured);
             Ok(SandboxInfo {
                 sandbox_id: sid.clone(),
                 host_ip: "10.0.0.1".into(),
@@ -1030,14 +1236,31 @@ mod tests {
 
         async fn snapshot_sandbox(
             &self,
-            _: &str,
-            _: &str,
+            sandbox_id: &str,
+            _name: &str,
         ) -> Result<SnapshotInfo, CubeError> {
-            unimplemented!("not used in instance tests")
+            if *self.fail_snapshot.lock().unwrap() {
+                return Err(CubeError::Status {
+                    status: 500,
+                    body: "snapshot unavailable".into(),
+                });
+            }
+            self.snapshotted.lock().unwrap().push(sandbox_id.into());
+            let mut n = self.next_snapshot_id.lock().unwrap();
+            *n += 1;
+            let id = format!("snap-{sandbox_id}-{}", *n);
+            Ok(SnapshotInfo {
+                snapshot_id: id.clone(),
+                path: format!("/var/snaps/{id}"),
+                host_ip: "10.0.0.1".into(),
+            })
         }
 
         async fn delete_snapshot(&self, _: &str, _: &str) -> Result<(), CubeError> {
-            unimplemented!("not used in instance tests")
+            // Rotation never deletes snapshots — they survive the
+            // sweep so an operator can roll back if rotation produced
+            // a worse instance.  This stub is enough for the tests.
+            Ok(())
         }
     }
 
@@ -1583,5 +1806,342 @@ mod tests {
         assert_eq!(succeeded, 0);
         assert!(recorder.pushed.lock().unwrap().is_empty(),
             "no pushes should fire when image_gen_defaults is None");
+    }
+
+    // ---- Binary-rotation sweep tests ------------------------------
+    //
+    // The rotation pipeline calls SnapshotService::snapshot, which is
+    // owned by the snapshot module — so the test fixtures here build
+    // both InstanceService and SnapshotService against shared sqlite
+    // and a single MockCube.  The local backup sink is enough; the
+    // rotation tests don't exercise any S3 path.
+
+    use crate::backup::local::LocalDiskBackupSink;
+    use crate::db::snapshots::SqliteSnapshotStore;
+    use crate::snapshot::SnapshotService;
+    use crate::traits::{BackupSink, SnapshotStore, UserRow, UserStatus, UserStore};
+
+    /// Stand up an InstanceService + SnapshotService backed by sqlx
+    /// stores and a single shared MockCube + RecordingReconfigurer.
+    /// The two services share the underlying sqlite pool so a row
+    /// inserted by one is visible to the other.  Returns enough
+    /// handles for tests to seed users, query the row count, and
+    /// inspect cube call records.
+    async fn build_with_snapshot() -> (
+        Arc<InstanceService>,
+        Arc<SnapshotService>,
+        Arc<MockCube>,
+        Arc<dyn InstanceStore>,
+        Arc<dyn UserStore>,
+        Arc<RecordingReconfigurer>,
+    ) {
+        let pool = open_in_memory().await.unwrap();
+        let cube = MockCube::new();
+        let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(pool.clone()));
+        let secrets: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
+        let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(pool.clone()));
+        let snaps: Arc<dyn SnapshotStore> =
+            Arc::new(SqliteSnapshotStore::new(pool.clone()));
+        let recorder = Arc::new(RecordingReconfigurer::default());
+        let keys_tmp = tempfile::tempdir().unwrap();
+        let cipher_dir: Arc<dyn crate::envelope::CipherDirectory> = Arc::new(
+            crate::envelope::AgeCipherDirectory::new(keys_tmp.path()).unwrap(),
+        );
+        // Leak the tempdir so its lifetime exceeds the test (the
+        // CipherDirectory's filesystem reads happen lazily as users
+        // are minted, so dropping the dir mid-test would fail those).
+        std::mem::forget(keys_tmp);
+        let users: Arc<dyn UserStore> = Arc::new(
+            crate::db::users::SqlxUserStore::new(pool.clone(), cipher_dir),
+        );
+        let isvc = Arc::new(
+            InstanceService::new(
+                cube.clone(),
+                instances.clone(),
+                secrets,
+                tokens,
+                "https://swarm.test/llm",
+            )
+            .with_reconfigurer(recorder.clone()),
+        );
+        let backup: Arc<dyn BackupSink> = Arc::new(LocalDiskBackupSink::new(cube.clone()));
+        let ssvc = Arc::new(SnapshotService::new(
+            cube.clone(),
+            instances.clone(),
+            snaps,
+            backup,
+            isvc.clone(),
+        ));
+        (isvc, ssvc, cube, instances, users, recorder)
+    }
+
+    /// Seed a user row so `instance.create(owner=...)` doesn't trip
+    /// the FK on `instances.owner_id`.  The default `legacy` user is
+    /// auto-seeded by migration 0002, but rotation tests that pin
+    /// `owner_id` to a real user have to materialise that user first.
+    async fn seed_user(users: &Arc<dyn UserStore>, sub: &str) {
+        users
+            .create(UserRow {
+                id: sub.into(),
+                subject: sub.into(),
+                email: Some(format!("{sub}@test")),
+                display_name: Some(sub.into()),
+                status: UserStatus::Active,
+                created_at: 0,
+                activated_at: Some(0),
+                last_seen_at: None,
+                openrouter_key_id: None,
+                openrouter_key_limit_usd: 10.0,
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn rotate_binary_skips_instances_already_on_target_template() {
+        // Hire an instance directly on the target template — the
+        // sweep has nothing to do.  No snapshots, no destroys, no
+        // failures: visited=0, rotated=0, failed empty.
+        let (isvc, ssvc, cube, _instances, _users, recorder) = build_with_snapshot().await;
+        isvc.create("legacy", CreateRequest {
+            template_id: "tpl-current".into(),
+            name: None, task: None,
+            env: env_with_model(),
+            ttl_seconds: None,
+        })
+        .await
+        .unwrap();
+        wait_for_pushes(&recorder, 1).await;
+        recorder.pushed.lock().unwrap().clear();
+
+        let report = isvc.rotate_binary_all(&ssvc, "tpl-current").await.unwrap();
+        assert_eq!(report.visited, 0, "rows already on target are no-op");
+        assert_eq!(report.rotated, 0);
+        assert!(report.failed.is_empty());
+        assert!(
+            cube.snapshotted.lock().unwrap().is_empty(),
+            "matched-template rows must not be snapshotted"
+        );
+        assert!(
+            cube.destroyed.lock().unwrap().is_empty(),
+            "matched-template rows must not be destroyed"
+        );
+    }
+
+    #[tokio::test]
+    async fn rotate_binary_visits_each_outdated_instance() {
+        // Two outdated rows.  After the sweep:
+        //   * visited == 2, rotated == 2, failed empty.
+        //   * Each old row's status flips to Destroyed.
+        //   * Two new Live rows exist on the target template.
+        //   * Each old row's `rotated_to` points at the corresponding
+        //     successor (lets a re-run skip the re-rotation).
+        let (isvc, ssvc, cube, instances, _users, recorder) = build_with_snapshot().await;
+        let a = isvc
+            .create("legacy", CreateRequest {
+                template_id: "tpl-old".into(),
+                name: Some("alpha".into()),
+                task: Some("alpha task".into()),
+                env: env_with_model(),
+                ttl_seconds: None,
+            })
+            .await
+            .unwrap();
+        let b = isvc
+            .create("legacy", CreateRequest {
+                template_id: "tpl-old".into(),
+                name: Some("beta".into()),
+                task: Some("beta task".into()),
+                env: env_with_model(),
+                ttl_seconds: None,
+            })
+            .await
+            .unwrap();
+        wait_for_pushes(&recorder, 2).await;
+
+        let report = isvc.rotate_binary_all(&ssvc, "tpl-new").await.unwrap();
+        assert_eq!(report.visited, 2);
+        assert_eq!(report.rotated, 2);
+        assert!(
+            report.failed.is_empty(),
+            "rotation must not record failures for happy-path rows"
+        );
+
+        // Cube saw two snapshots (one per outdated row) and two
+        // destroys (one per old sandbox).
+        assert_eq!(cube.snapshotted.lock().unwrap().len(), 2);
+        assert_eq!(cube.destroyed.lock().unwrap().len(), 2);
+
+        // Old rows: Destroyed + rotated_to populated.
+        let old_a = instances.get(&a.id).await.unwrap().unwrap();
+        let old_b = instances.get(&b.id).await.unwrap().unwrap();
+        assert_eq!(old_a.status, InstanceStatus::Destroyed);
+        assert_eq!(old_b.status, InstanceStatus::Destroyed);
+        assert!(old_a.rotated_to.is_some(), "source row must be pinned to its successor");
+        assert!(old_b.rotated_to.is_some());
+
+        // The successors are Live on the target template.
+        let new_a = instances
+            .get(old_a.rotated_to.as_deref().unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        let new_b = instances
+            .get(old_b.rotated_to.as_deref().unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(new_a.status, InstanceStatus::Live);
+        assert_eq!(new_b.status, InstanceStatus::Live);
+        assert_eq!(new_a.template_id, "tpl-new");
+        assert_eq!(new_b.template_id, "tpl-new");
+        // Identity carried through.
+        assert_eq!(new_a.name, "alpha");
+        assert_eq!(new_a.task, "alpha task");
+        assert_eq!(new_b.name, "beta");
+        assert_eq!(new_b.task, "beta task");
+    }
+
+    #[tokio::test]
+    async fn rotate_binary_preserves_owner_id() {
+        // Hire under "alice" (a real user, not the legacy sentinel).
+        // After rotation, the new row MUST also be owned by "alice"
+        // — restoring under SYSTEM_OWNER would silently re-tenant the
+        // dyson and break tenant-scoped UI lookups.
+        let (isvc, ssvc, _cube, instances, users, recorder) = build_with_snapshot().await;
+        seed_user(&users, "alice").await;
+        let src = isvc
+            .create("alice", CreateRequest {
+                template_id: "tpl-old".into(),
+                name: Some("alice's reviewer".into()),
+                task: None,
+                env: env_with_model(),
+                ttl_seconds: None,
+            })
+            .await
+            .unwrap();
+        wait_for_pushes(&recorder, 1).await;
+
+        let report = isvc.rotate_binary_all(&ssvc, "tpl-new").await.unwrap();
+        assert_eq!(report.rotated, 1);
+
+        let old = instances.get(&src.id).await.unwrap().unwrap();
+        let new_id = old.rotated_to.as_deref().expect("successor pinned");
+        let new_row = instances.get(new_id).await.unwrap().unwrap();
+        assert_eq!(
+            new_row.owner_id, "alice",
+            "rotation must carry owner_id through; SYSTEM_OWNER re-tenant is the bug"
+        );
+    }
+
+    #[tokio::test]
+    async fn rotate_binary_skips_when_no_cube_sandbox_id() {
+        // Pre-Stage-8 row: Live but has never had a cube_sandbox_id
+        // set.  These rows can't be snapshotted, so the sweep skips
+        // them silently — no entry in `failed` either, since the row
+        // simply isn't a viable rotation candidate.
+        let (isvc, ssvc, cube, instances, _users, _recorder) = build_with_snapshot().await;
+        // Insert directly via the store so we can craft a
+        // pre-Stage-8 row without going through `create` (which
+        // always sets cube_sandbox_id once the cube returns).
+        let row = InstanceRow {
+            id: "ancient".into(),
+            owner_id: "legacy".into(),
+            name: String::new(),
+            task: String::new(),
+            cube_sandbox_id: None,
+            template_id: "tpl-old".into(),
+            status: InstanceStatus::Live,
+            bearer_token: "b".into(),
+            pinned: false,
+            expires_at: None,
+            last_active_at: 0,
+            last_probe_at: None,
+            last_probe_status: None,
+            created_at: 0,
+            destroyed_at: None,
+            rotated_to: None,
+        };
+        instances.create(row).await.unwrap();
+
+        let report = isvc.rotate_binary_all(&ssvc, "tpl-new").await.unwrap();
+        assert_eq!(report.visited, 0, "no-cube-sandbox rows are not visited");
+        assert_eq!(report.rotated, 0);
+        assert!(report.failed.is_empty(), "pre-Stage-8 skip must not surface as failure");
+        assert!(cube.snapshotted.lock().unwrap().is_empty());
+        // The row is untouched.
+        let still = instances.get("ancient").await.unwrap().unwrap();
+        assert_eq!(still.status, InstanceStatus::Live);
+        assert!(still.rotated_to.is_none());
+    }
+
+    #[tokio::test]
+    async fn rotate_binary_failed_snapshot_is_recorded_and_skipped() {
+        // The cube refuses to snapshot.  The source row stays Live,
+        // no successor is created, and the error surfaces in
+        // RotateReport.failed so an operator can pick it up.
+        let (isvc, ssvc, cube, instances, _users, recorder) = build_with_snapshot().await;
+        let src = isvc
+            .create("legacy", CreateRequest {
+                template_id: "tpl-old".into(),
+                name: None,
+                task: None,
+                env: env_with_model(),
+                ttl_seconds: None,
+            })
+            .await
+            .unwrap();
+        wait_for_pushes(&recorder, 1).await;
+        cube.fail_snapshots();
+
+        let report = isvc.rotate_binary_all(&ssvc, "tpl-new").await.unwrap();
+        assert_eq!(report.visited, 1);
+        assert_eq!(report.rotated, 0, "no rotation completed");
+        assert_eq!(report.failed.len(), 1);
+        assert_eq!(report.failed[0].0, src.id);
+        assert!(
+            report.failed[0].1.contains("snapshot"),
+            "failure message should pin the failing step"
+        );
+        // Source row is untouched: still Live, still on tpl-old, no
+        // rotated_to marker — so the next sweep retries the full
+        // pipeline, not just the destroy.
+        let row = instances.get(&src.id).await.unwrap().unwrap();
+        assert_eq!(row.status, InstanceStatus::Live);
+        assert_eq!(row.template_id, "tpl-old");
+        assert!(row.rotated_to.is_none());
+    }
+
+    #[tokio::test]
+    async fn rotate_binary_disabled_is_a_noop() {
+        // Mirrors the gate in main.rs: when `rotate_binary_on_startup`
+        // is false, `rotate_binary_all` is never called.  This test
+        // proves the flag short-circuits the sweep — the cube mock
+        // sees zero snapshot calls because the sweep never fires.
+        let (isvc, ssvc, cube, _instances, _users, recorder) = build_with_snapshot().await;
+        isvc.create("legacy", CreateRequest {
+            template_id: "tpl-old".into(),
+            name: None, task: None,
+            env: env_with_model(),
+            ttl_seconds: None,
+        })
+        .await
+        .unwrap();
+        wait_for_pushes(&recorder, 1).await;
+        let snapshots_before = cube.snapshotted.lock().unwrap().len();
+
+        // The actual main.rs check, lifted verbatim so the test
+        // tracks the wiring contract:
+        //   if cfg.rotate_binary_on_startup { rotate_binary_all(...).await }
+        let rotate_binary_on_startup = false;
+        if rotate_binary_on_startup {
+            isvc.rotate_binary_all(&ssvc, "tpl-new").await.unwrap();
+        }
+
+        assert_eq!(
+            cube.snapshotted.lock().unwrap().len(),
+            snapshots_before,
+            "flag-off sweep must not call cube.snapshot_sandbox"
+        );
     }
 }

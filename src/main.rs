@@ -256,6 +256,64 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         instance_svc.clone(),
     ));
 
+    // Binary rotation sweep.  Opt-in: every Live instance whose cube
+    // template is older than `default_template_id` is snapshot+
+    // restored onto the current default and the source destroyed.
+    // This closes the gap left by config-only rewires (the image-gen
+    // sweep above) when the fix lives in the dyson binary — config
+    // pushes can't add a new ConfigureBody field, can't change tool
+    // registration logic, can't fix the no-skills-block boot bug.
+    //
+    // Sequenced AFTER the image-gen sweep with a longer settle delay:
+    // config push is cheap; if the lighter work fixes the dyson
+    // there's no reason to bear the snapshot+restore cost.  ≥30s lets
+    // the cubeproxy upstream routing fully warm so the new restore's
+    // configure-push doesn't race a cold nginx and lose to 502s.
+    //
+    // Gated behind `rotate_binary_on_startup` (default false): the
+    // sweep is destructive of `cube_sandbox_id` for every rotated
+    // instance, and the SPA needs to refresh `<id>.<hostname>` URLs
+    // afterwards — operators opt in.
+    if cfg.rotate_binary_on_startup {
+        let target_template = cfg
+            .default_template_id
+            .clone()
+            .filter(|s| !s.trim().is_empty());
+        if let Some(target) = target_template {
+            let isvc = instance_svc.clone();
+            let ssvc = snapshot_svc.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                match isvc.rotate_binary_all(&ssvc, &target).await {
+                    Ok(report) => {
+                        tracing::info!(
+                            visited = report.visited,
+                            rotated = report.rotated,
+                            failed = report.failed.len(),
+                            target_template = %target,
+                            "rotate-binary: startup sweep complete"
+                        );
+                        for (id, err) in &report.failed {
+                            tracing::warn!(
+                                instance = %id,
+                                error = %err,
+                                "rotate-binary: row left for next sweep"
+                            );
+                        }
+                    }
+                    Err(err) => tracing::warn!(
+                        error = %err,
+                        "rotate-binary: startup sweep aborted"
+                    ),
+                }
+            });
+        } else {
+            tracing::warn!(
+                "rotate_binary_on_startup is enabled but default_template_id is unset — sweep skipped"
+            );
+        }
+    }
+
     let auth = if dangerous_no_auth {
         AuthState::dangerous_no_auth()
     } else if let Some(roles) = cfg.oidc.as_ref().and_then(|o| o.roles.clone()) { AuthState::enforced(roles) } else {

@@ -190,6 +190,7 @@ mod tests {
                 last_probe_status: None,
                 created_at: 0,
                 destroyed_at: None,
+                rotated_to: None,
             })
             .await
             .unwrap();
@@ -376,6 +377,7 @@ mod tests {
             last_probe_status: None,
             created_at: 0,
             destroyed_at: None,
+            rotated_to: None,
         };
         // Use the raw secrets store route to target this instance via SQL.
         // We need access to a fresh instances store here — easier to seed

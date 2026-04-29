@@ -249,6 +249,7 @@ mod tests {
                 last_probe_status: None,
                 created_at: 0,
                 destroyed_at: None,
+                rotated_to: None,
             })
             .await
             .unwrap();
@@ -321,6 +322,7 @@ mod tests {
                 last_probe_status: None,
                 created_at: 0,
                 destroyed_at: Some(0),
+                rotated_to: None,
             })
             .await
             .unwrap();

@@ -76,6 +76,23 @@ pub struct Config {
     /// to the global `[providers.openrouter].api_key`.
     #[serde(default)]
     pub openrouter: Option<OpenRouterConfig>,
+
+    /// Opt-in startup sweep that snapshot+restores every Live
+    /// instance whose cube template is older than
+    /// `default_template_id` onto the current default — closes the
+    /// gap left by config-only rewires when the fix lives in the
+    /// dyson binary itself (new ConfigureBody fields, tool registration
+    /// logic, the no-skills-block boot fix, etc.).
+    ///
+    /// Default `false` because rotation is destructive: it churns the
+    /// underlying `cube_sandbox_id` for every outdated instance, so
+    /// any client holding an old `<id>.<hostname>` URL gets a 404 and
+    /// must rediscover the new id (workspace state survives via the
+    /// snapshot).  Operators flip this on when they want a swarm
+    /// restart to also propagate a binary-level fix; otherwise leave
+    /// it off and run rotation by hand.
+    #[serde(default)]
+    pub rotate_binary_on_startup: bool,
 }
 
 /// OpenRouter Provisioning configuration.  The provisioning key is a

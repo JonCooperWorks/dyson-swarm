@@ -197,6 +197,15 @@ pub struct InstanceRow {
     pub last_probe_status: Option<ProbeResult>,
     pub created_at: i64,
     pub destroyed_at: Option<i64>,
+    /// Set by the binary-rotation sweep to pin a Live source row to
+    /// the new instance that absorbed its workspace state.  Stamped
+    /// after the snapshot+restore step succeeds, before the destroy
+    /// step runs — so a crash between restore and destroy leaves a
+    /// re-runnable hint: the next sweep sees the marker, skips the
+    /// snapshot+restore (which already produced the successor), and
+    /// retries just the destroy.  `None` for every row that has
+    /// never been a rotation source.
+    pub rotated_to: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -304,6 +313,11 @@ pub trait InstanceStore: Send + Sync {
     async fn pin(&self, id: &str, pinned: bool, ttl: Option<i64>) -> Result<(), StoreError>;
     async fn record_probe(&self, id: &str, status: ProbeResult) -> Result<(), StoreError>;
     async fn expired(&self, now: i64) -> Result<Vec<InstanceRow>, StoreError>;
+    /// Stamp the source row of a binary rotation with the id of the
+    /// new instance that took over its workspace.  Called once per
+    /// source after a successful snapshot+restore, before the destroy
+    /// step.  Re-running with the same target is a no-op write.
+    async fn set_rotated_to(&self, id: &str, target_id: &str) -> Result<(), StoreError>;
 }
 
 /// Per-instance secrets — opaque ciphertexts stored against an instance row.

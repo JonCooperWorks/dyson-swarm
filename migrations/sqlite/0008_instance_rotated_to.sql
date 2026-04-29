@@ -1,0 +1,23 @@
+-- Binary rotation marker.
+--
+-- When the swarm boots a sandbox from a stale cube template, the
+-- in-cube dyson binary lags behind the current default — and config
+-- pushes can't fix bugs that live in the binary itself (new
+-- ConfigureBody fields, tool registration logic, the no-skills-block
+-- boot fix, etc.).  The rotation sweep
+-- (`InstanceService::rotate_binary_all`) snapshot+restores every
+-- outdated Live row onto the current default template and then
+-- destroys the source.
+--
+-- The sweep is NOT atomic: a crash between restore and destroy must
+-- be re-runnable without producing a second new instance.  Stamping
+-- `rotated_to` on the source row before the destroy step pins the
+-- intended successor so a re-run can detect "already rotated, just
+-- needs the destroy retry" and skip the snapshot+restore step.
+--
+-- Once the source row reaches `status = 'destroyed'` the marker
+-- becomes inert (the candidate filter only considers Live rows), but
+-- the column is preserved for forensic / audit value: an operator
+-- inspecting a Destroyed row can see which new id absorbed its
+-- workspace.
+ALTER TABLE instances ADD COLUMN rotated_to TEXT;

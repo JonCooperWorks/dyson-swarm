@@ -68,14 +68,14 @@ export class SwarmClient {
     return this._json(`/v1/instances/${encodeURIComponent(id)}`, { method: 'DELETE' });
   }
 
-  /// **Destructive.**  Hire a fresh empty dyson on the latest cube
-  /// template with the source's name, task, models, tools, network
-  /// policy, per-instance secrets, and MCP servers (active OAuth
-  /// sessions preserved) — but NO workspace state.  Memory, chats,
-  /// knowledge base, and learned skills do NOT carry over.  Source
-  /// row stays running so it can be inspected or kept as a backup
-  /// and destroyed manually.  Response shape matches `createInstance`
-  /// so callers can share the post-create UX.
+  /// **Destructive in-place rebuild.**  Resets the dyson on its
+  /// existing swarm id: fresh cube under the latest template,
+  /// preserving name/task/models/tools/network policy/secrets/MCP/
+  /// bearer/DNS — but the workspace (memory, chats, kb, skills) is
+  /// WIPED.  Same id, same URL, same bearer; bookmarks and webhook
+  /// integrations survive.  Response shape matches `updateInstance`:
+  /// the post-rebuild row, so the caller can refresh the detail view
+  /// in place.
   resetInstance(id) {
     return this._json(`/v1/instances/${encodeURIComponent(id)}/reset`, {
       method: 'POST',

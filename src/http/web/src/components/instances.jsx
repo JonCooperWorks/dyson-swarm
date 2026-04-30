@@ -1534,38 +1534,28 @@ function InstanceDetail({ id, onNew }) {
     }
   };
 
-  // DESTRUCTIVE.  Hire a fresh empty dyson on the latest cube
-  // template with the same config (name, task, models, tools, network
-  // policy), per-instance secrets, and MCP servers (active OAuth
-  // sessions preserved) — but NO workspace state.  Memory, chats,
-  // knowledge base, learned skills, and any in-flight work do NOT
-  // carry over; the new cube boots from the template's clean rootfs.
-  // Source row stays running so the operator can keep it as a backup
-  // and destroy it manually once they've confirmed the rebuild is
-  // healthy.
+  // DESTRUCTIVE in-place rebuild.  Reset the dyson on its existing
+  // swarm id: hire a fresh cube under the latest template, keep
+  // name/task/models/tools/network policy/secrets/MCP/bearer/DNS,
+  // but DROP the workspace.  Memory, chats, knowledge base, learned
+  // skills, and any in-flight work are gone.  Same URL — bookmarks
+  // and webhook integrations survive.
   const reset = async () => {
     const label = row.name && row.name.trim() ? row.name : id;
     const warning =
       `RESET ${label} on the latest template?\n\n` +
-      `This is DESTRUCTIVE.  A fresh dyson will be hired with the same ` +
-      `name, task, models, tools, network policy, secrets, and MCP ` +
-      `servers — but its workspace will be EMPTY.  The current dyson's ` +
-      `memory, chats, knowledge base, and learned skills will NOT come ` +
-      `along.  This cannot be undone.\n\n` +
-      `The current dyson stays running; destroy it yourself when you've ` +
-      `verified the new one is healthy.`;
+      `This is DESTRUCTIVE.  The dyson keeps its name, task, models, ` +
+      `tools, network policy, secrets, MCP servers, URL, and bearer ` +
+      `token — but its workspace will be WIPED.  Memory, chats, ` +
+      `knowledge base, learned skills, and any in-flight work will be ` +
+      `LOST.  This cannot be undone.\n\n` +
+      `Use this when the dyson got into a bad state and you want a ` +
+      `clean start without losing its identity.`;
     if (!confirm(warning)) return;
     setBusy(true); setErr(null);
     try {
-      const created = await client.resetInstance(id);
-      try {
-        const detail = await client.getInstance(created.id);
-        if (detail) upsertInstance(detail);
-      } catch {
-        // Detail fetch is best-effort — the list page refreshes on
-        // mount and will pick up the new row anyway.
-      }
-      window.location.hash = `#/i/${encodeURIComponent(created.id)}`;
+      const updated = await client.resetInstance(id);
+      if (updated) upsertInstance(updated);
     } catch (e) {
       setErr(e?.message || 'reset failed');
     } finally {

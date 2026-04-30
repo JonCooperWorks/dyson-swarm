@@ -282,23 +282,26 @@ async fn clone_instance(
     }
 }
 
-/// **Destructive.**  Hire a fresh empty dyson on the latest cube
-/// template with the source's name, task, models, tools, network
-/// policy, per-instance secrets, and MCP servers (with active OAuth
-/// sessions preserved) — but NO workspace state.  SOUL/IDENTITY/
-/// MEMORY, chat history, knowledge base, learned skills, and any
-/// in-flight work are LOST: the new cube boots from the template's
-/// clean rootfs.  Source row is left running so the operator can
-/// manually destroy or keep it as a backup.
+/// **Destructive in-place rebuild.**  Reset the dyson on its existing
+/// swarm id: hire a fresh cube under the latest template, preserving
+/// name, task, models, tools, network policy, per-instance secrets,
+/// MCP servers, bearer token, DNS, and webhook URLs — but NO
+/// workspace state.  SOUL/IDENTITY/MEMORY, chat history, knowledge
+/// base, learned skills, and any in-flight work are LOST: the new
+/// cube boots from the template's clean rootfs.
+///
+/// Same id, same URL, same bearer.  Bookmarks survive.  Operator
+/// escape hatch when the running dyson got into a bad state and the
+/// user wants to start over without losing the instance's identity.
 ///
 /// Tenant-facing — runs under the same user-identity middleware as
 /// the rest of the instance routes; ownership is enforced inside
-/// `clone_empty`.  No body fields.
+/// `recreate_in_place`.  No body fields.
 async fn reset_instance(
     State(state): State<AppState>,
     Extension(caller): Extension<CallerIdentity>,
     Path(id): Path<String>,
-) -> Result<(StatusCode, Json<CreatedInstance>), StatusCode> {
+) -> Result<Json<InstanceView>, StatusCode> {
     let target = state
         .auth_config
         .default_template_id
@@ -307,15 +310,10 @@ async fn reset_instance(
         .ok_or(StatusCode::BAD_REQUEST)?;
     match state
         .instances
-        .clone_empty(&caller.user_id, &id, &target, None)
+        .recreate_in_place(&caller.user_id, &id, &target, None)
         .await
     {
-        Ok(mut c) => {
-            if let Some(host) = state.hostname.as_deref().filter(|h| !h.is_empty()) {
-                c.url = format!("https://{}.{}/", c.id, host.trim_end_matches('/'));
-            }
-            Ok((StatusCode::CREATED, Json(c)))
-        }
+        Ok(row) => Ok(Json(InstanceView::from_row(row, state.hostname.as_deref()))),
         Err(e) => Err(swarm_err_to_status(e)),
     }
 }

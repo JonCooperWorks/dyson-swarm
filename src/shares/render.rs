@@ -153,7 +153,7 @@ fn wrap_page(title: &str, kind_label: &str, body: &str, is_image: bool, raw_path
 </article>
 </main>
 <footer class="share-footer">
-  <span class="muted small">Anonymous shared artefact · capability is in the URL · revoke from your dyson dashboard.</span>
+  <span class="muted small">Anonymous shared artefact · capability is in the URL · revoke from your swarm dashboard.</span>
 </footer>
 </body>
 </html>

@@ -236,11 +236,11 @@ export function NewInstancePage() {
 // Caddy has its TLS cert, but the dyson process inside the cube can
 // still be a few seconds away from answering /healthz.  Poll the
 // probe endpoint until it reports Healthy so the user lands on a
-// working detail page instead of a 502.  Bounded at ~30s — past that
+// working detail page instead of a 502.  Bounded at ~5s — past that
 // the agent is genuinely stuck and the detail page is a better place
 // to surface the unhealthy state (with the "probe" button to retry).
 async function waitUntilHealthy(client, id) {
-  const deadline = Date.now() + 30_000;
+  const deadline = Date.now() + 5_000;
   while (Date.now() < deadline) {
     try {
       const r = await client.probeInstance(id);

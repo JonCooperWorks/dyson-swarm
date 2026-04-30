@@ -185,6 +185,13 @@ impl OidcAuthenticator {
         // until that wall-clock arrives — we already check `exp` for
         // free; the symmetric `nbf` check belongs here.
         v.validate_nbf = true;
+        // Defeat GHSA-h395-gr6q-cpjc / CVE-2026-25537: jsonwebtoken 9.x
+        // treats a malformed `nbf` (string instead of number) as
+        // FailedToParse and then silently as NotPresent — which lets
+        // a future-`nbf` token through `validate_nbf = true`.  Adding
+        // `nbf` to `required_spec_claims` makes a malformed claim
+        // surface as a hard verify failure rather than a silent skip.
+        v.required_spec_claims.insert("nbf".to_string());
         v
     }
 }
@@ -210,11 +217,9 @@ impl Authenticator for OidcAuthenticator {
             // (Auth0 custom domains, mismatched API identifiers, etc.).
             // We re-decode without verification just to read the claims;
             // the original error from the verifier is what we propagate.
-            let mut nv = Validation::new(Algorithm::RS256);
-            nv.insecure_disable_signature_validation();
-            nv.validate_aud = false;
-            nv.required_spec_claims.clear();
-            if let Ok(unverified) = decode::<JsonValue>(&token, &key, &nv) {
+            if let Ok(unverified) =
+                jsonwebtoken::dangerous::insecure_decode::<JsonValue>(&token)
+            {
                 let iss = unverified.claims.get("iss").and_then(|v| v.as_str()).unwrap_or("?");
                 let aud = unverified.claims.get("aud").map_or_else(|| "?".into(), std::string::ToString::to_string);
                 tracing::debug!(
@@ -304,6 +309,7 @@ mod tests {
                 aud: &'a str,
                 exp: i64,
                 iat: i64,
+                nbf: i64,
                 #[serde(skip_serializing_if = "Option::is_none")]
                 email: Option<&'a str>,
                 #[serde(skip_serializing_if = "Option::is_none")]
@@ -316,6 +322,7 @@ mod tests {
                 aud,
                 exp: now + 3600,
                 iat: now,
+                nbf: now,
                 email,
                 name: Some(sub),
             };

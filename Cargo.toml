@@ -36,7 +36,12 @@ thiserror = "1.0.69"
 uuid = { version = "1.23", default-features = false, features = ["v4", "serde"] }
 async-trait = "0.1.89"
 futures = { version = "0.3.32", default-features = false, features = ["std"] }
-jsonwebtoken = { version = "9.3", default-features = false }
+# 10.3 closes GHSA-h395-gr6q-cpjc / CVE-2026-25537 (nbf type-confusion
+# bypass).  10.x requires picking a crypto backend explicitly; we use
+# `rust_crypto` to match the rest of the TLS stack (reqwest rustls,
+# sqlx tokio-rustls) and stay pure-Rust.  No PEM parsing here — keys
+# are reconstructed from JWKS modulus/exponent — so `use_pem` is off.
+jsonwebtoken = { version = "10.3", default-features = false, features = ["rust_crypto"] }
 age = { version = "0.10.1", default-features = false, features = ["armor"] }
 # argon2id for the per-instance configure secret (Stage 8) — swarm
 # generates a plaintext on instance create, sends it to dyson on every

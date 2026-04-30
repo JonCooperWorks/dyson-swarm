@@ -106,7 +106,7 @@ function InstanceList({ selectedId, onNew }) {
           <li className="rail-empty muted small">your roster's empty — hire one →</li>
         ) : order.map(id => {
           const row = byId[id];
-          const label = row.name && row.name.trim() ? row.name : '(unnamed)';
+          const label = row.name && row.name.trim() ? row.name : 'dyson';
           return (
             <li key={id} className={`rail-row ${selectedId === id ? 'selected' : ''}`}>
               <a href={`#/i/${encodeURIComponent(id)}`}>
@@ -1532,7 +1532,7 @@ function InstanceDetail({ id, onNew }) {
     }
   };
 
-  const displayName = row.name && row.name.trim() ? row.name : '(unnamed)';
+  const displayName = row.name && row.name.trim() ? row.name : 'dyson';
   // open_url is computed by the backend from `[server] hostname` + the
   // instance id.  Null when swarm has no hostname configured (the
   // host-based proxy is a no-op in that case) — that's the only case

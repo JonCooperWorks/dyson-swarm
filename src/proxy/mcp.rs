@@ -193,7 +193,16 @@ async fn forward(
     let resp = match outbound.body(body_bytes).send().await {
         Ok(r) => r,
         Err(err) => {
-            tracing::warn!(error = %err, server = %server_name, "mcp: upstream send failed");
+            // reqwest's Display includes the full URL (path + query)
+            // in its error chain — and some MCP providers ship per-
+            // tenant URLs with a token in the query string.  Scrub
+            // to the domain before logging.
+            tracing::warn!(
+                error = %crate::mcp_servers::redact_reqwest_err(&err, &entry.url),
+                server = %server_name,
+                domain = %crate::mcp_servers::domain_of(&entry.url),
+                "mcp: upstream send failed",
+            );
             return error_resp(StatusCode::BAD_GATEWAY, "upstream unreachable");
         }
     };

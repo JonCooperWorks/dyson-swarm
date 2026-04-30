@@ -353,15 +353,21 @@ pub async fn discover_metadata(
     // Discovery is performed against the URL's origin, not the full
     // path: a server at https://example.com/mcp publishes its metadata
     // under https://example.com/.well-known/oauth-authorization-server.
+    //
+    // Error messages reference the DOMAIN only — some MCP servers
+    // ship per-tenant URLs with bearer-style query params or path
+    // segments, and a verbatim URL in a log line is a credential
+    // disclosure waiting to happen.  See `domain_of` for the rule.
     let origin = origin_of(server_url)?;
     let url = format!("{origin}/.well-known/oauth-authorization-server");
+    let domain = domain_of(server_url);
     let resp = client
         .get(&url)
         .send()
         .await
-        .map_err(|e| format!("discovery {url}: {e}"))?;
+        .map_err(|e| format!("discovery {domain}: {e}"))?;
     if !resp.status().is_success() {
-        return Err(format!("discovery {url}: HTTP {}", resp.status()));
+        return Err(format!("discovery {domain}: HTTP {}", resp.status()));
     }
     resp.json::<AuthMetadata>()
         .await
@@ -369,8 +375,10 @@ pub async fn discover_metadata(
 }
 
 fn origin_of(url: &str) -> Result<String, String> {
-    let parsed = reqwest::Url::parse(url).map_err(|e| format!("parse {url}: {e}"))?;
-    let host = parsed.host_str().ok_or_else(|| format!("no host in {url}"))?;
+    let parsed = reqwest::Url::parse(url)
+        .map_err(|e| format!("parse {}: {e}", domain_of(url)))?;
+    let host = parsed.host_str()
+        .ok_or_else(|| format!("no host in {}", domain_of(url)))?;
     let scheme = parsed.scheme();
     Ok(match parsed.port() {
         Some(p) => format!("{scheme}://{host}:{p}"),
@@ -378,19 +386,75 @@ fn origin_of(url: &str) -> Result<String, String> {
     })
 }
 
+/// Log-safe rendering of an MCP / OAuth URL: scheme + host + port
+/// only — no path, no query string, no fragment.  Some MCP
+/// providers embed bearer tokens or tenant secrets in the URL
+/// (path segment or query param), so a raw URL in a log line is
+/// effectively a credential.  Emit the domain instead and the
+/// operator still has enough to triage ("which provider?") with
+/// nothing exfiltratable.
+///
+/// Falls back to `<unparseable url>` when the value isn't a valid
+/// URL — the caller asked us to render *something* and a parse
+/// failure isn't worth panicking over.
+pub fn domain_of(url: &str) -> String {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return "<unparseable url>".to_string();
+    };
+    let Some(host) = parsed.host_str() else {
+        return "<unparseable url>".to_string();
+    };
+    let scheme = parsed.scheme();
+    match parsed.port() {
+        Some(p) => format!("{scheme}://{host}:{p}"),
+        None => format!("{scheme}://{host}"),
+    }
+}
+
+/// Render a reqwest error for a log line without echoing the full
+/// URL.  reqwest's Display impl spells out
+/// "error sending request for url ({full_url}): …" — with a
+/// token-bearing URL that's a credential leak straight to the
+/// operator's `journalctl`.  Walk the error chain ourselves and
+/// substitute every literal occurrence of `upstream` with its
+/// domain.  Caller passes `upstream` as the URL the request
+/// targeted (typically `entry.url`) — that's the one reqwest
+/// embeds.
+pub fn redact_reqwest_err(err: &reqwest::Error, upstream: &str) -> String {
+    let mut chain = format!("{err}");
+    let mut src: Option<&dyn std::error::Error> = std::error::Error::source(err);
+    while let Some(s) = src {
+        chain.push_str(": ");
+        chain.push_str(&format!("{s}"));
+        src = s.source();
+    }
+    let domain = domain_of(upstream);
+    // Multi-pass replace: reqwest may include both the canonicalised
+    // form (with trailing slash) and the as-supplied form, so swap
+    // both.
+    let mut out = chain.replace(upstream, &domain);
+    if let Ok(canon) = reqwest::Url::parse(upstream) {
+        out = out.replace(canon.as_str(), &domain);
+    }
+    out
+}
+
 pub async fn register_client(
     url: &str,
     req: &DcrRequest,
     client: &reqwest::Client,
 ) -> Result<DcrResponse, String> {
+    // DCR endpoints don't typically carry tokens, but the rule is
+    // uniform: never echo full URLs to logs.
+    let domain = domain_of(url);
     let resp = client
         .post(url)
         .json(req)
         .send()
         .await
-        .map_err(|e| format!("DCR send: {e}"))?;
+        .map_err(|e| format!("DCR send to {domain}: {e}"))?;
     if !resp.status().is_success() {
-        return Err(format!("DCR returned HTTP {}", resp.status()));
+        return Err(format!("DCR to {domain}: HTTP {}", resp.status()));
     }
     resp.json::<DcrResponse>()
         .await
@@ -406,7 +470,10 @@ pub fn build_auth_url(
     state: &str,
 ) -> Result<String, String> {
     let mut url = reqwest::Url::parse(authorization_endpoint)
-        .map_err(|e| format!("parse auth endpoint: {e}"))?;
+        .map_err(|e| format!(
+            "parse auth endpoint {}: {e}",
+            domain_of(authorization_endpoint),
+        ))?;
     url.query_pairs_mut()
         .append_pair("response_type", "code")
         .append_pair("client_id", client_id)
@@ -463,20 +530,26 @@ async fn post_token(
     params: &[(&str, &str)],
     client: &reqwest::Client,
 ) -> Result<TokenResponse, String> {
+    // Token endpoints can carry tenant identifiers in the URL too;
+    // log domain only.  The reqwest error itself is also redacted
+    // because Display includes the URL in its chain.
+    let domain = domain_of(token_url);
     let resp = client
         .post(token_url)
         .form(params)
         .send()
         .await
-        .map_err(|e| format!("token request: {e}"))?;
+        .map_err(|e| {
+            format!("token request to {domain}: {}", redact_reqwest_err(&e, token_url))
+        })?;
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        return Err(format!("token endpoint HTTP {status}: {body}"));
+        return Err(format!("token endpoint {domain} HTTP {status}: {body}"));
     }
     resp.json::<TokenResponse>()
         .await
-        .map_err(|e| format!("parse token response: {e}"))
+        .map_err(|e| format!("parse token response from {domain}: {e}"))
 }
 
 /// In-process cache of in-flight OAuth flows.  Holds the PKCE verifier
@@ -729,5 +802,112 @@ mod tests {
         let v = serde_json::to_value(&s).unwrap();
         assert_eq!(v["kind"], "bearer");
         assert_eq!(v["token"], "t");
+    }
+
+    // ── domain_of ──────────────────────────────────────────────
+    //
+    // The redaction contract for log lines.  Some MCP providers
+    // ship per-tenant URLs with bearer-style query params or path
+    // segments; this helper is what keeps those out of journalctl.
+
+    #[test]
+    fn domain_of_strips_path_query_and_fragment() {
+        // The motivating case: a token in the query string.
+        assert_eq!(
+            domain_of("https://api.linear.app/mcp?token=lin_secret_abc"),
+            "https://api.linear.app",
+        );
+        // Path-segment tokens (e.g. /tenants/<id>/mcp) — same rule.
+        assert_eq!(
+            domain_of("https://mcp.example.com/tenants/abc-secret/v1/mcp"),
+            "https://mcp.example.com",
+        );
+        // Fragment, just for completeness.
+        assert_eq!(
+            domain_of("https://mcp.example.com/path#frag"),
+            "https://mcp.example.com",
+        );
+    }
+
+    #[test]
+    fn domain_of_preserves_non_default_port() {
+        // Self-hosted MCP on a non-standard port — operators
+        // need the port to triage, so it stays.
+        assert_eq!(
+            domain_of("http://10.0.0.5:7878/mcp/some/path"),
+            "http://10.0.0.5:7878",
+        );
+        assert_eq!(
+            domain_of("https://example.com:8443/mcp"),
+            "https://example.com:8443",
+        );
+    }
+
+    #[test]
+    fn domain_of_falls_back_for_garbage_input() {
+        // The function is called from log paths; panicking on
+        // weird inputs would be worse than emitting a placeholder.
+        assert_eq!(domain_of("not a url at all"), "<unparseable url>");
+        assert_eq!(domain_of(""), "<unparseable url>");
+    }
+
+    // ── redact_reqwest_err ─────────────────────────────────────
+    //
+    // reqwest's Display includes the full URL in its error chain.
+    // We can't easily build a real reqwest::Error in a unit test,
+    // but we can verify the substring-replacement contract by
+    // round-tripping a known-leaky string through the body of the
+    // helper (the `.replace` is the only domain-specific bit).
+
+    #[test]
+    fn redact_logic_replaces_full_url_with_domain() {
+        // Simulate what reqwest's Display would emit and exercise
+        // the same replacement the helper does.  The real helper
+        // walks the error chain too, but the substring substitution
+        // is the load-bearing piece.
+        let url = "https://api.linear.app/mcp?token=lin_secret_abc";
+        let leaky = format!(
+            "error sending request for url ({url}): connection closed",
+        );
+        let domain = domain_of(url);
+        let scrubbed = leaky.replace(url, &domain);
+        assert!(
+            !scrubbed.contains("lin_secret_abc"),
+            "redaction must remove the in-URL token; got: {scrubbed}",
+        );
+        assert!(scrubbed.contains("https://api.linear.app"));
+        assert!(scrubbed.contains("connection closed"));
+    }
+
+    #[test]
+    fn discovery_error_carries_domain_only() {
+        // Indirect contract test: discover_metadata is the
+        // hot path for OAuth flows.  Pass a clearly-broken URL
+        // (no scheme) so the error fires fast, and check the
+        // returned message doesn't echo the full input.
+        // Tokio runtime is required for the .await below.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let leaky = "https://mcp.example.com/tenants/abc-secret/v1/mcp";
+            // We can't actually contact the URL in a unit test;
+            // build a real client so the call returns a network
+            // error rather than panicking.
+            let client = reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_millis(1))
+                .build()
+                .unwrap();
+            let err = discover_metadata(leaky, &client).await.unwrap_err();
+            assert!(
+                !err.contains("abc-secret"),
+                "discover_metadata error leaked path token: {err}",
+            );
+            assert!(
+                err.contains("mcp.example.com"),
+                "operator still needs the domain to triage: {err}",
+            );
+        });
     }
 }

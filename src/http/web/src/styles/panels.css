@@ -1245,7 +1245,8 @@
  * page stacks an identity form, a network-policy panel, and an MCP
  * panel, each of which wants room to breathe.  Falls back to the
  * 720px max via the .page rule when the viewport is narrower.  */
-.page-edit { max-width: 1100px; }
+.page-edit,
+.page-new { max-width: 1100px; }
 
 .edit-stack {
   display: flex;
@@ -1292,8 +1293,9 @@
     align-items: stretch;
   }
   .edit-action-bar .btn { text-align: center; }
-  /* Trim the page-edit's wider cap so phone viewports get the same
-   * 12px gutters as the hire flow.  .page already maxes at 100%,
+  /* Trim the wider cap so phone viewports get the same 12px
+   * gutters.  .page already maxes at 100%,
    * but the explicit re-set documents intent. */
-  .page-edit { max-width: 100%; padding: 16px 12px 80px; }
+  .page-edit,
+  .page-new { max-width: 100%; padding: 16px 12px 80px; }
 }

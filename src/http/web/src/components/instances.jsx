@@ -423,7 +423,7 @@ function ToolsPicker({ value, onChange, policyKind }) {
         </div>
       </div>
       <p className="muted small">
-        Built-in tools the dyson registers on boot.  Air-gapped
+        Built-in tools the agent registers on boot.  Air-gapped
         employees start with nothing — pick only what the task
         actually needs.
       </p>
@@ -665,7 +665,7 @@ function NewInstanceForm() {
         <p className="muted small">getting your agent ready…</p>
         <div className="progress-bar"><div className="progress-bar-indeterminate"/></div>
         <p className="muted small" style={{ marginTop: 12 }}>
-          By the time this redirects, your dyson is live and reachable.
+          By the time this redirects, your agent is live and reachable.
         </p>
       </section>
     );
@@ -729,7 +729,7 @@ function NewInstanceForm() {
           proxy URL, never your upstream URL or its credentials. Bearer
           tokens and OAuth refresh tokens land in your encrypted user
           secret store. OAuth connections finish in a browser tab after
-          you hire the dyson.
+          you hire the agent.
         </span>
       </section>
 
@@ -1046,7 +1046,7 @@ function McpServersEditor({ value, onChange }) {
     return (
       <div className="mcp-empty">
         <p className="muted small" style={{ margin: 0 }}>
-          No MCP servers attached. The dyson hires fine without any —
+          No MCP servers attached. The agent hires fine without any —
           add one if you want it to call out to Linear, GitHub, your
           own server, or anything that speaks streamable-HTTP MCP.
         </p>
@@ -1544,12 +1544,12 @@ function InstanceDetail({ id, onNew }) {
     const label = row.name && row.name.trim() ? row.name : id;
     const warning =
       `RESET ${label} on the latest template?\n\n` +
-      `This is DESTRUCTIVE.  The dyson keeps its name, task, models, ` +
+      `This is DESTRUCTIVE.  The agent keeps its name, task, models, ` +
       `tools, network policy, secrets, MCP servers, URL, and bearer ` +
       `token — but its workspace will be WIPED.  Memory, chats, ` +
       `knowledge base, learned skills, and any in-flight work will be ` +
       `LOST.  This cannot be undone.\n\n` +
-      `Use this when the dyson got into a bad state and you want a ` +
+      `Use this when the agent got into a bad state and you want a ` +
       `clean start without losing its identity.`;
     if (!confirm(warning)) return;
     setBusy(true); setErr(null);
@@ -1642,7 +1642,7 @@ function InstanceDetail({ id, onNew }) {
             className="btn btn-danger"
             onClick={reset}
             disabled={busy || row.status === 'destroyed'}
-            title="DESTRUCTIVE: hire a fresh dyson on the latest template with this one's config — but workspace data (memory, chats, kb, skills) is NOT carried over"
+            title="DESTRUCTIVE: hire a fresh agent on the latest template with this one's config — but workspace data (memory, chats, kb, skills) is NOT carried over"
           >
             reset
           </button>
@@ -1735,7 +1735,7 @@ export function EditInstancePage({ instanceId }) {
         <a className="btn btn-ghost btn-sm" href={backHref}>← back</a>
         <h1 className="page-title">edit agent</h1>
         <p className="page-sub muted">
-          Change the dyson's identity, model, toolbox, or network access.
+          Change the agent's identity, model, toolbox, or network access.
           Network changes restart the sandbox briefly; everything else
           saves in place.
         </p>
@@ -1922,7 +1922,7 @@ function EditInstanceForm({ instance, backHref, formId }) {
             />
             <span className="hint muted small">
               Saving rewrites IDENTITY.md via /api/admin/configure —
-              the running dyson picks it up on its next turn
+              the running agent picks it up on its next turn
               (no restart).
             </span>
           </label>

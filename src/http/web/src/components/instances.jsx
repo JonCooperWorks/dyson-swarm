@@ -1534,17 +1534,23 @@ function InstanceDetail({ id, onNew }) {
     }
   };
 
-  // Snapshot this instance and hire a fresh one on the latest cube
-  // template with the same name, task, models, tools, network policy,
-  // workspace files, per-instance secrets, and MCP servers (active
-  // OAuth sessions preserved).  Source row keeps running.
-  const clone = async () => {
+  // Hire a fresh dyson on the latest cube template with the source's
+  // name, task, models, tools, network policy, per-instance secrets,
+  // and MCP servers (active OAuth sessions preserved).  Source row
+  // keeps running.  Two modes:
+  //   empty=false: snapshot+restore — workspace files come along too
+  //                (SOUL/IDENTITY/MEMORY, chats, kb, skills).
+  //   empty=true:  clean rootfs — config + secrets + MCP only.  Use
+  //                when the cube snapshot path is unavailable.
+  const clone = async (empty = false) => {
     const label = row.name && row.name.trim() ? row.name : id;
-    if (!confirm(`clone ${label}? snapshots this dyson and hires a fresh one on the latest template with the same config, files, secrets, and MCP servers.`)) return;
+    const blurb = empty
+      ? `clone ${label} as an empty dyson? hires a fresh one on the latest template with the same config, secrets, and MCP servers — workspace files (memory, chats, kb, skills) DO NOT come along.`
+      : `clone ${label}? snapshots this dyson and hires a fresh one on the latest template with the same config, files, secrets, and MCP servers.`;
+    if (!confirm(blurb)) return;
     setBusy(true); setErr(null);
     try {
-      const created = await client.cloneInstance(id);
-      // Refresh the new instance's row in the store, then navigate.
+      const created = await client.cloneInstance(id, empty ? { empty: true } : undefined);
       try {
         const detail = await client.getInstance(created.id);
         if (detail) upsertInstance(detail);
@@ -1637,11 +1643,19 @@ function InstanceDetail({ id, onNew }) {
           </a>
           <button
             className="btn btn-ghost"
-            onClick={clone}
+            onClick={() => clone(false)}
             disabled={busy || row.status === 'destroyed' || !row.cube_sandbox_id}
             title="snapshot this dyson and hire a fresh one on the latest template with the same config, files, secrets, and MCP servers"
           >
             clone
+          </button>
+          <button
+            className="btn btn-ghost"
+            onClick={() => clone(true)}
+            disabled={busy || row.status === 'destroyed'}
+            title="hire a fresh empty dyson on the latest template with the same config, secrets, and MCP servers — workspace files do NOT come along"
+          >
+            clone (empty)
           </button>
           <button className="btn btn-danger" onClick={destroy} disabled={busy || row.status === 'destroyed'}>
             destroy

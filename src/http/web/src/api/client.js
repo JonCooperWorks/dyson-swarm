@@ -75,10 +75,11 @@ export class SwarmClient {
   /// sessions preserved); mints a fresh bearer + proxy token + DNS
   /// subdomain.  Source row stays running.  Response shape matches
   /// `createInstance` so callers can share the post-create UX.
-  cloneInstance(id, { templateId, name } = {}) {
+  cloneInstance(id, { templateId, name, empty } = {}) {
     const body = {};
     if (typeof templateId === 'string' && templateId) body.template_id = templateId;
     if (typeof name === 'string') body.name = name;
+    if (empty === true) body.empty = true;
     return this._json(`/v1/instances/${encodeURIComponent(id)}/clone`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

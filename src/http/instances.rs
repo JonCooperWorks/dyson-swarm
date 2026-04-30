@@ -205,6 +205,15 @@ struct CloneInstanceBody {
     /// the source's name verbatim.
     #[serde(default)]
     name: Option<String>,
+    /// When true, hire a fresh empty instance instead of restoring
+    /// from a snapshot — workspace files (SOUL/IDENTITY/MEMORY,
+    /// chats, kb, skills) are NOT carried over; the new dyson boots
+    /// from the template's clean rootfs.  Config (name, task, models,
+    /// tools, network policy), per-instance secrets, and MCP servers
+    /// still come along.  Use this when the cube snapshot path is
+    /// unavailable.
+    #[serde(default)]
+    empty: bool,
 }
 
 /// Snapshot the source instance and restore onto a fresh swarm id +
@@ -213,6 +222,10 @@ struct CloneInstanceBody {
 /// server records (with active OAuth sessions preserved).  Source row
 /// is left running.  Returns a `CreatedInstance` shaped exactly like
 /// `POST /v1/instances` so the SPA can reuse its post-create flow.
+///
+/// When `empty=true`, takes the snapshot-less path: hires a fresh
+/// empty cube instead of restoring from snapshot — workspace files
+/// don't come along, but the rest of the clone behaviour is identical.
 async fn clone_instance(
     State(state): State<AppState>,
     Extension(caller): Extension<CallerIdentity>,
@@ -225,11 +238,18 @@ async fn clone_instance(
         .or_else(|| state.auth_config.default_template_id.clone())
         .filter(|s| !s.trim().is_empty())
         .ok_or(StatusCode::BAD_REQUEST)?;
-    match state
-        .instances
-        .clone_instance(&caller.user_id, &id, &state.snapshots, &target, body.name)
-        .await
-    {
+    let result = if body.empty {
+        state
+            .instances
+            .clone_empty(&caller.user_id, &id, &target, body.name)
+            .await
+    } else {
+        state
+            .instances
+            .clone_instance(&caller.user_id, &id, &state.snapshots, &target, body.name)
+            .await
+    };
+    match result {
         Ok(mut c) => {
             // Same hostname rewrite as create_instance — turn the raw
             // <sandbox>.cube.app URL into <id>.<hostname> so the SPA

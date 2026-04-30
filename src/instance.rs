@@ -1188,6 +1188,112 @@ impl InstanceService {
             .ok_or(SwarmError::NotFound)
     }
 
+    /// Snapshot-less clone — hires a fresh empty instance under
+    /// `new_template_id` with the source's name, task, models, tools,
+    /// network policy, per-instance secrets, and MCP server records
+    /// (URL, auth, oauth_tokens preserved).  The new cube boots from
+    /// the latest template's clean rootfs, so workspace files
+    /// (SOUL/IDENTITY/MEMORY, chats, kb, skills) DO NOT come along —
+    /// the agent re-seeds itself from the new IDENTITY pushed by the
+    /// configure envelope.  Source row stays running and untouched.
+    ///
+    /// Use this when the cube snapshot path is unavailable (e.g.
+    /// snapshot endpoint is down) and the user is willing to start
+    /// the clone with empty workspace state.  For a full clone that
+    /// also carries workspace files, use [`Self::clone_instance`].
+    pub async fn clone_empty(
+        &self,
+        owner_id: &str,
+        source_id: &str,
+        new_template_id: &str,
+        name_override: Option<String>,
+    ) -> Result<CreatedInstance, SwarmError> {
+        if new_template_id.trim().is_empty() {
+            return Err(SwarmError::BadRequest("template_id is required".into()));
+        }
+        let source = self
+            .instances
+            .get_for_owner(owner_id, source_id)
+            .await?
+            .ok_or(SwarmError::NotFound)?;
+        if source.status == InstanceStatus::Destroyed {
+            return Err(SwarmError::BadRequest(
+                "cannot clone a destroyed instance".into(),
+            ));
+        }
+
+        // Reuse the production create path — same validation, fresh
+        // id/bearer/proxy_token, fresh cube under the requested
+        // template, configure-push of the carried-over identity.
+        // Drive models + tools through SWARM_MODELS / SWARM_MODEL /
+        // SWARM_TOOLS so create's existing decoders persist them on
+        // the row AND ride the Stage 8 reconfigure push to the new
+        // dyson — no second round-trip needed after create returns.
+        let mut env = BTreeMap::new();
+        if let Some(m0) = source.models.first() {
+            env.insert(ENV_MODEL.into(), m0.clone());
+        }
+        if !source.models.is_empty() {
+            env.insert(ENV_MODELS.into(), source.models.join(","));
+        }
+        if !source.tools.is_empty() {
+            env.insert(ENV_TOOLS.into(), source.tools.join(","));
+        }
+
+        let req = CreateRequest {
+            template_id: new_template_id.to_owned(),
+            name: Some(name_override.unwrap_or_else(|| source.name.clone()))
+                .filter(|s| !s.is_empty()),
+            task: Some(source.task.clone()).filter(|s| !s.is_empty()),
+            env,
+            ttl_seconds: None,
+            network_policy: source.network_policy.clone(),
+            // MCP specs aren't on the source row — they live in
+            // user_secrets keyed by source id.  Pass an empty list
+            // here and copy the records into place under the new id
+            // after `create()` returns (preserves oauth_tokens; the
+            // CreateRequest path would only round-trip URL+auth).
+            mcp_servers: Vec::new(),
+        };
+        let created = self.create(owner_id, req).await?;
+
+        // Carry per-instance secrets.  Same owner, so the ciphertext
+        // can be copied through the store API as-is.
+        let existing = self.secrets.list(&source.id).await?;
+        for (name, value) in existing {
+            if let Err(err) = self.secrets.put(&created.id, &name, &value).await {
+                tracing::warn!(
+                    source = %source.id,
+                    clone = %created.id,
+                    secret = %name,
+                    error = %err,
+                    "clone-empty: instance secret copy failed"
+                );
+            }
+        }
+
+        // Carry MCP server records (URL, auth, oauth_tokens preserved).
+        if let Some(secrets) = self.mcp_secrets.as_ref() {
+            match mcp_servers::copy_all(secrets, owner_id, &source.id, &created.id).await {
+                Ok(n) if n > 0 => tracing::info!(
+                    source = %source.id,
+                    clone = %created.id,
+                    count = n,
+                    "clone-empty: mcp servers copied"
+                ),
+                Ok(_) => {}
+                Err(err) => tracing::warn!(
+                    source = %source.id,
+                    clone = %created.id,
+                    error = %err,
+                    "clone-empty: mcp copy failed; clone will boot without MCP attached"
+                ),
+            }
+        }
+
+        Ok(created)
+    }
+
     /// Snapshot the source instance and restore onto a fresh swarm id +
     /// cube under `new_template_id`.  The new instance inherits the
     /// source's name, task, models, tools, network policy, and per-
@@ -4486,6 +4592,110 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, SwarmError::BadRequest(_)));
+    }
+
+    #[tokio::test]
+    async fn clone_empty_carries_config_secrets_and_mcp_no_snapshot() {
+        // Snapshot-less clone: fresh empty cube, but config + per-instance
+        // secrets + MCP records (with oauth_tokens) all come across.
+        let (isvc, _ssvc, cube, instances, secrets_store, user_secrets, owner) =
+            build_with_snapshot_and_mcp().await;
+
+        let src = isvc
+            .create(&owner, CreateRequest {
+                template_id: "tpl-v1".into(),
+                name: Some("axelrod".into()),
+                task: Some("game-theory triage".into()),
+                env: env_with_model(),
+                ttl_seconds: None,
+                network_policy: NetworkPolicy::Open,
+                mcp_servers: vec![crate::mcp_servers::McpServerSpec {
+                    name: "linear".into(),
+                    url: "https://api.linear.app/mcp".into(),
+                    auth: crate::mcp_servers::McpAuthSpec::Bearer {
+                        token: "lin_secret".into(),
+                    },
+                }],
+            })
+            .await
+            .unwrap();
+        secrets_store
+            .put(&src.id, "FOO", "bar")
+            .await
+            .unwrap();
+        let mcp_entry = crate::mcp_servers::McpServerEntry {
+            url: "https://api.linear.app/mcp".into(),
+            auth: crate::mcp_servers::McpAuthSpec::Bearer {
+                token: "lin_secret".into(),
+            },
+            oauth_tokens: Some(crate::mcp_servers::McpOAuthTokens {
+                access_token: "atk".into(),
+                refresh_token: Some("rtk".into()),
+                expires_at: Some(9_999_999_999),
+                token_url: "https://auth/token".into(),
+                client_id: "cid".into(),
+                client_secret: None,
+            }),
+        };
+        crate::mcp_servers::put(&user_secrets, &owner, &src.id, "linear", &mcp_entry)
+            .await
+            .unwrap();
+
+        let snapshots_before = cube.snapshotted.lock().unwrap().len();
+
+        let cloned = isvc
+            .clone_empty(&owner, &src.id, "tpl-v2", None)
+            .await
+            .unwrap();
+
+        // 1. NO snapshot was taken — that's the whole point.
+        assert_eq!(
+            cube.snapshotted.lock().unwrap().len(),
+            snapshots_before,
+            "clone-empty must skip the snapshot step"
+        );
+
+        // 2. New row carries name, task, models (via SWARM_MODELS env),
+        //    network policy, and gets the new template.
+        let new_row = instances.get(&cloned.id).await.unwrap().unwrap();
+        assert_ne!(cloned.id, src.id);
+        assert_eq!(new_row.owner_id, owner);
+        assert_eq!(new_row.name, "axelrod");
+        assert_eq!(new_row.task, "game-theory triage");
+        assert_eq!(new_row.template_id, "tpl-v2");
+        assert_eq!(new_row.network_policy, NetworkPolicy::Open);
+
+        // 3. Cube was hired with the new template AND no from_snapshot.
+        let captured = cube.last_create();
+        assert_eq!(captured.template_id, "tpl-v2");
+        assert!(
+            captured.from_snapshot.is_none(),
+            "clone-empty must hire a fresh cube without from_snapshot"
+        );
+
+        // 4. Per-instance secret round-trips.
+        let copied = secrets_store.list(&cloned.id).await.unwrap();
+        assert!(copied.iter().any(|(n, v)| n == "FOO" && v == "bar"));
+
+        // 5. MCP entry was re-keyed with oauth_tokens preserved.
+        let names = crate::mcp_servers::list_names(&user_secrets, &owner, &cloned.id)
+            .await
+            .unwrap();
+        assert_eq!(names, vec!["linear".to_string()]);
+        let cloned_entry = crate::mcp_servers::get(&user_secrets, &owner, &cloned.id, "linear")
+            .await
+            .unwrap()
+            .expect("clone must have a linear MCP entry");
+        assert_eq!(cloned_entry.url, "https://api.linear.app/mcp");
+        assert_eq!(
+            cloned_entry.oauth_tokens.as_ref().map(|t| t.access_token.as_str()),
+            Some("atk")
+        );
+
+        // 6. Source row is left running and untouched.
+        let src_row = instances.get(&src.id).await.unwrap().unwrap();
+        assert_eq!(src_row.status, InstanceStatus::Live);
+        assert_eq!(src_row.template_id, "tpl-v1");
     }
 
     #[tokio::test]

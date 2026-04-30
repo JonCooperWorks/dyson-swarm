@@ -431,7 +431,7 @@ function TaskForm({ instanceId, taskName }) {
 
       {editing ? <DeliveriesPanel instanceId={instanceId} taskName={taskName}/> : null}
 
-      <div className="edit-action-bar">
+      <div className="edit-action-bar edit-action-bar-static">
         <button
           type="submit"
           form="task-form"

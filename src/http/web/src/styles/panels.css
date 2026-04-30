@@ -1316,6 +1316,17 @@
   z-index: 5;
 }
 
+/* Tasks form variant: pin the action bar at the bottom of the page
+ * flow instead of sticking to the viewport.  The tasks form is short
+ * and the sticky overlay obscured the auth-scheme radios mid-form;
+ * users expected create/cancel to live at the bottom, not float. */
+.edit-action-bar-static {
+  position: static;
+  background: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
 .btn-lg { padding: 8px 18px; font-size: 14px; }
 
 @media (max-width: 640px) {

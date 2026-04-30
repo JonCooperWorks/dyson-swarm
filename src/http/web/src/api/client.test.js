@@ -118,6 +118,51 @@ describe('SwarmClient', () => {
     expect(body).toEqual({ name: 'rename', task: '' }); // empty models[] dropped
   });
 
+  test('updateInstance: forwards a non-empty `tools` array verbatim', async () => {
+    // Regression for the silent-drop bug.  Earlier the destructure was
+    // `{ name, task, models }` and any `tools` array on the call site
+    // was thrown away before reaching the wire — so unchecking a tool
+    // in the SPA edit form fired a PATCH with no `tools` key and the
+    // backend's update_tools branch never ran.
+    const fetchImpl = vi.fn().mockResolvedValue(noContentResponse());
+    const client = new SwarmClient({ fetch: fetchImpl, getToken: () => null });
+    await client.updateInstance('i1', {
+      name: 'axelrod',
+      task: 'do the thing',
+      tools: ['read_file', 'write_file', 'list_files'],
+    });
+    const [url, init] = fetchImpl.mock.calls[0];
+    expect(url).toBe('/v1/instances/i1');
+    expect(init.method).toBe('PATCH');
+    expect(JSON.parse(init.body)).toEqual({
+      name: 'axelrod',
+      task: 'do the thing',
+      tools: ['read_file', 'write_file', 'list_files'],
+    });
+  });
+
+  test('updateInstance: forwards `tools: []` (meaningful — resets to defaults)', async () => {
+    // Distinct from the empty-models case: an empty tools array is
+    // the sentinel for "use agent defaults" on the swarm side, so the
+    // client must NOT collapse it to "no field sent".
+    const fetchImpl = vi.fn().mockResolvedValue(noContentResponse());
+    const client = new SwarmClient({ fetch: fetchImpl, getToken: () => null });
+    await client.updateInstance('i1', { tools: [] });
+    const body = JSON.parse(fetchImpl.mock.calls[0][1].body);
+    expect(body).toEqual({ tools: [] });
+  });
+
+  test('updateInstance: drops `tools` when not an array', async () => {
+    // null/undefined/missing all mean "leave tools unchanged" — same
+    // semantic the swarm handler enforces (Option<Vec> with serde
+    // default).
+    const fetchImpl = vi.fn().mockResolvedValue(noContentResponse());
+    const client = new SwarmClient({ fetch: fetchImpl, getToken: () => null });
+    await client.updateInstance('i1', { name: 'rename', tools: null });
+    const body = JSON.parse(fetchImpl.mock.calls[0][1].body);
+    expect(body).toEqual({ name: 'rename' });
+  });
+
   test('throws when no fetch is available', () => {
     expect(() => new SwarmClient({ fetch: null })).toThrow(/no fetch implementation/);
   });

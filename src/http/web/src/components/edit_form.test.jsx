@@ -249,6 +249,46 @@ describe('EditInstancePage parity with hire form', () => {
 
   });
 
+  test('unchecking a tool sends the trimmed tools array to updateInstance', async () => {
+    // Regression: unchecking `bulk_edit` and clicking save must
+    // include `tools` in the PATCH payload — otherwise the row's
+    // tool list never narrows and the running agent keeps
+    // registering everything.  Found against
+    // central-hickory-255-4b26de when the SPA's client.updateInstance
+    // was destructuring `{ name, task, models }` only and silently
+    // dropping `tools`.
+    const row = makeRow({
+      tools: [
+        'read_file', 'write_file', 'edit_file', 'bulk_edit',
+        'list_files', 'search_files', 'send_file',
+      ],
+    });
+    const { client } = renderEdit(row);
+
+    // Untick the bulk_edit checkbox.
+    const bulkEdit = await screen.findByRole('checkbox', { name: /bulk_edit/ });
+    expect(bulkEdit).toBeChecked();
+    fireEvent.click(bulkEdit);
+    expect(bulkEdit).not.toBeChecked();
+
+    // Save.
+    fireEvent.click(screen.getByRole('button', { name: /^save$/i }));
+    await vi.waitFor(() => {
+      expect(client.updateInstance).toHaveBeenCalled();
+    });
+    const [, payload] = client.updateInstance.mock.calls[0];
+    expect(payload.tools).toBeDefined();
+    expect(payload.tools).not.toContain('bulk_edit');
+    // Sanity: every other tool the user kept ticked is still in
+    // the payload — we're trimming, not nuking.
+    for (const t of [
+      'read_file', 'write_file', 'edit_file',
+      'list_files', 'search_files', 'send_file',
+    ]) {
+      expect(payload.tools).toContain(t);
+    }
+  });
+
   test('save button stays one label even when the network policy is dirty', async () => {
     // Post-in-place-rotation: a network change still restarts the
     // sandbox, but the swarm id (and all its surfaces) survive.

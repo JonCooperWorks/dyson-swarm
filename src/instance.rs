@@ -4766,6 +4766,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn update_tools_pushes_allowlist_and_persists_on_row() {
+        // Regression for the SPA's "uncheck a tool, save, nothing
+        // changes" bug.  Front-end side is covered by
+        // edit_form.test.jsx; this is the server-side guarantee that
+        // when update_tools IS called with a trimmed list, it fires
+        // a configure push with `tools: Some(<list>)` AND persists
+        // the list on the row so the list endpoint reflects it.
+        let (svc, _cube, _tokens, _instances, recorder, _user_secrets, owner) =
+            build_with_mcp_secrets().await;
+
+        let created = svc
+            .create(&owner, CreateRequest {
+                template_id: "tpl".into(),
+                name: Some("axelrod".into()),
+                task: Some("triage".into()),
+                env: env_with_model(),
+                ttl_seconds: None,
+                network_policy: NetworkPolicy::default(),
+                mcp_servers: Vec::new(),
+            })
+            .await
+            .unwrap();
+        wait_for_pushes(&recorder, 1).await;
+        let pushes_before = recorder.pushed.lock().unwrap().len();
+
+        let trimmed = vec![
+            "read_file".to_string(),
+            "write_file".to_string(),
+            "edit_file".to_string(),
+            "list_files".to_string(),
+            "search_files".to_string(),
+            "send_file".to_string(),
+        ];
+        svc.update_tools(&owner, &created.id, trimmed.clone())
+            .await
+            .unwrap();
+
+        // 1. A new configure push fired carrying exactly the trimmed
+        //    list under `tools: Some(...)`.  Identity / models are
+        //    untouched on this branch — the body should look like
+        //    "tools-only".
+        let pushed = recorder.pushed.lock().unwrap();
+        assert!(
+            pushed.len() > pushes_before,
+            "update_tools must fire at least one configure push"
+        );
+        let (target_id, _, body) = pushed.last().unwrap();
+        assert_eq!(target_id, &created.id);
+        assert_eq!(body.tools.as_deref(), Some(trimmed.as_slice()));
+        assert!(body.name.is_none() && body.task.is_none() && body.models.is_empty(),
+            "tools-only push must not carry identity or models");
+
+        // 2. The row's `tools` column reflects the new list, so
+        //    GET /v1/instances/:id surfaces the trimmed allowlist
+        //    on the next read.
+        drop(pushed);
+        let row = _instances.get(&created.id).await.unwrap().unwrap();
+        assert_eq!(row.tools, trimmed);
+    }
+
+    #[tokio::test]
     async fn clone_unknown_source_returns_not_found() {
         let (isvc, ssvc, _cube, _instances, _secrets, _user_secrets, _recorder, owner) =
             build_with_snapshot_and_mcp().await;

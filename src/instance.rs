@@ -116,6 +116,42 @@ pub const ENV_TOOLS: &str = "SWARM_TOOLS";
 /// agents that only read `SWARM_MODEL` ignore this.
 pub const ENV_MODELS: &str = "SWARM_MODELS";
 
+/// Standard env-var triple that http clients (curl, requests, urllib3,
+/// reqwest, axios, etc.) honour for outbound traffic routing.  Pointed
+/// at the host-resident tinyproxy on `mvm_gateway_ip:3128` so cube
+/// outbound TCP transits the host's kernel TCP stack instead of the
+/// eBPF SNAT path that some upstream networks (Google, GitHub via
+/// Microsoft) silently drop.  See
+/// `deploy/templates/tinyproxy-cube.conf.tmpl` for the proxy config.
+///
+/// Injected only for policies that allow generic public egress
+/// (`Open`, `NoLocalNet`, `Denylist`).  `Airgap` and `Allowlist` keep
+/// these unset so a cube can't accidentally tunnel through tinyproxy
+/// and bypass its eBPF allow-list.
+pub const ENV_HTTPS_PROXY: &str = "HTTPS_PROXY";
+pub const ENV_HTTP_PROXY: &str = "HTTP_PROXY";
+/// Hosts that must NOT go via the proxy: the swarm `/llm` endpoint,
+/// the cube-proxy DNS resolver, and the loopbacks.  Without this the
+/// dyson agent's calls back to swarm would attempt CONNECT through
+/// tinyproxy and bounce off its tight ConnectPort allowlist.
+pub const ENV_NO_PROXY: &str = "NO_PROXY";
+/// Lowercase variants exist purely because some tools (most notably
+/// curl + libcurl-based bindings) only honour the lowercase names,
+/// while others only honour the uppercase.  Set both.
+pub const ENV_HTTPS_PROXY_LC: &str = "https_proxy";
+pub const ENV_HTTP_PROXY_LC: &str = "http_proxy";
+pub const ENV_NO_PROXY_LC: &str = "no_proxy";
+
+/// The proxy URL cubes should target.  `169.254.68.5` is the eBPF
+/// `mvm_gateway_ip` — the cube routes it via its default gateway and
+/// the eBPF program DNATs the destination to `cubegw0_ip`
+/// (`192.168.0.1`) where tinyproxy listens.
+pub const CUBE_HTTP_PROXY_URL: &str = "http://169.254.68.5:3128";
+/// `NO_PROXY` value matching what the agent already needs to reach
+/// directly: swarm's /llm endpoint (same host, port 8080), the local
+/// CoreDNS resolver, and loopbacks.
+pub const CUBE_NO_PROXY: &str = "169.254.68.5,169.254.254.53,127.0.0.1,localhost";
+
 /// Sentinel `owner_id` used by system-internal flows (TTL sweeper, probe
 /// loop, proxy resolving via `proxy_token`) to bypass tenant filtering.
 /// User-facing routes never pass this — the auth middleware resolves the
@@ -248,6 +284,7 @@ fn managed_env(
     bearer: &str,
     name: &str,
     task: &str,
+    network_policy: &NetworkPolicy,
 ) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
     out.insert(ENV_PROXY_URL.into(), proxy_base.to_owned());
@@ -256,7 +293,31 @@ fn managed_env(
     out.insert(ENV_BEARER_TOKEN.into(), bearer.to_owned());
     out.insert(ENV_NAME.into(), name.to_owned());
     out.insert(ENV_TASK.into(), task.to_owned());
+    // Inject HTTPS_PROXY only for policies that already permit broad
+    // outbound traffic.  Airgap + Allowlist intentionally keep the
+    // env unset so a sandbox can't tunnel out via tinyproxy and dodge
+    // its eBPF allow-list.  The lowercase names are duplicated
+    // because some clients (curl/libcurl) honour only those.
+    if policy_permits_generic_egress(network_policy) {
+        out.insert(ENV_HTTPS_PROXY.into(), CUBE_HTTP_PROXY_URL.to_owned());
+        out.insert(ENV_HTTPS_PROXY_LC.into(), CUBE_HTTP_PROXY_URL.to_owned());
+        out.insert(ENV_HTTP_PROXY.into(), CUBE_HTTP_PROXY_URL.to_owned());
+        out.insert(ENV_HTTP_PROXY_LC.into(), CUBE_HTTP_PROXY_URL.to_owned());
+        out.insert(ENV_NO_PROXY.into(), CUBE_NO_PROXY.to_owned());
+        out.insert(ENV_NO_PROXY_LC.into(), CUBE_NO_PROXY.to_owned());
+    }
     out
+}
+
+/// True when the network policy allows traffic to arbitrary public
+/// destinations.  The proxy env injection gates on this — Airgap and
+/// Allowlist exist precisely so the operator can constrain egress,
+/// and routing through tinyproxy would silently widen that.
+fn policy_permits_generic_egress(p: &NetworkPolicy) -> bool {
+    matches!(
+        p,
+        NetworkPolicy::Open | NetworkPolicy::NoLocalNet | NetworkPolicy::Denylist { .. }
+    )
 }
 
 /// Body sent to dyson's `/api/admin/configure`.  Mirrors the dyson
@@ -914,6 +975,7 @@ impl InstanceService {
             &source.bearer_token,
             &source.name,
             &source.task,
+            &target_policy,
         );
         let env = compose_env(&BTreeMap::new(), &managed, &BTreeMap::new(), &existing);
 
@@ -1095,6 +1157,7 @@ impl InstanceService {
             &source.bearer_token,
             &source.name,
             &source.task,
+            &target_policy,
         );
         let env = compose_env(&BTreeMap::new(), &managed, &BTreeMap::new(), &existing);
 
@@ -1547,7 +1610,15 @@ impl InstanceService {
         // its own self-knowledge files (SOUL.md and friends in Dyson's
         // case); subsequent edits to the swarm row don't propagate to a
         // running sandbox, by design.
-        let managed = managed_env(&self.proxy_base, &proxy_token, &id, &bearer, &name, &task);
+        let managed = managed_env(
+            &self.proxy_base,
+            &proxy_token,
+            &id,
+            &bearer,
+            &name,
+            &task,
+            &req.network_policy,
+        );
 
         // Templates aren't materialised inside swarm — they live in Cube.
         // The "template" half of the merge is empty here; operators set per-
@@ -2282,6 +2353,7 @@ impl InstanceService {
             &bearer,
             &restored_name,
             &restored_task,
+            &req.network_policy,
         );
 
         let env = compose_env(&BTreeMap::new(), &managed, &req.env, &existing);
@@ -2666,6 +2738,107 @@ mod tests {
 
         let row = instances.get(&created.id).await.unwrap().unwrap();
         assert_eq!(row.status, InstanceStatus::Live);
+    }
+
+    /// Regression for the cube → tinyproxy egress workaround
+    /// (`http://169.254.68.5:3128`).  Some upstream networks silently
+    /// drop SYN-ACKs for cube traffic that goes through the eBPF SNAT
+    /// path; routing TCP via a host-resident HTTP proxy makes those
+    /// destinations reachable.  Auto-injection of HTTPS_PROXY only
+    /// fires when the policy already permits broad public egress —
+    /// Airgap and Allowlist must not get the env, otherwise a
+    /// supposedly-restricted cube can tunnel out via tinyproxy and
+    /// dodge its allow-list.  These tests pin the gating directly on
+    /// the helper so future policy additions force a deliberate
+    /// decision (the matcher in `policy_permits_generic_egress` is
+    /// exhaustive — adding an enum variant won't compile).
+    #[test]
+    fn proxy_env_injected_for_open_policy() {
+        let env = managed_env(
+            "http://swarm:8080/llm",
+            "tok",
+            "id",
+            "bear",
+            "n",
+            "t",
+            &NetworkPolicy::Open,
+        );
+        assert_eq!(env[ENV_HTTPS_PROXY], CUBE_HTTP_PROXY_URL);
+        assert_eq!(env[ENV_HTTP_PROXY], CUBE_HTTP_PROXY_URL);
+        assert_eq!(env[ENV_HTTPS_PROXY_LC], CUBE_HTTP_PROXY_URL);
+        assert_eq!(env[ENV_HTTP_PROXY_LC], CUBE_HTTP_PROXY_URL);
+        assert_eq!(env[ENV_NO_PROXY], CUBE_NO_PROXY);
+        assert_eq!(env[ENV_NO_PROXY_LC], CUBE_NO_PROXY);
+    }
+
+    #[test]
+    fn proxy_env_injected_for_nolocalnet_policy() {
+        let env = managed_env(
+            "http://swarm:8080/llm",
+            "tok",
+            "id",
+            "bear",
+            "n",
+            "t",
+            &NetworkPolicy::NoLocalNet,
+        );
+        assert_eq!(env[ENV_HTTPS_PROXY], CUBE_HTTP_PROXY_URL);
+    }
+
+    #[test]
+    fn proxy_env_injected_for_denylist_policy() {
+        let env = managed_env(
+            "http://swarm:8080/llm",
+            "tok",
+            "id",
+            "bear",
+            "n",
+            "t",
+            &NetworkPolicy::Denylist {
+                entries: vec!["1.2.3.4/32".into()],
+            },
+        );
+        // Denylist allows everything except listed networks — proxy is
+        // the sane fallback when listed networks happen to include the
+        // upstream-blocked ones.
+        assert_eq!(env[ENV_HTTPS_PROXY], CUBE_HTTP_PROXY_URL);
+    }
+
+    #[test]
+    fn proxy_env_omitted_for_airgap_policy() {
+        let env = managed_env(
+            "http://swarm:8080/llm",
+            "tok",
+            "id",
+            "bear",
+            "n",
+            "t",
+            &NetworkPolicy::Airgap,
+        );
+        // The proxy env vars must be ABSENT under Airgap so a
+        // supposedly-isolated cube can't tunnel out via tinyproxy.
+        assert!(!env.contains_key(ENV_HTTPS_PROXY));
+        assert!(!env.contains_key(ENV_HTTP_PROXY));
+        assert!(!env.contains_key(ENV_NO_PROXY));
+    }
+
+    #[test]
+    fn proxy_env_omitted_for_allowlist_policy() {
+        let env = managed_env(
+            "http://swarm:8080/llm",
+            "tok",
+            "id",
+            "bear",
+            "n",
+            "t",
+            // Allowlist is the operator's explicit "only these"
+            // statement; auto-injecting a proxy that bypasses the
+            // allow-list would silently widen it.
+            &NetworkPolicy::Allowlist {
+                entries: vec!["1.2.3.4/32".into()],
+            },
+        );
+        assert!(!env.contains_key(ENV_HTTPS_PROXY));
     }
 
     #[tokio::test]

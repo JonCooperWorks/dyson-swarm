@@ -273,14 +273,14 @@ const TOOL_CATALOGUE = [
   { name: 'bulk_edit',                  group: 'filesystem' },
   { name: 'list_files',                 group: 'filesystem' },
   { name: 'search_files',               group: 'filesystem' },
-  { name: 'web_fetch',                  group: 'web' },
-  { name: 'web_search',                 group: 'web' },
-  { name: 'image_generate',             group: 'web' },
+  { name: 'web_fetch',                  group: 'web', requiresNetwork: true },
+  { name: 'web_search',                 group: 'web', requiresNetwork: true },
+  { name: 'image_generate',             group: 'web', requiresNetwork: true },
   { name: 'kb_search',                  group: 'knowledge' },
   { name: 'kb_status',                  group: 'knowledge' },
   { name: 'memory_search',              group: 'knowledge' },
   { name: 'workspace',                  group: 'knowledge' },
-  { name: 'dependency_scan',            group: 'security' },
+  { name: 'dependency_scan',            group: 'security', requiresNetwork: true },
   { name: 'ast_describe',               group: 'security' },
   { name: 'ast_query',                  group: 'security' },
   { name: 'taint_trace',                group: 'security' },
@@ -292,6 +292,20 @@ const TOOL_CATALOGUE = [
   { name: 'export_conversation',        group: 'comm' },
 ];
 const ALL_TOOL_NAMES = TOOL_CATALOGUE.map(t => t.name);
+export const NETWORK_REQUIRED_TOOL_NAMES = TOOL_CATALOGUE
+  .filter(t => t.requiresNetwork)
+  .map(t => t.name);
+
+/// True when the policy kind blocks public-internet egress.
+/// (Allowlist / denylist still let some traffic through, so we
+/// only flag full airgap.)
+export function isAirgap(kind) { return kind === 'airgap'; }
+
+/// True when the tool would be a no-op under the given network
+/// policy because it has no way to reach its upstream.
+export function toolBlockedByNetwork(toolName, kind) {
+  return isAirgap(kind) && NETWORK_REQUIRED_TOOL_NAMES.includes(toolName);
+}
 
 // Sentinel placeholder shown in MCP credential inputs on edit.  When
 // the form submits with this value verbatim, the swarm side keeps
@@ -328,7 +342,12 @@ const TOOL_GROUPS = (() => {
 /// Editable tool picker — every built-in grouped by category with a
 /// checkbox.  Open by default; same panel chrome as snapshots /
 /// secrets / mcp / network so the detail-page rhythm holds.
-function ToolsPicker({ value, onChange }) {
+///
+/// `policyKind` greys out network-required tools when the operator
+/// picks airgap — the checkbox stays interactive so they can still
+/// enable e.g. `web_fetch` if they intend to lift airgap, but the
+/// row is visually marked "won't work right now".
+function ToolsPicker({ value, onChange, policyKind }) {
   const enabled = React.useMemo(() => new Set(value), [value]);
   const toggle = (name) => {
     const next = new Set(enabled);
@@ -374,16 +393,23 @@ function ToolsPicker({ value, onChange }) {
           <fieldset key={group} className="tools-group">
             <legend className="tools-group-label muted small">{group}</legend>
             <div className="tools-grid">
-              {items.map(t => (
-                <label key={t.name} className="tools-cell">
-                  <input
-                    type="checkbox"
-                    checked={enabled.has(t.name)}
-                    onChange={() => toggle(t.name)}
-                  />
-                  <span className="tools-cell-name mono-sm">{t.name}</span>
-                </label>
-              ))}
+              {items.map(t => {
+                const blocked = toolBlockedByNetwork(t.name, policyKind);
+                return (
+                  <label
+                    key={t.name}
+                    className={`tools-cell ${blocked ? 'blocked' : ''}`}
+                    title={blocked ? 'requires network — air-gapped instances can\'t reach upstream' : undefined}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={enabled.has(t.name)}
+                      onChange={() => toggle(t.name)}
+                    />
+                    <span className="tools-cell-name mono-sm">{t.name}</span>
+                  </label>
+                );
+              })}
             </div>
           </fieldset>
         ))}
@@ -423,21 +449,25 @@ function ToolsView({ instance }) {
           <fieldset key={group} className="tools-group">
             <legend className="tools-group-label muted small">{group}</legend>
             <div className="tools-grid">
-              {items.map(t => (
-                <span
-                  key={t.name}
-                  className={`tools-cell ${effective.has(t.name) ? 'on' : 'off'}`}
-                >
-                  <input
-                    type="checkbox"
-                    checked={effective.has(t.name)}
-                    readOnly
-                    disabled
-                    aria-label={t.name}
-                  />
-                  <span className="tools-cell-name mono-sm">{t.name}</span>
-                </span>
-              ))}
+              {items.map(t => {
+                const blocked = toolBlockedByNetwork(t.name, instance.network_policy?.kind);
+                return (
+                  <span
+                    key={t.name}
+                    className={`tools-cell ${effective.has(t.name) ? 'on' : 'off'} ${blocked ? 'blocked' : ''}`}
+                    title={blocked ? 'requires network — air-gapped instance can\'t reach upstream' : undefined}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={effective.has(t.name)}
+                      readOnly
+                      disabled
+                      aria-label={t.name}
+                    />
+                    <span className="tools-cell-name mono-sm">{t.name}</span>
+                  </span>
+                );
+              })}
             </div>
           </fieldset>
         ))}
@@ -637,7 +667,11 @@ function NewInstanceForm() {
         <NetworkPolicyPicker value={networkPolicy} onChange={setNetworkPolicy}/>
       </section>
 
-      <ToolsPicker value={tools} onChange={setTools}/>
+      <ToolsPicker
+        value={tools}
+        onChange={setTools}
+        policyKind={networkPolicy.kind}
+      />
 
       <section className="page-section">
         <h2 className="section-title">MCP servers</h2>
@@ -1750,7 +1784,11 @@ function EditInstanceForm({ instance, backHref, formId }) {
         selected={models}
         onChange={setModels}
       />
-      <ToolsPicker value={tools} onChange={setToolsTracked}/>
+      <ToolsPicker
+        value={tools}
+        onChange={setToolsTracked}
+        policyKind={instance.network_policy?.kind}
+      />
       {error ? <div className="error">{error}</div> : null}
     </form>
   );

@@ -6,7 +6,13 @@
  */
 import { describe, expect, test } from 'vitest';
 
-import { profileLabel, serializeMcpServers } from './instances.jsx';
+import {
+  profileLabel,
+  serializeMcpServers,
+  isAirgap,
+  toolBlockedByNetwork,
+  NETWORK_REQUIRED_TOOL_NAMES,
+} from './instances.jsx';
 
 describe('profileLabel', () => {
   test('renders the operator-facing tuple for a whole-cpu, whole-GB profile', () => {
@@ -167,5 +173,76 @@ describe('serializeMcpServers', () => {
         },
       },
     ]);
+  });
+});
+
+describe('isAirgap', () => {
+  test('only the literal "airgap" kind counts as airgapped', () => {
+    expect(isAirgap('airgap')).toBe(true);
+    // The four other policy kinds let some traffic through, so a
+    // tool that "needs network" still has a path.
+    expect(isAirgap('open')).toBe(false);
+    expect(isAirgap('nolocalnet')).toBe(false);
+    expect(isAirgap('allowlist')).toBe(false);
+    expect(isAirgap('denylist')).toBe(false);
+  });
+
+  test('null / undefined / unknown kinds are treated as not airgap', () => {
+    // Defensive: a row with a missing or unrecognised policy kind
+    // should fall through to "not airgap" rather than greying out
+    // the whole tool list.
+    expect(isAirgap(null)).toBe(false);
+    expect(isAirgap(undefined)).toBe(false);
+    expect(isAirgap('unknown')).toBe(false);
+  });
+});
+
+describe('NETWORK_REQUIRED_TOOL_NAMES', () => {
+  test('exposes exactly the tools that need public-internet egress', () => {
+    // This is the contract the SPA uses to grey out cells under
+    // airgap; tightening it should be a deliberate edit, not a
+    // silent slide.  Order matches TOOL_CATALOGUE.
+    expect(NETWORK_REQUIRED_TOOL_NAMES).toEqual([
+      'web_fetch',
+      'web_search',
+      'image_generate',
+      'dependency_scan',
+    ]);
+  });
+});
+
+describe('toolBlockedByNetwork', () => {
+  test('marks every network-required tool blocked under airgap', () => {
+    // The picker's "blocked" treatment hangs off this — a tool
+    // that needs network can't reach upstream when the cube is
+    // airgapped, so the operator gets the visual cue.
+    for (const name of NETWORK_REQUIRED_TOOL_NAMES) {
+      expect(toolBlockedByNetwork(name, 'airgap')).toBe(true);
+    }
+  });
+
+  test('does not block tools that work offline, even under airgap', () => {
+    // Filesystem / KB / AST tools all run in-cube with no upstream.
+    expect(toolBlockedByNetwork('bash', 'airgap')).toBe(false);
+    expect(toolBlockedByNetwork('read_file', 'airgap')).toBe(false);
+    expect(toolBlockedByNetwork('ast_query', 'airgap')).toBe(false);
+    expect(toolBlockedByNetwork('kb_search', 'airgap')).toBe(false);
+  });
+
+  test('does not block any tool when the policy permits egress', () => {
+    // Open / nolocalnet / allowlist / denylist all let *some*
+    // traffic through, so we leave the picker alone — the operator
+    // is on the hook for verifying their allow/deny entries.
+    for (const kind of ['open', 'nolocalnet', 'allowlist', 'denylist']) {
+      for (const name of NETWORK_REQUIRED_TOOL_NAMES) {
+        expect(toolBlockedByNetwork(name, kind)).toBe(false);
+      }
+    }
+  });
+
+  test('an unknown tool name is never blocked', () => {
+    // Forward-compat: a future dyson tool the SPA doesn't know
+    // about shouldn't get spuriously greyed out — opt-in only.
+    expect(toolBlockedByNetwork('future_tool', 'airgap')).toBe(false);
   });
 });

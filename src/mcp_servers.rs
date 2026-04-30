@@ -42,7 +42,8 @@ pub enum McpAuthSpec {
     /// Static bearer token added on every forwarded request.
     Bearer { token: String },
     /// OAuth 2.1 Authorization Code + PKCE.  All discovery fields
-    /// optional — leave empty to use `.well-known/oauth-authorization-server`
+    /// optional — leave empty to run two-step discovery (RFC 9728
+    /// Protected Resource Metadata → RFC 8414 path-prefixed AS metadata)
     /// against the server URL's origin and Dynamic Client Registration.
     Oauth {
         #[serde(default)]
@@ -335,6 +336,16 @@ pub struct AuthMetadata {
     pub registration_endpoint: Option<String>,
 }
 
+/// RFC 9728 Protected Resource Metadata.  Published by the resource
+/// (i.e. the MCP server itself) so a client can find which
+/// authorization server(s) issue tokens for it — the OAuth pieces
+/// don't have to live on the same origin.
+#[derive(Debug, Clone, Deserialize)]
+struct ProtectedResourceMetadata {
+    #[serde(default)]
+    authorization_servers: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct DcrRequest {
     pub client_name: String,
@@ -386,28 +397,128 @@ pub async fn discover_metadata(
     server_url: &str,
     client: &reqwest::Client,
 ) -> Result<AuthMetadata, String> {
-    // Discovery is performed against the URL's origin, not the full
-    // path: a server at https://example.com/mcp publishes its metadata
-    // under https://example.com/.well-known/oauth-authorization-server.
+    // Two-step discovery per RFC 9728 + RFC 8414:
+    //   1. Fetch Protected Resource Metadata at
+    //      `{resource_origin}/.well-known/oauth-protected-resource`
+    //      to find the authorization server URL — the resource and the
+    //      AS often live on different origins (e.g. Smithery hosts the
+    //      MCP server on `*.run.tools` and the AS on `auth.smithery.ai`).
+    //   2. Fetch AS metadata via path-prefixed well-known
+    //      (`{as_origin}/.well-known/oauth-authorization-server{as_path}`)
+    //      so AS URLs with a tenant path resolve correctly.
     //
-    // Error messages reference the DOMAIN only — some MCP servers
+    // Falls back to the legacy single-shot at the resource origin when
+    // PRM isn't published — older MCP servers (Linear, etc.) colocate
+    // AS metadata with the resource.
+    //
+    // Error messages reference the DOMAIN only — some MCP providers
     // ship per-tenant URLs with bearer-style query params or path
     // segments, and a verbatim URL in a log line is a credential
     // disclosure waiting to happen.  See `domain_of` for the rule.
     let origin = origin_of(server_url)?;
-    let url = format!("{origin}/.well-known/oauth-authorization-server");
     let domain = domain_of(server_url);
+
+    let prm_url = format!("{origin}/.well-known/oauth-protected-resource");
+    match fetch_protected_resource(&prm_url, client, &domain).await? {
+        Some(as_url) => fetch_as_metadata(&as_url, client, &domain).await,
+        None => {
+            let url = format!("{origin}/.well-known/oauth-authorization-server");
+            fetch_metadata_at(&url, client, &domain).await
+        }
+    }
+}
+
+/// Try to fetch RFC 9728 Protected Resource Metadata.  Returns the
+/// first authorization server URL on success, `None` when the resource
+/// doesn't publish PRM (404), or an error for other failures.
+async fn fetch_protected_resource(
+    url: &str,
+    client: &reqwest::Client,
+    resource_domain: &str,
+) -> Result<Option<String>, String> {
     let resp = client
-        .get(&url)
+        .get(url)
         .send()
         .await
-        .map_err(|e| format!("discovery {domain}: {e}"))?;
+        .map_err(|e| format!("discovery {resource_domain}: {e}"))?;
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
     if !resp.status().is_success() {
-        return Err(format!("discovery {domain}: HTTP {}", resp.status()));
+        return Err(format!(
+            "discovery {resource_domain}: protected-resource HTTP {}",
+            resp.status(),
+        ));
+    }
+    let prm: ProtectedResourceMetadata = resp
+        .json()
+        .await
+        .map_err(|e| format!("discovery {resource_domain}: parse protected-resource: {e}"))?;
+    Ok(prm.authorization_servers.into_iter().next())
+}
+
+/// Fetch AS metadata for an authorization server URL that may carry a
+/// path component (e.g. multi-tenant providers).  Errors carry the
+/// resource's domain so operators can tie a failure back to the MCP
+/// server entry, not the (possibly tenant-bearing) AS path.
+async fn fetch_as_metadata(
+    as_url: &str,
+    client: &reqwest::Client,
+    resource_domain: &str,
+) -> Result<AuthMetadata, String> {
+    let well_known = as_metadata_url(as_url)
+        .map_err(|e| format!("discovery {resource_domain}: {e}"))?;
+    fetch_metadata_at(&well_known, client, resource_domain).await
+}
+
+async fn fetch_metadata_at(
+    url: &str,
+    client: &reqwest::Client,
+    resource_domain: &str,
+) -> Result<AuthMetadata, String> {
+    let resp = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("discovery {resource_domain}: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!(
+            "discovery {resource_domain}: HTTP {}",
+            resp.status(),
+        ));
     }
     resp.json::<AuthMetadata>()
         .await
-        .map_err(|e| format!("parse metadata: {e}"))
+        .map_err(|e| format!("discovery {resource_domain}: parse metadata: {e}"))
+}
+
+/// Build the well-known URL for an authorization server per
+/// RFC 8414 §3.1.  When the AS URL has a non-trivial path, the
+/// well-known segment is inserted *between* the origin and that path;
+/// when there's no path (or just `/`), the well-known sits at the root.
+///
+///   `https://auth.example.com`            → `https://auth.example.com/.well-known/oauth-authorization-server`
+///   `https://auth.example.com/`           → `https://auth.example.com/.well-known/oauth-authorization-server`
+///   `https://auth.example.com/tenant/svc` → `https://auth.example.com/.well-known/oauth-authorization-server/tenant/svc`
+pub fn as_metadata_url(as_url: &str) -> Result<String, String> {
+    let parsed = reqwest::Url::parse(as_url)
+        .map_err(|e| format!("parse {}: {e}", domain_of(as_url)))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| format!("no host in {}", domain_of(as_url)))?;
+    let scheme = parsed.scheme();
+    let origin = match parsed.port() {
+        Some(p) => format!("{scheme}://{host}:{p}"),
+        None => format!("{scheme}://{host}"),
+    };
+    let path = parsed.path().trim_end_matches('/');
+    if path.is_empty() {
+        Ok(format!("{origin}/.well-known/oauth-authorization-server"))
+    } else {
+        Ok(format!(
+            "{origin}/.well-known/oauth-authorization-server{path}",
+        ))
+    }
 }
 
 fn origin_of(url: &str) -> Result<String, String> {
@@ -913,6 +1024,60 @@ mod tests {
         );
         assert!(scrubbed.contains("https://api.linear.app"));
         assert!(scrubbed.contains("connection closed"));
+    }
+
+    // ── as_metadata_url ────────────────────────────────────────
+    //
+    // RFC 8414 §3.1 path-prefixed discovery.  This is what makes
+    // multi-tenant providers (Smithery, Auth0 with custom paths,
+    // etc.) discoverable without a hardcoded list of vendor quirks.
+
+    #[test]
+    fn as_metadata_url_root_origin() {
+        assert_eq!(
+            as_metadata_url("https://auth.example.com").unwrap(),
+            "https://auth.example.com/.well-known/oauth-authorization-server",
+        );
+        assert_eq!(
+            as_metadata_url("https://auth.example.com/").unwrap(),
+            "https://auth.example.com/.well-known/oauth-authorization-server",
+        );
+    }
+
+    #[test]
+    fn as_metadata_url_path_prefixed() {
+        // The Smithery shape — multi-tenant AS with the tenant in
+        // the path.  Well-known sits between origin and tenant path.
+        assert_eq!(
+            as_metadata_url("https://auth.smithery.ai/nexgendata-apify/finance-mcp-server").unwrap(),
+            "https://auth.smithery.ai/.well-known/oauth-authorization-server/nexgendata-apify/finance-mcp-server",
+        );
+        // Trailing slash on the AS URL is normalised away so we
+        // don't emit a double-slash before the well-known segment.
+        assert_eq!(
+            as_metadata_url("https://auth.example.com/tenant/").unwrap(),
+            "https://auth.example.com/.well-known/oauth-authorization-server/tenant",
+        );
+    }
+
+    #[test]
+    fn as_metadata_url_preserves_port() {
+        // Self-hosted AS on a non-default port.  Operators run these
+        // and the port MUST survive into the well-known URL.
+        assert_eq!(
+            as_metadata_url("http://10.0.0.5:7878/realm").unwrap(),
+            "http://10.0.0.5:7878/.well-known/oauth-authorization-server/realm",
+        );
+    }
+
+    #[test]
+    fn as_metadata_url_rejects_garbage() {
+        assert!(as_metadata_url("not a url").is_err());
+        // Errors must use the redacted domain, not the raw input.
+        let err = as_metadata_url("https://auth.example.com/tenant?token=secret-abc")
+            .map(|_| ())
+            .unwrap_or_else(|e| panic!("expected ok for valid URL with query, got err: {e}"));
+        let _ = err;
     }
 
     #[test]

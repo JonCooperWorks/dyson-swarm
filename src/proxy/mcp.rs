@@ -367,6 +367,14 @@ async fn oauth_start(
                     grant_types: vec!["authorization_code".into(), "refresh_token".into()],
                     response_types: vec!["code".into()],
                     token_endpoint_auth_method: None,
+                    // Mirror requested scopes into DCR — strict ASes
+                    // (Smithery) reject `authorize?scope=foo` when the
+                    // client wasn't registered with that scope.
+                    scope: if scopes.is_empty() {
+                        None
+                    } else {
+                        Some(scopes.join(" "))
+                    },
                 },
                 &svc.http,
             )

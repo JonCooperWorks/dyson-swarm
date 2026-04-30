@@ -355,6 +355,13 @@ pub struct DcrRequest {
     pub response_types: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_endpoint_auth_method: Option<String>,
+    /// Space-separated scope list (RFC 7591 §2).  Smithery (and likely
+    /// other strict ASes) reject `authorize?scope=foo` when the client
+    /// wasn't registered with that scope, so we mirror the user-supplied
+    /// scopes here at registration time.  None ⇒ field is omitted from
+    /// the JSON body and the AS chooses its default scope set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -621,14 +628,22 @@ pub fn build_auth_url(
             "parse auth endpoint {}: {e}",
             domain_of(authorization_endpoint),
         ))?;
-    url.query_pairs_mut()
-        .append_pair("response_type", "code")
-        .append_pair("client_id", client_id)
-        .append_pair("redirect_uri", redirect_uri)
-        .append_pair("scope", &scopes.join(" "))
-        .append_pair("code_challenge", code_challenge)
-        .append_pair("code_challenge_method", "S256")
-        .append_pair("state", state);
+    {
+        let mut q = url.query_pairs_mut();
+        q.append_pair("response_type", "code")
+            .append_pair("client_id", client_id)
+            .append_pair("redirect_uri", redirect_uri)
+            .append_pair("code_challenge", code_challenge)
+            .append_pair("code_challenge_method", "S256")
+            .append_pair("state", state);
+        // Some ASes (Smithery) reject `scope=` (empty) and reject
+        // scopes the DCR record didn't list.  When the user picks
+        // "no scopes", omit the param entirely so the AS uses its
+        // registered default set.
+        if !scopes.is_empty() {
+            q.append_pair("scope", &scopes.join(" "));
+        }
+    }
     Ok(url.to_string())
 }
 
@@ -1078,6 +1093,75 @@ mod tests {
             .map(|_| ())
             .unwrap_or_else(|e| panic!("expected ok for valid URL with query, got err: {e}"));
         let _ = err;
+    }
+
+    // ── build_auth_url ─────────────────────────────────────────
+    //
+    // Smithery (and other strict ASes) reject `authorize?scope=foo`
+    // when the DCR record didn't list `foo`.  We mirror the
+    // user-supplied scopes into DCR and omit the param entirely
+    // when there are no scopes — the AS picks its registered default.
+
+    #[test]
+    fn build_auth_url_omits_scope_when_empty() {
+        let url = build_auth_url(
+            "https://auth.example.com/authorize",
+            "client-1",
+            &[],
+            "https://swarm.example/cb",
+            "ch",
+            "st",
+        )
+        .unwrap();
+        assert!(!url.contains("scope="), "no empty scope param: {url}");
+        assert!(url.contains("client_id=client-1"));
+        assert!(url.contains("response_type=code"));
+        assert!(url.contains("code_challenge_method=S256"));
+    }
+
+    #[test]
+    fn build_auth_url_includes_scope_when_present() {
+        let url = build_auth_url(
+            "https://auth.example.com/authorize",
+            "client-1",
+            &["read".into(), "write".into()],
+            "https://swarm.example/cb",
+            "ch",
+            "st",
+        )
+        .unwrap();
+        // url-encoded space between scopes
+        assert!(url.contains("scope=read+write") || url.contains("scope=read%20write"),
+                "scope joined with space: {url}");
+    }
+
+    #[test]
+    fn dcr_request_serialises_scope_when_some() {
+        let req = DcrRequest {
+            client_name: "swarm".into(),
+            redirect_uris: vec!["https://x/cb".into()],
+            grant_types: vec!["authorization_code".into()],
+            response_types: vec!["code".into()],
+            token_endpoint_auth_method: None,
+            scope: Some("read write".into()),
+        };
+        let v = serde_json::to_value(&req).unwrap();
+        assert_eq!(v["scope"], "read write");
+    }
+
+    #[test]
+    fn dcr_request_omits_scope_when_none() {
+        let req = DcrRequest {
+            client_name: "swarm".into(),
+            redirect_uris: vec!["https://x/cb".into()],
+            grant_types: vec!["authorization_code".into()],
+            response_types: vec!["code".into()],
+            token_endpoint_auth_method: None,
+            scope: None,
+        };
+        let v = serde_json::to_value(&req).unwrap();
+        assert!(v.get("scope").is_none(),
+                "scope must be absent (not null) so AS uses its default: {v}");
     }
 
     #[test]

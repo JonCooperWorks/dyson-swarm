@@ -1273,14 +1273,34 @@ impl InstanceService {
         }
 
         // Carry MCP server records (URL, auth, oauth_tokens preserved).
+        // Two steps: copy the rows to user_secrets under the new id,
+        // then push the rendered mcp_servers block to the running
+        // dyson via /api/admin/configure.  Without the second step the
+        // template-default dyson.json has no MCP block, McpSkill never
+        // loads, and the agent reports zero MCP tools — even though
+        // the user_secrets rows are sitting there waiting.
         if let Some(secrets) = self.mcp_secrets.as_ref() {
             match mcp_servers::copy_all(secrets, owner_id, &source.id, &created.id).await {
-                Ok(n) if n > 0 => tracing::info!(
-                    source = %source.id,
-                    clone = %created.id,
-                    count = n,
-                    "clone-empty: mcp servers copied"
-                ),
+                Ok(n) if n > 0 => {
+                    tracing::info!(
+                        source = %source.id,
+                        clone = %created.id,
+                        count = n,
+                        "clone-empty: mcp servers copied"
+                    );
+                    if let Err(err) = self.sync_mcp_to_dyson(owner_id, &created.id).await {
+                        tracing::warn!(
+                            clone = %created.id,
+                            error = %err,
+                            "clone-empty: mcp sync push failed; the rewire-image-gen sweep will retry on next swarm restart"
+                        );
+                    } else {
+                        tracing::info!(
+                            clone = %created.id,
+                            "clone-empty: mcp block pushed to running dyson"
+                        );
+                    }
+                }
                 Ok(_) => {}
                 Err(err) => tracing::warn!(
                     source = %source.id,
@@ -1365,20 +1385,36 @@ impl InstanceService {
         let created = self.restore(owner_id, req).await?;
 
         // Carry MCP server records (URL, auth, and any active OAuth
-        // session) onto the new instance id.  Best-effort: a failure
-        // here leaves a Live cube with no MCP attached — better than
-        // tearing down the freshly-hired clone.  The mcp_servers sweep
-        // (~line 573) renders the new id's index into dyson.json on
-        // its next pass, so the cloned MCP servers light up without an
-        // extra explicit reconfigure.
+        // session) onto the new instance id, then push the rendered
+        // mcp_servers block.  The restore() above preserves the source
+        // cube's dyson.json (workspace volume), so without the push
+        // the agent's mcp_servers config still references
+        // /mcp/<source_id>/<name> URLs — which the proxy 404s because
+        // the source's user_secrets rows aren't keyed for the clone.
+        // Best-effort: a failure here is logged; the rewire-image-gen
+        // sweep retries on next swarm restart.
         if let Some(secrets) = self.mcp_secrets.as_ref() {
             match mcp_servers::copy_all(secrets, owner_id, &source.id, &created.id).await {
-                Ok(n) if n > 0 => tracing::info!(
-                    source = %source.id,
-                    clone = %created.id,
-                    count = n,
-                    "clone: mcp servers copied"
-                ),
+                Ok(n) if n > 0 => {
+                    tracing::info!(
+                        source = %source.id,
+                        clone = %created.id,
+                        count = n,
+                        "clone: mcp servers copied"
+                    );
+                    if let Err(err) = self.sync_mcp_to_dyson(owner_id, &created.id).await {
+                        tracing::warn!(
+                            clone = %created.id,
+                            error = %err,
+                            "clone: mcp sync push failed; the rewire-image-gen sweep will retry on next swarm restart"
+                        );
+                    } else {
+                        tracing::info!(
+                            clone = %created.id,
+                            "clone: mcp block pushed to running dyson"
+                        );
+                    }
+                }
                 Ok(_) => {}
                 Err(err) => tracing::warn!(
                     source = %source.id,
@@ -4363,6 +4399,8 @@ mod tests {
     /// and shares its InstanceStore + SecretStore + SnapshotStore +
     /// UserSecretsService with the SnapshotService so a single test can
     /// exercise the full clone pipeline (snapshot → restore → MCP carry).
+    /// The recorder is returned too so tests can assert what configure
+    /// bodies the clone pushed to the running dyson.
     async fn build_with_snapshot_and_mcp() -> (
         Arc<InstanceService>,
         Arc<SnapshotService>,
@@ -4370,6 +4408,7 @@ mod tests {
         Arc<dyn InstanceStore>,
         Arc<dyn SecretStore>,
         Arc<UserSecretsService>,
+        Arc<RecordingReconfigurer>,
         String,
     ) {
         let pool = open_in_memory().await.unwrap();
@@ -4414,7 +4453,7 @@ mod tests {
             backup,
             isvc.clone(),
         ));
-        (isvc, ssvc, cube, instances, secrets_store, user_secrets, owner)
+        (isvc, ssvc, cube, instances, secrets_store, user_secrets, recorder, owner)
     }
 
     #[tokio::test]
@@ -4423,7 +4462,7 @@ mod tests {
         // an instance secret, and one MCP server gets cloned to a fresh
         // id under a new template.  Every carried-over field round-trips,
         // ids/bearers diverge, and the source is untouched.
-        let (isvc, ssvc, cube, instances, secrets_store, user_secrets, owner) =
+        let (isvc, ssvc, cube, instances, secrets_store, user_secrets, _recorder, owner) =
             build_with_snapshot_and_mcp().await;
 
         let src = isvc
@@ -4546,7 +4585,7 @@ mod tests {
 
     #[tokio::test]
     async fn clone_rejects_destroyed_source() {
-        let (isvc, ssvc, _cube, instances, _secrets, _user_secrets, owner) =
+        let (isvc, ssvc, _cube, instances, _secrets, _user_secrets, _recorder, owner) =
             build_with_snapshot_and_mcp().await;
         let src = isvc
             .create(&owner, CreateRequest {
@@ -4573,7 +4612,7 @@ mod tests {
 
     #[tokio::test]
     async fn clone_empty_template_id_rejected() {
-        let (isvc, ssvc, _cube, _instances, _secrets, _user_secrets, owner) =
+        let (isvc, ssvc, _cube, _instances, _secrets, _user_secrets, _recorder, owner) =
             build_with_snapshot_and_mcp().await;
         let src = isvc
             .create(&owner, CreateRequest {
@@ -4598,7 +4637,7 @@ mod tests {
     async fn clone_empty_carries_config_secrets_and_mcp_no_snapshot() {
         // Snapshot-less clone: fresh empty cube, but config + per-instance
         // secrets + MCP records (with oauth_tokens) all come across.
-        let (isvc, _ssvc, cube, instances, secrets_store, user_secrets, owner) =
+        let (isvc, _ssvc, cube, instances, secrets_store, user_secrets, recorder, owner) =
             build_with_snapshot_and_mcp().await;
 
         let src = isvc
@@ -4696,11 +4735,39 @@ mod tests {
         let src_row = instances.get(&src.id).await.unwrap().unwrap();
         assert_eq!(src_row.status, InstanceStatus::Live);
         assert_eq!(src_row.template_id, "tpl-v1");
+
+        // 7. clone-empty must push the rendered mcp_servers block to
+        //    the new dyson via /api/admin/configure — without this
+        //    the template-default dyson.json has no mcp_servers
+        //    block, McpSkill never loads, and the agent reports zero
+        //    MCP tools even though user_secrets is populated.
+        let pushed = recorder.pushed.lock().unwrap();
+        let mcp_push = pushed
+            .iter()
+            .find(|(target_id, _, body)| target_id == &cloned.id && body.mcp_servers.is_some())
+            .expect("clone-empty must follow up the create-time push with a configure that includes mcp_servers");
+        let block = mcp_push.2.mcp_servers.as_ref().expect("body must carry mcp_servers");
+        assert!(
+            block.contains_key("linear"),
+            "rendered mcp_servers block must include the cloned `linear` server, got keys {:?}",
+            block.keys().collect::<Vec<_>>()
+        );
+        // Stamp the new instance id (not the source id) into the
+        // proxy URL — that's the whole point of the second push.
+        let url = block["linear"]["url"].as_str().unwrap();
+        assert!(
+            url.contains(&cloned.id),
+            "mcp proxy URL must reference the clone's id, got {url}"
+        );
+        assert!(
+            !url.contains(&src.id),
+            "mcp proxy URL must NOT reference the source id, got {url}"
+        );
     }
 
     #[tokio::test]
     async fn clone_unknown_source_returns_not_found() {
-        let (isvc, ssvc, _cube, _instances, _secrets, _user_secrets, owner) =
+        let (isvc, ssvc, _cube, _instances, _secrets, _user_secrets, _recorder, owner) =
             build_with_snapshot_and_mcp().await;
         let err = isvc
             .clone_instance(&owner, "no-such-instance", &ssvc, "tpl-v2", None)

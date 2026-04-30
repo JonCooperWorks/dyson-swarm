@@ -55,5 +55,6 @@ html, body {
   font-family: var(--sans);
   font-size: 13px;
   cursor: pointer;
+  text-decoration: none;
 }
 .btn:hover { background: var(--bg-2); }

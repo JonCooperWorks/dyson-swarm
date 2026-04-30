@@ -114,22 +114,28 @@ export function TasksListPage({ instanceId }) {
         </p>
       </header>
 
-      <div className="tasks-toolbar">
-        <a className="btn btn-primary" href={newHref}>new task</a>
-        <button className="btn btn-ghost btn-sm" onClick={refresh} disabled={refreshing} title="refresh">
-          {refreshing ? '…' : '↻'}
-        </button>
-      </div>
-
       {err ? <div className="error">{err}</div> : null}
 
-      {rows.length === 0 ? (
-        <div className="panel tasks-empty">
-          <p className="muted">No tasks yet.  Create one to expose a webhook URL the outside world can call.</p>
-          <a className="btn btn-primary" href={newHref}>new task</a>
+      <section className="panel">
+        <div className="panel-header">
+          <div className="panel-title">tasks</div>
+          <div className="panel-actions">
+            <button
+              className="btn btn-ghost btn-sm"
+              onClick={refresh}
+              disabled={refreshing}
+              title="refresh"
+            >
+              {refreshing ? '…' : '↻'}
+            </button>
+            <a className="btn btn-sm" href={newHref}>+ new</a>
+          </div>
         </div>
-      ) : (
-        <div className="panel tasks-list-panel">
+        {rows.length === 0 ? (
+          <p className="muted small">
+            no tasks yet — click <em>+ new</em> to expose a webhook URL.
+          </p>
+        ) : (
           <ul className="tasks-list">
             {rows.map(row => (
               <TaskRow
@@ -141,8 +147,8 @@ export function TasksListPage({ instanceId }) {
               />
             ))}
           </ul>
-        </div>
-      )}
+        )}
+      </section>
     </main>
   );
 }

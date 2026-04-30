@@ -1321,26 +1321,9 @@
   color: var(--bg-1);
 }
 
-.tasks-toolbar {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  margin-bottom: 12px;
-}
-
-.tasks-empty {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 12px;
-  padding: 24px;
-}
-
-.tasks-list-panel { padding: 0; }
-
 .tasks-list {
   list-style: none;
-  margin: 0;
+  margin: 4px 0 0;
   padding: 0;
   display: flex;
   flex-direction: column;
@@ -1350,10 +1333,10 @@
   display: flex;
   flex-direction: column;
   gap: 6px;
-  padding: 14px 16px;
-  border-bottom: 1px solid var(--border);
+  padding: 12px 0;
+  border-top: 1px solid var(--border);
 }
-.tasks-row:last-child { border-bottom: none; }
+.tasks-row:first-child { border-top: none; padding-top: 8px; }
 .tasks-row.disabled { opacity: 0.6; }
 
 .tasks-row-head {

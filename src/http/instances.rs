@@ -141,6 +141,12 @@ struct PatchInstanceBody {
     /// destroying the sandbox).  Empty/missing leaves models unchanged.
     #[serde(default)]
     models: Option<Vec<String>>,
+    /// New positive include list of built-in tools.  Pass `[]` to
+    /// reset to "use dyson defaults" (every builtin registers); pass
+    /// a non-empty list to restrict to that subset.  `null`/missing
+    /// leaves the existing list unchanged.
+    #[serde(default)]
+    tools: Option<Vec<String>>,
 }
 
 async fn update_instance(
@@ -160,14 +166,13 @@ async fn update_instance(
     //    identity into the running dyson via /api/admin/configure.
     let new_name = body.name.unwrap_or(current.name);
     let new_task = body.task.unwrap_or(current.task);
-    let row = match state
+    if let Err(e) = state
         .instances
         .rename(&caller.user_id, &id, &new_name, &new_task)
         .await
     {
-        Ok(row) => row,
-        Err(e) => return Err(swarm_err_to_status(e)),
-    };
+        return Err(swarm_err_to_status(e));
+    }
 
     // 2. Models update (optional).  Synchronous so the SPA can show
     //    "saved" only after the agent's config has been patched
@@ -181,6 +186,24 @@ async fn update_instance(
         return Err(swarm_err_to_status(e));
     }
 
+    // 3. Tools update (optional).  Empty `[]` is meaningful: it
+    //    resets the row back to "use dyson defaults".  Use Some/None
+    //    rather than `filter(|t| !t.is_empty())` so the all-checked
+    //    case (frontend sends []) round-trips correctly.
+    if let Some(tools) = body.tools
+        && let Err(e) = state
+            .instances
+            .update_tools(&caller.user_id, &id, tools)
+            .await
+    {
+        return Err(swarm_err_to_status(e));
+    }
+
+    // Re-fetch so the view reflects any tool/model writes above.
+    let row = match state.instances.get(&caller.user_id, &id).await {
+        Ok(r) => r,
+        Err(e) => return Err(swarm_err_to_status(e)),
+    };
     Ok(Json(InstanceView::from_row(row, state.hostname.as_deref())))
 }
 
@@ -361,6 +384,11 @@ pub struct InstanceView {
     /// instance predates the column or was hired without a model
     /// list (legacy create paths) and the user must repick.
     pub models: Vec<String>,
+    /// Positive include list of built-in tools the running dyson
+    /// is configured for.  Empty means "use dyson defaults" — the
+    /// SPA edit form treats this as "all tools ticked".  Non-empty
+    /// means "register only these".
+    pub tools: Vec<String>,
 }
 
 impl InstanceView {
@@ -389,6 +417,7 @@ impl InstanceView {
             network_policy: r.network_policy,
             network_policy_cidrs: r.network_policy_cidrs,
             models: r.models,
+            tools: r.tools,
         }
     }
 }

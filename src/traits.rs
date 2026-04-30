@@ -230,6 +230,16 @@ pub struct InstanceRow {
     /// before the column existed.  Read-only on the cube side —
     /// the source of truth at runtime is dyson's `dyson.json`.
     pub models: Vec<String>,
+    /// Positive include list of built-in tools the running dyson
+    /// should register.  Empty `Vec` (the default) means "use
+    /// dyson's defaults" — every builtin registers.  Non-empty
+    /// means "use only these".  Surfaced to the cube via
+    /// `SWARM_TOOLS` (CSV) in the env envelope at hire/restore
+    /// time and rewritten via `/api/admin/configure` on edit, so
+    /// the running dyson reloads the trimmed toolbox on its next
+    /// HotReloader tick.  Persisted here so the SPA edit form
+    /// can pre-fill the same picker state on revisit.
+    pub tools: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -362,6 +372,15 @@ pub trait InstanceStore: Send + Sync {
     /// rejected by the service layer, not here — the store accepts
     /// any vec and serialises it as JSON.
     async fn set_models(&self, id: &str, models: &[String]) -> Result<(), StoreError>;
+    /// Persist the operator's positive include list of built-in
+    /// tools.  Mirrors `set_models`: same JSON-as-TEXT shape,
+    /// called from the edit endpoint and the create-time row
+    /// writer.  Empty vec means "use dyson defaults".
+    async fn set_tools(
+        &self,
+        id: &str,
+        tools: &[String],
+    ) -> Result<(), StoreError>;
 }
 
 /// Per-instance secrets — opaque ciphertexts stored against an instance row.

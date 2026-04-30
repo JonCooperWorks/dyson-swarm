@@ -1,0 +1,14 @@
+-- Per-instance positive include list of built-in tools.  When the
+-- SPA's "Advanced → Tools" picker is left untouched, this stays
+-- empty ('[]') and dyson uses its defaults (every builtin
+-- registers).  When the operator narrows the picker, the resulting
+-- positive include set lands here.  Surfaced to the cube via
+-- `SWARM_TOOLS` (CSV) in the env envelope at hire/restore time;
+-- on edit, swarm rewrites `skills.builtin.tools` via
+-- `/api/admin/configure` so the running dyson reloads the trimmed
+-- toolbox on its next HotReloader tick.
+--
+-- JSON-encoded array of tool name strings ('[]' when not set).
+-- Same on-disk shape as the models column added in 0015 — keeps
+-- the read decode path uniform.
+ALTER TABLE instances ADD COLUMN tools TEXT NOT NULL DEFAULT '[]';

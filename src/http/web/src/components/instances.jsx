@@ -253,6 +253,141 @@ async function waitUntilHealthy(client, id) {
   }
 }
 
+// ─── Built-in tool catalogue ──────────────────────────────────────
+//
+// Mirror of dyson's tool registry (see crates/dyson/src/tool/*.rs).
+// This is the source of truth for the SPA's "Advanced → Tools"
+// picker; the wire shape is a positive include list of names that
+// land in `instance.tools` and surface in the env envelope as
+// `SWARM_TOOLS` (CSV).  Empty list ⇒ "register zero tools".
+//
+// Group ordering matches how operators tend to think about a
+// dyson's job: filesystem first (the muscle), then web (the
+// outside world), then KB / memory / observability, then security
+// scanners, then admin/comm/skills.
+const TOOL_CATALOGUE = [
+  { name: 'bash',                       group: 'filesystem' },
+  { name: 'read_file',                  group: 'filesystem' },
+  { name: 'write_file',                 group: 'filesystem' },
+  { name: 'edit_file',                  group: 'filesystem' },
+  { name: 'bulk_edit',                  group: 'filesystem' },
+  { name: 'list_files',                 group: 'filesystem' },
+  { name: 'search_files',               group: 'filesystem' },
+  { name: 'web_fetch',                  group: 'web' },
+  { name: 'web_search',                 group: 'web' },
+  { name: 'image_generate',             group: 'web' },
+  { name: 'kb_search',                  group: 'knowledge' },
+  { name: 'kb_status',                  group: 'knowledge' },
+  { name: 'memory_search',              group: 'knowledge' },
+  { name: 'workspace',                  group: 'knowledge' },
+  { name: 'dependency_scan',            group: 'security' },
+  { name: 'ast_describe',               group: 'security' },
+  { name: 'ast_query',                  group: 'security' },
+  { name: 'taint_trace',                group: 'security' },
+  { name: 'attack_surface_analyzer',    group: 'security' },
+  { name: 'exploit_builder',            group: 'security' },
+  { name: 'load_skill',                 group: 'skills' },
+  { name: 'skill_create',               group: 'skills' },
+  { name: 'send_file',                  group: 'comm' },
+  { name: 'export_conversation',        group: 'comm' },
+];
+const ALL_TOOL_NAMES = TOOL_CATALOGUE.map(t => t.name);
+
+// Sentinel placeholder shown in MCP credential inputs on edit.  When
+// the form submits with this value verbatim, the swarm side keeps
+// the existing sealed token instead of overwriting — the SPA never
+// reads back the real value, never decrypts.  The bullet character
+// is one a real API token can't contain in any provider we ship,
+// which keeps a "user typed this exact string" false-positive
+// cost-free.
+const MCP_KEEP_TOKEN = '••••••••';
+
+/// Decide which tools to pre-tick when the picker first mounts.
+///   - If the row already has a positive include list, use it
+///     verbatim (the model gets exactly what was last pushed).
+///   - Otherwise: airgap rows start with NOTHING ticked (the
+///     operator opts in tool by tool), every other policy starts
+///     with EVERY tool ticked (legacy + new-row default).
+function initialTools(row, kind) {
+  if (row && Array.isArray(row.tools) && row.tools.length > 0) {
+    return [...row.tools];
+  }
+  return kind === 'airgap' ? [] : [...ALL_TOOL_NAMES];
+}
+
+/// Compact accordion that lists every built-in dyson tool grouped
+/// by category, each with a checkbox.  Closed by default so the
+/// form's primary surface (identity, model, network) stays tight.
+/// Header counter ("12 / 24 enabled") tells the operator at a
+/// glance how trimmed their toolbox is without having to expand.
+function ToolsPicker({ value, onChange }) {
+  const enabled = React.useMemo(() => new Set(value), [value]);
+  const groups = React.useMemo(() => {
+    const m = new Map();
+    for (const t of TOOL_CATALOGUE) {
+      if (!m.has(t.group)) m.set(t.group, []);
+      m.get(t.group).push(t);
+    }
+    return [...m.entries()];
+  }, []);
+  const toggle = (name) => {
+    const next = new Set(enabled);
+    if (next.has(name)) next.delete(name);
+    else next.add(name);
+    onChange(ALL_TOOL_NAMES.filter(n => next.has(n)));
+  };
+  const setAll = (on) => onChange(on ? [...ALL_TOOL_NAMES] : []);
+
+  return (
+    <details className="tools-accordion">
+      <summary className="tools-accordion-summary">
+        <span className="tools-accordion-chev" aria-hidden="true">▸</span>
+        <span className="tools-accordion-title">tools</span>
+        <span className="tools-accordion-count muted small">
+          {enabled.size} / {ALL_TOOL_NAMES.length} enabled
+        </span>
+      </summary>
+      <div className="tools-accordion-body">
+        <div className="tools-accordion-actions">
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm"
+            onClick={() => setAll(true)}
+            disabled={enabled.size === ALL_TOOL_NAMES.length}
+          >
+            enable all
+          </button>
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm"
+            onClick={() => setAll(false)}
+            disabled={enabled.size === 0}
+          >
+            disable all
+          </button>
+        </div>
+        {groups.map(([group, items]) => (
+          <fieldset key={group} className="tools-group">
+            <legend className="tools-group-label muted small">{group}</legend>
+            <div className="tools-grid">
+              {items.map(t => (
+                <label key={t.name} className="tools-cell">
+                  <input
+                    type="checkbox"
+                    checked={enabled.has(t.name)}
+                    onChange={() => toggle(t.name)}
+                  />
+                  <span className="tools-cell-name mono-sm">{t.name}</span>
+                </label>
+              ))}
+            </div>
+          </fieldset>
+        ))}
+      </div>
+    </details>
+  );
+}
+
 function NewInstanceForm() {
   const { client, auth } = useApi();
   const [name, setName] = React.useState('');
@@ -303,8 +438,23 @@ function NewInstanceForm() {
   // identifier for React keys; the server-side wire shape (without
   // `id`) is built in `submit`.
   const [mcpServers, setMcpServers] = React.useState([]);
+  // Built-in tool include list.  Default is "every tool ticked"
+  // for non-airgap; airgap starts empty and the operator opts in.
+  const [tools, setTools] = React.useState(() => initialTools(null, 'nolocalnet'));
   const [submitting, setSubmitting] = React.useState(false);
   const [error, setError] = React.useState(null);
+
+  // Airgap rule: when the user picks the airgap profile, the tool
+  // picker drops to zero — operators have to opt in tool by tool,
+  // matching the spirit of "no network, minimal surface".  Switching
+  // away from airgap leaves the user's selection alone (don't undo
+  // their work for them).
+  React.useEffect(() => {
+    if (networkPolicy.kind === 'airgap') setTools([]);
+    // Intentionally not depending on `tools` — we only fire on a
+    // policy change, not every checkbox toggle.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [networkPolicy.kind]);
 
   // Two-phase flow: 'form' (fill in) → 'provisioning' (POSTed; waiting
   // on the server, which now also pre-warms Caddy's on_demand TLS
@@ -339,6 +489,14 @@ function NewInstanceForm() {
       req.network_policy = serializeNetworkPolicy(networkPolicy);
       const mcp = serializeMcpServers(mcpServers);
       if (mcp.length > 0) req.mcp_servers = mcp;
+      // Surface the tool include list in the env envelope so dyson
+      // can read SWARM_TOOLS at boot.  Skip when every tool is
+      // ticked AND the kind isn't airgap — that's the implicit
+      // "use defaults" path and we don't want a CSV with every
+      // builtin in it cluttering the env block.
+      if (tools.length !== ALL_TOOL_NAMES.length || networkPolicy.kind === 'airgap') {
+        req.env.SWARM_TOOLS = tools.join(',');
+      }
 
       setPhase('provisioning');
       // Server blocks until the sandbox is Live AND Caddy's TLS cert
@@ -430,6 +588,14 @@ function NewInstanceForm() {
           tokens and OAuth refresh tokens land in your encrypted user
           secret store. OAuth connections finish in a browser tab after
           you hire the dyson.
+        </span>
+      </section>
+
+      <section className="page-section">
+        <ToolsPicker value={tools} onChange={setTools}/>
+        <span className="hint muted small">
+          Toolbox the dyson registers on boot.  Air-gapped employees
+          start with nothing — pick only what the task actually needs.
         </span>
       </section>
 
@@ -1449,11 +1615,20 @@ function EditInstanceForm({ instance, backHref, formId }) {
   // /v1/models upstream catalogue.  Pre-fills with the current
   // primary model when available; the agent will also accept any
   // other model id the user types.
-  const initialModels = (instance.models && instance.models.length)
+  const initialModelsList = (instance.models && instance.models.length)
     ? instance.models
     : (instance.model ? [instance.model] : []);
-  const [models, setModels] = React.useState(initialModels);
+  const [models, setModels] = React.useState(initialModelsList);
   const defaultModels = auth?.config?.default_models || [];
+  // Tool include list — pre-fill with the row's persisted positive
+  // list when present.  Empty `instance.tools` means "use defaults"
+  // which the picker renders as everything ticked, except on
+  // air-gapped rows where empty stays empty (operator opts in).
+  const [tools, setTools] = React.useState(() =>
+    initialTools(instance, instance.network_policy?.kind)
+  );
+  const [toolsDirty, setToolsDirty] = React.useState(false);
+  const setToolsTracked = (next) => { setToolsDirty(true); setTools(next); };
   const [submitting, setSubmitting] = React.useState(false);
   const [error, setError] = React.useState(null);
 
@@ -1475,6 +1650,10 @@ function EditInstanceForm({ instance, backHref, formId }) {
       // Only include models if the user actually picked any —
       // backend treats missing/empty as "leave unchanged".
       if (models.length > 0) payload.models = models;
+      // Tools: only send when the operator touched the picker.
+      // Empty `[]` IS meaningful (zero tools), so we use the dirty
+      // flag rather than length to decide whether to include.
+      if (toolsDirty) payload.tools = tools;
       const updated = await client.updateInstance(instance.id, payload);
       upsertInstance(updated);
       window.location.hash = backHref;
@@ -1510,6 +1689,7 @@ function EditInstanceForm({ instance, backHref, formId }) {
         selected={models}
         onChange={setModels}
       />
+      <ToolsPicker value={tools} onChange={setToolsTracked}/>
       {error ? <div className="error">{error}</div> : null}
     </form>
   );
@@ -2044,23 +2224,49 @@ function McpServerRow({ row, busy, onEdit, onConnect, onDisconnect, onRemove }) 
 
 function McpServerEditModal({ initial, existingNames, onCancel, onSubmit, busy }) {
   // Initial row when editing carries `name`, `url`, `auth_kind` (no
-  // tokens — those stay server-side).  We fill the form's auth fields
-  // with empty strings; if the user doesn't change them and saves,
-  // the server-side `auth_shape_matches` check keeps existing OAuth
-  // tokens alive.
+  // tokens — those stay server-side).  Credential inputs pre-fill
+  // with the static MCP_KEEP_TOKEN sentinel when the existing auth
+  // shape matches; if the user doesn't change the placeholder, the
+  // server keeps the sealed value (we never decrypt to display).
+  // Touching the field replaces the placeholder with whatever the
+  // user types — flip back to "keep" by re-typing the bullets,
+  // though the typical flow is just to leave it alone.
   const isNew = !initial;
+  const initialAuthKind = initial?.auth_kind || 'none';
+  // True when the credential field for this auth kind is already
+  // populated server-side and the operator is editing (not adding).
+  // Bearer always carries a token, OAuth optionally carries a
+  // client_secret — for OAuth we conservatively pre-mask only when
+  // we actually know there's something stored.  `initial` doesn't
+  // surface the secret presence today, so we mask whenever the auth
+  // shape matches: a false-positive mask reveals nothing.
+  const hasExistingBearer = !isNew && initialAuthKind === 'bearer';
+  const hasExistingOauthSecret = !isNew && initialAuthKind === 'oauth';
   const [name, setName] = React.useState(initial?.name || '');
   const [url, setUrl] = React.useState(initial?.url || '');
-  const [authKind, setAuthKind] = React.useState(initial?.auth_kind || 'none');
-  const [token, setToken] = React.useState('');
+  const [authKind, setAuthKind] = React.useState(initialAuthKind);
+  const [token, setToken] = React.useState(hasExistingBearer ? MCP_KEEP_TOKEN : '');
   const [scopes, setScopes] = React.useState('');
   const [advanced, setAdvanced] = React.useState(false);
   const [clientId, setClientId] = React.useState('');
-  const [clientSecret, setClientSecret] = React.useState('');
+  const [clientSecret, setClientSecret] = React.useState(
+    hasExistingOauthSecret ? MCP_KEEP_TOKEN : ''
+  );
   const [authorizationUrl, setAuthorizationUrl] = React.useState('');
   const [tokenUrl, setTokenUrl] = React.useState('');
   const [registrationUrl, setRegistrationUrl] = React.useState('');
   const [err, setErr] = React.useState(null);
+
+  // Auth kind changed mid-edit → drop any "keep existing" sentinels.
+  // Switching shape clears the stored creds anyway (server-side), so
+  // pre-filled bullets are misleading after the switch.
+  React.useEffect(() => {
+    if (authKind !== initialAuthKind) {
+      if (token === MCP_KEEP_TOKEN) setToken('');
+      if (clientSecret === MCP_KEEP_TOKEN) setClientSecret('');
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authKind]);
 
   const submit = (e) => {
     e.preventDefault();
@@ -2075,6 +2281,8 @@ function McpServerEditModal({ initial, existingNames, onCancel, onSubmit, busy }
     let auth;
     if (authKind === 'bearer') {
       if (!token.trim()) { setErr('bearer token is required'); return; }
+      // Sentinel passes through verbatim — swarm's put path detects
+      // it and keeps the existing sealed token.
       auth = { kind: 'bearer', token: token.trim() };
     } else if (authKind === 'oauth') {
       const sc = (scopes || '').split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
@@ -2155,8 +2363,10 @@ function McpServerEditModal({ initial, existingNames, onCancel, onSubmit, busy }
                 autoComplete="off"
               />
               <span className="hint muted small">
-                Sealed in your user secret store. Edit replaces — there's
-                no read-back.
+                Sealed in your user secret store. Leave the
+                <code className="byok-inline-code">{MCP_KEEP_TOKEN}</code>
+                placeholder to keep the existing token; replace it
+                to rotate.  Swarm never reads the value back.
               </span>
             </label>
           ) : null}
@@ -2282,12 +2492,16 @@ function NetworkPolicyPanel({ instance, disabled }) {
   const [error, setError] = React.useState(null);
 
   // Re-sync the working copy when the user navigates between
-  // instances (parent's `instance` prop changes).
+  // instances (parent's `instance.id` changes).  Do NOT depend on
+  // `instance.network_policy` — the 30s instance-list poll upserts
+  // a fresh object reference on every tick, and including it here
+  // closed the editor a few seconds after the operator opened it.
   React.useEffect(() => {
     setPolicy(normaliseInstancePolicy(instance.network_policy));
     setEditing(false);
     setError(null);
-  }, [instance.id, instance.network_policy]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [instance.id]);
 
   const submit = async () => {
     setSubmitting(true);

@@ -258,6 +258,9 @@ impl SnapshotService {
                     // first /api/admin/configure push after restore
                     // matches what the source dyson was running.
                     models: source.models,
+                    // Same for the tool include list — restore must
+                    // not silently widen the toolbox.
+                    tools: source.tools,
                 },
             )
             .await

@@ -34,6 +34,40 @@ fn auth_shape_matches(prev: &McpAuthSpec, next: &McpAuthSpec) -> bool {
         _ => false,
     }
 }
+
+/// Static placeholder the SPA's MCP edit form pre-fills into
+/// secret-bearing inputs — bullets, fixed length.  When the
+/// inbound auth spec carries this verbatim, swarm interprets it
+/// as "keep the existing sealed value" and the field on the row
+/// is left untouched.  Picked to be a string a real API token
+/// can't realistically contain, so a user typing this exact
+/// pattern by accident is a non-concern.
+pub(crate) const MCP_KEEP_TOKEN: &str = "••••••••";
+
+/// Replace any [`MCP_KEEP_TOKEN`] sentinels in `next` with the
+/// corresponding plaintext from `prev` so the SPA's "leave it
+/// alone" UX round-trips without making the swarm re-decrypt.
+/// Caller must have already verified `auth_shape_matches` —
+/// otherwise the fields don't line up.
+fn keep_existing_secrets(prev: &McpAuthSpec, next: &mut McpAuthSpec) {
+    use McpAuthSpec::*;
+    match (prev, next) {
+        (Bearer { token: prev_token }, Bearer { token: next_token }) => {
+            if next_token == MCP_KEEP_TOKEN {
+                *next_token = prev_token.clone();
+            }
+        }
+        (
+            Oauth { client_secret: Some(prev_cs), .. },
+            Oauth { client_secret: Some(next_cs), .. },
+        ) => {
+            if next_cs == MCP_KEEP_TOKEN {
+                *next_cs = prev_cs.clone();
+            }
+        }
+        _ => {}
+    }
+}
 use crate::network_policy::{self, DnsHostResolver, HostResolver, NetworkPolicy};
 use crate::now_secs;
 use crate::secrets::{compose_env, UserSecretsService};
@@ -68,6 +102,13 @@ pub const ENV_TASK: &str = "SWARM_TASK";
 /// since the right model is task-specific and a stale default leaks
 /// into deployments long after it was the right call.
 pub const ENV_MODEL: &str = "SWARM_MODEL";
+/// Positive include list of built-in tools to register on the agent
+/// side, CSV.  Empty / unset means "use dyson defaults".  Sourced
+/// from the SPA "Advanced → Tools" picker; persisted on the row
+/// and surfaced both via env at hire time and via
+/// `/api/admin/configure` on edit (future) so the running dyson
+/// can rewrite `skills.builtin.tools` accordingly.
+pub const ENV_TOOLS: &str = "SWARM_TOOLS";
 
 /// Comma-separated ordered fallback list of model ids.  First entry
 /// matches `SWARM_MODEL`; trailing entries let agents that support
@@ -679,6 +720,9 @@ impl InstanceService {
                     // Same for the model list, so the rotated dyson
                     // boots with the same primary + failover models.
                     models: source.models.clone(),
+                    // And the tool include list — a binary rotation
+                    // must NOT silently widen the toolbox.
+                    tools: source.tools.clone(),
                 })
                 .await
                 .map_err(|e| format!("restore: {e}"))?;
@@ -799,6 +843,7 @@ impl InstanceService {
                 ttl_seconds: None,
                 network_policy: new_policy.clone(),
                 models: source.models.clone(),
+                tools: source.tools.clone(),
             })
             .await?;
         tracing::info!(
@@ -882,6 +927,16 @@ impl InstanceService {
             models.push(m);
         }
 
+        // Decode the tool include list once.  Empty / unset → no
+        // override, dyson uses its full builtin catalogue.  Non-empty
+        // → swarm persists the positive set and surfaces it via the
+        // env envelope below; future edits push via /api/admin/configure.
+        let tools: Vec<String> = req
+            .env
+            .get(ENV_TOOLS)
+            .map(|s| s.split(',').map(|m| m.trim().to_owned()).filter(|m| !m.is_empty()).collect())
+            .unwrap_or_default();
+
         // Insert the instance row first so the FK target exists; mint the
         // proxy token; then call Cube. If Cube fails we mark the row
         // destroyed to keep state consistent.
@@ -905,6 +960,7 @@ impl InstanceService {
             network_policy: req.network_policy.clone(),
             network_policy_cidrs: resolved_policy.allow_out.clone(),
             models: models.clone(),
+            tools: tools.clone(),
         };
         self.instances.create(row).await?;
 
@@ -1282,6 +1338,15 @@ impl InstanceService {
     /// in user_secrets, then a reconfigure push is fired so the running
     /// dyson registers the new tool set on the next HotReloader tick.
     /// Used by the instance-detail page's MCP management panel.
+    ///
+    /// Credential-keep semantics: the SPA's edit form pre-fills
+    /// secret-bearing fields (bearer token, OAuth client_secret) with
+    /// a static [`MCP_KEEP_TOKEN`] placeholder rather than the real
+    /// sealed value (we never decrypt to display).  When the inbound
+    /// spec carries that exact sentinel, this method swaps it for
+    /// the previously-sealed value before persisting — so a user
+    /// who only renamed a URL doesn't accidentally clobber their
+    /// stored token.
     pub async fn put_mcp_server(
         &self,
         owner_id: &str,
@@ -1298,7 +1363,7 @@ impl InstanceService {
         let secrets = self.mcp_secrets.as_ref().ok_or_else(|| {
             SwarmError::PolicyDenied("mcp secrets store not configured".into())
         })?;
-        let McpServerSpec { name, url, auth } = spec;
+        let McpServerSpec { name, url, mut auth } = spec;
         if name.trim().is_empty() {
             return Err(SwarmError::BadRequest("server name is required".into()));
         }
@@ -1316,6 +1381,15 @@ impl InstanceService {
                 auth: auth.clone(),
                 oauth_tokens: None,
             });
+        // Keep-existing semantics: the SPA never reads back sealed
+        // credentials, so its edit form pre-fills secret-bearing
+        // inputs with the static MCP_KEEP_TOKEN bullet sentinel.
+        // When that sentinel survives to the wire, swap it for the
+        // value already on the row.  Skipped when auth shapes don't
+        // match — switching shape always rotates / wipes anyway.
+        if auth_shape_matches(&entry.auth, &auth) {
+            keep_existing_secrets(&entry.auth, &mut auth);
+        }
         // If the auth shape changed (e.g. bearer → oauth, or scopes
         // changed), wipe the old OAuth tokens — they'd be stale anyway.
         if !auth_shape_matches(&entry.auth, &auth) {
@@ -1480,6 +1554,30 @@ impl InstanceService {
         Ok(())
     }
 
+    /// Owner-scoped tool include-list update.  Empty `tools` is
+    /// allowed and meaningful: it resets the row back to "use dyson
+    /// defaults" (every builtin registers).  Persist-only for now —
+    /// dyson-side honoring is a follow-up; until then the change
+    /// takes effect on the next snapshot/restore (rotate or
+    /// change-network) when the env envelope is rebuilt with the
+    /// updated `SWARM_TOOLS` value.
+    pub async fn update_tools(
+        &self,
+        owner_id: &str,
+        id: &str,
+        tools: Vec<String>,
+    ) -> Result<(), SwarmError> {
+        // Owner-scoped existence check first — matches update_models'
+        // posture so a foreign-tenant id surfaces as NotFound.
+        let _row = self
+            .instances
+            .get_for_owner(owner_id, id)
+            .await?
+            .ok_or(SwarmError::NotFound)?;
+        self.instances.set_tools(id, &tools).await?;
+        Ok(())
+    }
+
     /// Destroy an instance.  When `force` is true, a `CubeError` from
     /// `destroy_sandbox` is logged and swallowed so the row can still
     /// be reaped — admin escape hatch for the case where the underlying
@@ -1579,6 +1677,7 @@ impl InstanceService {
             network_policy: req.network_policy.clone(),
             network_policy_cidrs: resolved_policy.allow_out.clone(),
             models: req.models.clone(),
+            tools: req.tools.clone(),
         };
         self.instances.create(row).await?;
 
@@ -1703,6 +1802,10 @@ pub struct RestoreRequest {
     /// "user must pick before saving".
     #[serde(default)]
     pub models: Vec<String>,
+    /// Positive include list of built-in tools — same carry-over
+    /// semantics as `models`.  Empty means "use dyson defaults".
+    #[serde(default)]
+    pub tools: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2113,6 +2216,7 @@ mod tests {
                 ttl_seconds: None,
                 network_policy: NetworkPolicy::default(),
                 models: Vec::new(),
+                tools: Vec::new(),
             })
             .await
             .unwrap();
@@ -3174,6 +3278,7 @@ mod tests {
                 network_policy: crate::network_policy::NetworkPolicy::Open,
                 network_policy_cidrs: Vec::new(),
                 models: Vec::new(),
+                tools: Vec::new(),
         };
         instances.create(row).await.unwrap();
 

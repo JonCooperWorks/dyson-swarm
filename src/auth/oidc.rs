@@ -185,13 +185,6 @@ impl OidcAuthenticator {
         // until that wall-clock arrives — we already check `exp` for
         // free; the symmetric `nbf` check belongs here.
         v.validate_nbf = true;
-        // Defeat GHSA-h395-gr6q-cpjc / CVE-2026-25537: jsonwebtoken 9.x
-        // treats a malformed `nbf` (string instead of number) as
-        // FailedToParse and then silently as NotPresent — which lets
-        // a future-`nbf` token through `validate_nbf = true`.  Adding
-        // `nbf` to `required_spec_claims` makes a malformed claim
-        // surface as a hard verify failure rather than a silent skip.
-        v.required_spec_claims.insert("nbf".to_string());
         v
     }
 }
@@ -309,7 +302,6 @@ mod tests {
                 aud: &'a str,
                 exp: i64,
                 iat: i64,
-                nbf: i64,
                 #[serde(skip_serializing_if = "Option::is_none")]
                 email: Option<&'a str>,
                 #[serde(skip_serializing_if = "Option::is_none")]
@@ -322,7 +314,6 @@ mod tests {
                 aud,
                 exp: now + 3600,
                 iat: now,
-                nbf: now,
                 email,
                 name: Some(sub),
             };

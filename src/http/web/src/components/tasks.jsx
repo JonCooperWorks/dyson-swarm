@@ -702,11 +702,11 @@ export function AuditListPage({ instanceId }) {
                 const detailHref = `#/i/${encodeURIComponent(instanceId)}/tasks/audit/${encodeURIComponent(d.id)}`;
                 return (
                   <tr key={d.id} className={d.signature_ok ? '' : 'sig-bad'}>
-                    <td className="muted small">
+                    <td data-label="when" className="muted small">
                       <a className="audit-row-link" href={detailHref}>{fmtTime(d.fired_at)}</a>
                     </td>
-                    <td><code className="mono-sm">{d.webhook_name}</code></td>
-                    <td>
+                    <td data-label="task"><code className="mono-sm">{d.webhook_name}</code></td>
+                    <td data-label="status">
                       <span className={`badge ${d.status_code < 400 ? 'badge-ok' : 'badge-warn'}`}>
                         {d.status_code}
                       </span>
@@ -714,9 +714,9 @@ export function AuditListPage({ instanceId }) {
                         <span className="badge badge-warn small" style={{ marginLeft: 6 }}>bad sig</span>
                       ) : null}
                     </td>
-                    <td className="muted small">{d.latency_ms}ms</td>
-                    <td className="muted small">{fmtBytes(d.body_size)}</td>
-                    <td className="muted small">
+                    <td data-label="latency" className="muted small">{d.latency_ms}ms</td>
+                    <td data-label="size" className="muted small">{fmtBytes(d.body_size)}</td>
+                    <td data-label="request id" className="muted small">
                       {d.request_id ? <code className="mono-sm">{shortId(d.request_id)}</code> : '—'}
                     </td>
                   </tr>

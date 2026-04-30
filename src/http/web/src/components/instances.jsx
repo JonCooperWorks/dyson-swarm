@@ -2209,10 +2209,10 @@ function SnapshotsPanel({ instanceId, disabled }) {
           <tbody>
             {rows.map(r => (
               <tr key={r.id}>
-                <td><code className="mono-sm">{r.id}</code></td>
-                <td><span className="badge badge-faint">{r.kind}</span></td>
-                <td className="muted">{fmtTime(r.created_at)}</td>
-                <td>
+                <td data-label="id"><code className="mono-sm">{r.id}</code></td>
+                <td data-label="kind"><span className="badge badge-faint">{r.kind}</span></td>
+                <td data-label="created" className="muted">{fmtTime(r.created_at)}</td>
+                <td data-label="remote">
                   {r.remote_uri ? (
                     <span className="badge badge-info" title={r.remote_uri}>S3</span>
                   ) : <span className="muted small">local</span>}

@@ -951,6 +951,68 @@
 .row-actions .btn { margin-left: 4px; }
 .mono-sm { font-family: var(--mono); font-size: 11px; }
 
+/* Mobile: stack `.rows` into one card per row.  Each <td> becomes a
+   labelled line; the label comes from `data-label` on the td (added
+   per-component) or is omitted for unlabelled cells (e.g. action
+   columns).  Hides <thead> entirely.  Tables wider than the viewport
+   used to force a horizontal scroll bar; this collapses cleanly to
+   the viewport width without any layout overflow. */
+@media (max-width: 640px) {
+  .rows,
+  .rows thead,
+  .rows tbody,
+  .rows tr,
+  .rows th,
+  .rows td {
+    display: block;
+    width: 100%;
+    box-sizing: border-box;
+  }
+  .rows thead {
+    /* visually-hidden: keep for screen readers but take no layout */
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    border: 0;
+  }
+  .rows tr {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 4px;
+    margin-bottom: 8px;
+  }
+  .rows td {
+    border-bottom: 1px dashed var(--border);
+    padding: 6px 8px;
+    text-align: left;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+  }
+  .rows tr td:last-child { border-bottom: none; }
+  .rows td[data-label]::before {
+    content: attr(data-label);
+    display: block;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--fg-muted);
+    margin-bottom: 2px;
+  }
+  .rows td.row-actions { text-align: left; }
+  .rows td.row-actions .btn { margin-left: 0; margin-right: 4px; }
+  /* Some long inline styles on tasks.jsx audit rows force max-width
+     + nowrap — undo those on mobile so the user-agent string wraps
+     instead of clipping. */
+  .rows td[style*="white-space: nowrap"] {
+    white-space: normal !important;
+    max-width: none !important;
+  }
+}
+
 /* ── Secret list ─────────────────────────────────────────────── */
 
 .secret-list {

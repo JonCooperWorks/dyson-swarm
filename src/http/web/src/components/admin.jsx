@@ -189,19 +189,19 @@ function UsersPanel({ client }) {
           <tbody>
             {rows.map(u => (
               <tr key={u.id}>
-                <td><code className="mono-sm">{u.id}</code></td>
-                <td><code className="mono-sm">{u.subject}</code></td>
-                <td className="muted small">{u.email || '—'}</td>
-                <td><UserStatusBadge status={u.status}/></td>
-                <td>
+                <td data-label="id"><code className="mono-sm">{u.id}</code></td>
+                <td data-label="subject"><code className="mono-sm">{u.subject}</code></td>
+                <td data-label="email" className="muted small">{u.email || '—'}</td>
+                <td data-label="status"><UserStatusBadge status={u.status}/></td>
+                <td data-label="OR key">
                   {u.openrouter_key_present ? (
                     <span className="badge badge-ok">present</span>
                   ) : (
                     <span className="badge badge-faint">none</span>
                   )}
                 </td>
-                <td className="muted small">${(u.openrouter_key_limit_usd ?? 0).toFixed(2)}</td>
-                <td className="muted small">{fmtTime(u.created_at)}</td>
+                <td data-label="OR limit" className="muted small">${(u.openrouter_key_limit_usd ?? 0).toFixed(2)}</td>
+                <td data-label="created" className="muted small">{fmtTime(u.created_at)}</td>
                 <td className="row-actions">
                   {u.status !== 'active' ? (
                     <button className="btn btn-ghost btn-sm" onClick={() => setStatus(u.id, 'activate')} disabled={busy}>

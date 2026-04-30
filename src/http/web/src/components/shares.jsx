@@ -191,18 +191,18 @@ export function SharesPage({ instanceId }) {
             <tbody>
               {rows.map(r => (
                 <tr key={r.jti}>
-                  <td><code className="mono-sm" title={r.jti}>{r.jti.slice(0, 12)}…</code></td>
-                  <td><code className="mono-sm">{r.artefact_id}</code></td>
-                  <td className="muted small">{r.label || '—'}</td>
-                  <td>
+                  <td data-label="jti"><code className="mono-sm" title={r.jti}>{r.jti.slice(0, 12)}…</code></td>
+                  <td data-label="artefact"><code className="mono-sm">{r.artefact_id}</code></td>
+                  <td data-label="label" className="muted small">{r.label || '—'}</td>
+                  <td data-label="state">
                     {r.revoked_at
                       ? <span className="badge badge-faint">revoked</span>
                       : (r.active
                           ? <span className="badge badge-ok">active</span>
                           : <span className="badge badge-warn">expired</span>)}
                   </td>
-                  <td className="muted small">{fmtTime(r.created_at)}</td>
-                  <td className="muted small">{fmtTime(r.expires_at)}</td>
+                  <td data-label="created" className="muted small">{fmtTime(r.created_at)}</td>
+                  <td data-label="expires" className="muted small">{fmtTime(r.expires_at)}</td>
                   <td className="row-actions">
                     {!r.revoked_at && r.active ? (
                       <CopyUrlButton jti={r.jti} client={client}/>
@@ -337,14 +337,14 @@ function AccessesButton({ jti, client }) {
                 <tbody>
                   {rows.map(r => (
                     <tr key={r.id}>
-                      <td className="muted small">{fmtTime(r.accessed_at)}</td>
-                      <td>
+                      <td data-label="when" className="muted small">{fmtTime(r.accessed_at)}</td>
+                      <td data-label="status">
                         <span className={`badge ${r.status >= 200 && r.status < 300 ? 'badge-ok' : 'badge-warn'}`}>
                           {r.status}
                         </span>
                       </td>
-                      <td className="mono-sm">{r.remote_addr || '—'}</td>
-                      <td className="mono-sm muted" style={{ maxWidth: 360, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={r.user_agent || ''}>
+                      <td data-label="IP" className="mono-sm">{r.remote_addr || '—'}</td>
+                      <td data-label="user-agent" className="mono-sm muted" style={{ maxWidth: 360, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={r.user_agent || ''}>
                         {r.user_agent || '—'}
                       </td>
                     </tr>

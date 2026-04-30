@@ -322,6 +322,13 @@ pub struct ReconfigureBody {
     /// the reset (rename / models-only updates leave skills alone).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub reset_skills: bool,
+    /// Explicit builtin-tool allowlist.  When `Some`, dyson rewrites
+    /// `skills.builtin.tools` to exactly this list.  Empty vec is
+    /// meaningful (register zero builtins).  Distinct from
+    /// `reset_skills`, which drops the block to inherit defaults.
+    /// `tools` wins on the dyson side when both are set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<String>>,
     /// Per-server stanzas to write under `mcp_servers.<name>` in
     /// dyson.json.  Each value is the swarm-proxied entry the agent
     /// should talk to: `{ url, headers: { Authorization: "Bearer ..." } }`.
@@ -976,7 +983,8 @@ impl InstanceService {
                     .image_gen_defaults
                     .as_ref()
                     .map(|d| d.model.clone()),
-                reset_skills: true,
+                reset_skills: source.tools.is_empty(),
+                tools: (!source.tools.is_empty()).then(|| source.tools.clone()),
                 mcp_servers: None,
             };
             if let Err(err) =
@@ -1144,7 +1152,8 @@ impl InstanceService {
                     .image_gen_defaults
                     .as_ref()
                     .map(|d| d.model.clone()),
-                reset_skills: true,
+                reset_skills: source.tools.is_empty(),
+                tools: (!source.tools.is_empty()).then(|| source.tools.clone()),
                 mcp_servers: None,
             };
             if let Err(err) =
@@ -1394,12 +1403,12 @@ impl InstanceService {
                     .as_ref()
                     .map(|d| d.model.clone()),
                 // Belt-and-braces: the new dyson swarm boot writer
-                // already omits `skills`, but creates that ride an
-                // older binary template still ship the empty-array
-                // bug.  Flipping reset_skills on create makes the
-                // outcome deterministic regardless of which template
-                // the cube launched the instance from.
-                reset_skills: true,
+                // already honors SWARM_TOOLS, but creates that ride an
+                // older binary template ship a stale skills block.
+                // When the operator picked an explicit subset, push it
+                // here too; otherwise reset to defaults.
+                reset_skills: tools.is_empty(),
+                tools: (!tools.is_empty()).then(|| tools.clone()),
                 // Render the proxied stanza for each attached MCP server.
                 // The agent sees `https://<swarm>/mcp/<id>/<name>` plus a
                 // bearer header; the upstream URL + real credentials stay
@@ -1863,26 +1872,42 @@ impl InstanceService {
         Ok(())
     }
 
-    /// Owner-scoped tool include-list update.  Empty `tools` is
-    /// allowed and meaningful: it resets the row back to "use dyson
-    /// defaults" (every builtin registers).  Persist-only for now —
-    /// dyson-side honoring is a follow-up; until then the change
-    /// takes effect on the next snapshot/restore (rotate or
-    /// change-network) when the env envelope is rebuilt with the
-    /// updated `SWARM_TOOLS` value.
+    /// Owner-scoped tool include-list update.  Mirrors
+    /// `update_models`: pushes the change into the running dyson via
+    /// `/api/admin/configure` first, then persists the row so the DB
+    /// records what dyson actually accepted.  Empty `tools` is
+    /// meaningful — registers zero builtins.  An ALL-builtins choice
+    /// is expressed by the caller flipping `reset_skills` instead, not
+    /// by this path; this method always sends an explicit allowlist.
     pub async fn update_tools(
         &self,
         owner_id: &str,
         id: &str,
         tools: Vec<String>,
     ) -> Result<(), SwarmError> {
-        // Owner-scoped existence check first — matches update_models'
-        // posture so a foreign-tenant id surfaces as NotFound.
-        let _row = self
+        let row = self
             .instances
             .get_for_owner(owner_id, id)
             .await?
             .ok_or(SwarmError::NotFound)?;
+        let sandbox_id = row
+            .cube_sandbox_id
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                SwarmError::PolicyDenied("instance has no live sandbox to reconfigure".into())
+            })?;
+        let r = self.reconfigurer.as_ref().ok_or_else(|| {
+            SwarmError::PolicyDenied("dyson reconfigurer not configured".into())
+        })?;
+        let body = ReconfigureBody {
+            instance_id: Some(id.to_owned()),
+            tools: Some(tools.clone()),
+            ..Default::default()
+        };
+        push_with_retry(&**r, id, sandbox_id, &body)
+            .await
+            .map_err(SwarmError::PolicyDenied)?;
         self.instances.set_tools(id, &tools).await?;
         Ok(())
     }

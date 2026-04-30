@@ -1419,15 +1419,6 @@ function InstanceDetail({ id, onNew }) {
           <div className="detail-template muted small">
             template <code className="mono-sm">{row.template_id}</code>
           </div>
-          <div className="employee-task">
-            {row.task && row.task.trim() ? (
-              <TaskProse markdown={row.task}/>
-            ) : (
-              <p className="muted small">
-                no task description — tap <em>edit</em> to write one.
-              </p>
-            )}
-          </div>
         </div>
         <div className="detail-actions">
           <a
@@ -1480,6 +1471,23 @@ function InstanceDetail({ id, onNew }) {
       <NetworkPolicyPanel instance={row} disabled={row.status === 'destroyed'}/>
       <SecretsPanel instanceId={id}/>
       <McpServersPanel instanceId={id} disabled={row.status === 'destroyed'}/>
+
+      {/* IDENTITY.md prose lives at the very bottom — operators reach
+          for actions / runtime / snapshots / policy first; the agent's
+          own self-description is reference material, not something
+          you scan to act on. */}
+      <section className="panel">
+        <div className="panel-title">instructions</div>
+        <div className="employee-task">
+          {row.task && row.task.trim() ? (
+            <TaskProse markdown={row.task}/>
+          ) : (
+            <p className="muted small">
+              no task description — tap <em>edit</em> to write one.
+            </p>
+          )}
+        </div>
+      </section>
     </main>
   );
 }

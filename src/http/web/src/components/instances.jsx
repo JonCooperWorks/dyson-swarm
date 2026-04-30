@@ -2530,18 +2530,20 @@ function NetworkPolicyPanel({ instance, disabled }) {
     || 'open';
   return (
     <section className="panel">
-      <header className="panel-header">
-        <h3>network access</h3>
-        {!editing ? (
-          <button
-            className="btn btn-ghost btn-sm"
-            disabled={disabled}
-            onClick={() => setEditing(true)}
-          >
-            change
-          </button>
-        ) : null}
-      </header>
+      <div className="panel-header">
+        <div className="panel-title">network access</div>
+        <div className="panel-actions">
+          {!editing ? (
+            <button
+              className="btn btn-ghost btn-sm"
+              disabled={disabled}
+              onClick={() => setEditing(true)}
+            >
+              change
+            </button>
+          ) : null}
+        </div>
+      </div>
       {!editing ? (
         <div className="panel-body">
           <p>

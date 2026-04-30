@@ -111,7 +111,7 @@ export function TasksListPage({ instanceId }) {
         <a className="btn btn-ghost btn-sm" href={backHref}>← back</a>
         <h1 className="page-title">tasks</h1>
         <p className="page-sub muted">
-          Webhook-triggered jobs for this dyson.  Each task exposes a URL;
+          Webhook-triggered jobs for this agent.  Each task exposes a URL;
           when called and signature-verified, the payload kicks off a
           fresh agent conversation seeded with the task brief.
         </p>
@@ -222,7 +222,7 @@ export function TaskFormPage({ instanceId, taskName }) {
         <p className="page-sub muted">
           {editing
             ? 'Update the brief, rotate the signing key, or disable the URL.'
-            : 'Expose a webhook URL on this dyson.  When called and verified, the payload kicks off a fresh conversation.'}
+            : 'Expose a webhook URL on this agent.  When called and verified, the payload kicks off a fresh conversation.'}
         </p>
       </header>
       <TaskForm instanceId={instanceId} taskName={taskName}/>
@@ -630,7 +630,7 @@ export function AuditListPage({ instanceId }) {
         <a className="btn btn-ghost btn-sm" href={backHref}>← back</a>
         <h1 className="page-title">audit</h1>
         <p className="page-sub muted">
-          Every webhook fire on this dyson, newest first.  Click a row
+          Every webhook fire on this agent, newest first.  Click a row
           to read the request body the agent saw.
         </p>
       </header>

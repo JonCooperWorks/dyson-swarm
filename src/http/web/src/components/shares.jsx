@@ -26,6 +26,7 @@ const TTL_OPTIONS = [
   { value: '1d', label: '1 day' },
   { value: '7d', label: '7 days' },
   { value: '30d', label: '30 days' },
+  { value: 'never', label: 'never (revoke manually)' },
 ];
 
 export function SharesPage({ instanceId }) {
@@ -174,7 +175,7 @@ export function SharesPage({ instanceId }) {
         ) : rows.length === 0 ? (
           <p className="muted small">
             no shares yet — click <em>+ new</em> to mint a link, or use the <em>share…</em>
-            button on an artefact inside the dyson.
+            button on an artefact inside the agent.
           </p>
         ) : (
           <table className="rows">

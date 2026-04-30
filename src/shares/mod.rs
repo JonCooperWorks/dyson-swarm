@@ -67,15 +67,25 @@ pub struct SharePayload {
     pub jti: [u8; 16],
 }
 
-/// Lifetime grammar for share mint: 1d, 7d, 30d.  No "never" — the
-/// security review preferred forced expiry, and reissuing is one
-/// click in the SPA.
+/// Lifetime grammar for share mint: 1d, 7d, 30d, or never.  "Never"
+/// is encoded as a far-future absolute exp (year ≈ 2126) — well
+/// inside i64 seconds, well outside any realistic share lifetime,
+/// and still subject to revocation + signing-key rotation.  The
+/// owner-facing affordance is the same in both cases.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShareTtl {
     Day,
     Week,
     Month,
+    Never,
 }
+
+/// 100 years in seconds — the "never" sentinel exp delta.  Picked so
+/// `now + delta` lands far in the future without flirting with
+/// i64::MAX (which would make off-by-one checks awkward) and stays
+/// monotonically larger than any realistic system clock, including
+/// container hosts whose clocks have been seen drifting decades.
+const NEVER_DELTA_SECS: i64 = 100 * 365 * 24 * 3600;
 
 impl ShareTtl {
     pub fn parse(s: &str) -> Option<Self> {
@@ -83,6 +93,7 @@ impl ShareTtl {
             "1d" => Some(Self::Day),
             "7d" => Some(Self::Week),
             "30d" => Some(Self::Month),
+            "never" => Some(Self::Never),
             _ => None,
         }
     }
@@ -92,6 +103,7 @@ impl ShareTtl {
             Self::Day => 24 * 3600,
             Self::Week => 7 * 24 * 3600,
             Self::Month => 30 * 24 * 3600,
+            Self::Never => NEVER_DELTA_SECS,
         }
     }
 }
@@ -443,10 +455,15 @@ mod tests {
         assert_eq!(ShareTtl::parse("1d"), Some(ShareTtl::Day));
         assert_eq!(ShareTtl::parse("7d"), Some(ShareTtl::Week));
         assert_eq!(ShareTtl::parse("30d"), Some(ShareTtl::Month));
-        assert!(ShareTtl::parse("never").is_none());
+        assert_eq!(ShareTtl::parse("never"), Some(ShareTtl::Never));
         assert!(ShareTtl::parse("").is_none());
+        assert!(ShareTtl::parse("forever").is_none());
         assert_eq!(ShareTtl::Day.seconds(), 24 * 3600);
         assert_eq!(ShareTtl::Week.seconds(), 7 * 24 * 3600);
+        // "never" lands in the next century, but still well below i64::MAX
+        // so `now + delta` doesn't overflow.
+        assert!(ShareTtl::Never.seconds() > 30 * 24 * 3600);
+        assert!(ShareTtl::Never.seconds() < i64::MAX / 2);
     }
 
     #[test]

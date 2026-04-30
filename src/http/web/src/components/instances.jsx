@@ -221,9 +221,9 @@ export function NewInstancePage() {
     <main className="page page-new">
       <header className="page-header">
         <a className="btn btn-ghost btn-sm" href="#/">← back</a>
-        <h1 className="page-title">hire a new dyson</h1>
+        <h1 className="page-title">hire a new agent</h1>
         <p className="page-sub muted">
-          Each Dyson is a long-lived employee.  Fill in the offer letter,
+          Each agent is a long-lived employee.  Fill in the offer letter,
           then click hire.
         </p>
       </header>
@@ -662,7 +662,7 @@ function NewInstanceForm() {
   if (phase === 'provisioning') {
     return (
       <section className="page-section">
-        <p className="muted small">getting your dyson ready…</p>
+        <p className="muted small">getting your agent ready…</p>
         <div className="progress-bar"><div className="progress-bar-indeterminate"/></div>
         <p className="muted small" style={{ marginTop: 12 }}>
           By the time this redirects, your dyson is live and reachable.
@@ -811,7 +811,7 @@ export const POLICY_OPTIONS = [
   {
     kind: 'airgap',
     label: 'Air-gapped (LLM + MCP only)',
-    help: 'No outbound traffic at all, except to the swarm /llm and /mcp proxies. The dyson can still call its model and any attached MCP servers (swarm forwards on its behalf), but the public internet is closed. The default — pick a wider profile only when the task actually needs it.',
+    help: 'No outbound traffic at all, except to the swarm /llm and /mcp proxies. The agent can still call its model and any attached MCP servers (swarm forwards on its behalf), but the public internet is closed. The default — pick a wider profile only when the task actually needs it.',
   },
   {
     kind: 'allowlist',
@@ -826,12 +826,12 @@ export const POLICY_OPTIONS = [
   {
     kind: 'nolocalnet',
     label: 'Open (full internet)',
-    help: 'Everything the dyson asks for is allowed, except RFC1918 + link-local + cloud-metadata (169.254.169.254). Pick this when the agent needs to research, fetch dependencies, or call external APIs but should never touch your LAN or the host.',
+    help: 'Everything the agent asks for is allowed, except RFC1918 + link-local + cloud-metadata (169.254.169.254). Pick this when the agent needs to research, fetch dependencies, or call external APIs but should never touch your LAN or the host.',
   },
   {
     kind: 'open',
     label: 'Open + internal LAN',
-    help: 'Same as Open, but ALSO permits access to private ranges (RFC1918, link-local, cloud-metadata). Pick this only when the dyson legitimately needs to reach a service on your LAN or the host. Do NOT use on cloud VMs — exposes the cloud-metadata service.',
+    help: 'Same as Open, but ALSO permits access to private ranges (RFC1918, link-local, cloud-metadata). Pick this only when the agent legitimately needs to reach a service on your LAN or the host. Do NOT use on cloud VMs — exposes the cloud-metadata service.',
   },
 ];
 
@@ -1572,7 +1572,7 @@ function InstanceDetail({ id, onNew }) {
                 ? 'swarm hostname is not configured — set [server] hostname in config.toml'
                 : isWarmingUp
                   ? 'sandbox is still warming up — opening anyway'
-                  : 'open this dyson in a new tab'
+                  : 'open this agent in a new tab'
             }
           >
             open ↗
@@ -1590,7 +1590,7 @@ function InstanceDetail({ id, onNew }) {
             href={`#/i/${encodeURIComponent(id)}/tasks`}
             aria-disabled={busy}
             onClick={(e) => { if (busy) e.preventDefault(); }}
-            title="webhook-triggered tasks for this dyson"
+            title="webhook-triggered tasks for this agent"
           >
             tasks
             {enabledTaskCount > 0
@@ -1696,7 +1696,7 @@ export function EditInstancePage({ instanceId }) {
     <main className="page page-edit">
       <header className="page-header">
         <a className="btn btn-ghost btn-sm" href={backHref}>← back</a>
-        <h1 className="page-title">edit dyson</h1>
+        <h1 className="page-title">edit agent</h1>
         <p className="page-sub muted">
           Change the dyson's identity, model, toolbox, or network access.
           Network changes restart the sandbox briefly; everything else
@@ -1943,30 +1943,30 @@ function EmptyDetail({ onNew, hasInstances }) {
         <DysonSphereGlyph/>
         {hasInstances ? (
           <>
-            <h1 className="empty-title">pick a dyson</h1>
+            <h1 className="empty-title">pick an agent</h1>
             <p className="empty-sub">
               your roster is on the left — pick one to inspect, edit, or
               fire it up. or hire a new employee for a new task.
             </p>
             <div className="empty-actions">
-              <button className="btn btn-primary" onClick={onNew}>+ hire a dyson</button>
+              <button className="btn btn-primary" onClick={onNew}>+ hire an agent</button>
             </div>
           </>
         ) : (
           <>
             <h1 className="empty-title">build your swarm</h1>
             <p className="empty-sub">
-              dysons are long-lived agents you put to work — one per task,
+              agents are long-lived workers you put to work — one per task,
               each with its own brief, model, and memory. start with one
               employee; scale to hundreds.
             </p>
             <div className="empty-actions">
               <button className="btn btn-primary btn-lg" onClick={onNew}>
-                hire your first dyson
+                hire your first agent
               </button>
             </div>
             <p className="empty-hint muted small">
-              you can always change a dyson's brief or model later — nothing
+              you can always change an agent's brief or model later — nothing
               you set now is final.
             </p>
           </>

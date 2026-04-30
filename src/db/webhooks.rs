@@ -534,6 +534,103 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn instance_audit_list_paginates_and_searches() {
+        let pool = open_in_memory().await.unwrap();
+        seed_instance(pool.clone(), "i1").await;
+        seed_instance(pool.clone(), "i2").await;
+        let webhooks = SqlxWebhookStore::new(pool.clone());
+        webhooks.put(&row("i1", "ping")).await.unwrap();
+        webhooks.put(&row("i1", "deploy")).await.unwrap();
+        webhooks.put(&row("i2", "ping")).await.unwrap();
+        let deliveries = SqlxDeliveryStore::new(pool);
+
+        let mk = |id: &str, instance: &str, name: &str, ts: i64, body: &[u8]| DeliveryRow {
+            id: id.into(),
+            instance_id: instance.into(),
+            webhook_name: name.into(),
+            fired_at: ts,
+            status_code: 204,
+            latency_ms: 10,
+            request_id: None,
+            signature_ok: true,
+            error: None,
+            body: Some(body.to_vec()),
+            body_size: Some(body.len() as i64),
+            content_type: Some("application/json".into()),
+        };
+        deliveries.insert(&mk("a", "i1", "ping", 100, b"{\"action\":\"opened\"}")).await.unwrap();
+        deliveries.insert(&mk("b", "i1", "deploy", 200, b"{\"ref\":\"main\"}")).await.unwrap();
+        deliveries.insert(&mk("c", "i1", "ping", 300, b"{\"action\":\"closed\"}")).await.unwrap();
+        deliveries.insert(&mk("d", "i2", "ping", 400, b"other tenant")).await.unwrap();
+
+        let listed = deliveries
+            .list_for_instance("i1", None, None, None, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            listed.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            vec!["c", "b", "a"],
+        );
+        assert!(listed.iter().all(|r| r.body.is_none()));
+
+        let page1 = deliveries
+            .list_for_instance("i1", None, None, None, 2)
+            .await
+            .unwrap();
+        assert_eq!(page1.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), vec!["c", "b"]);
+        let cursor = page1.last().unwrap().fired_at;
+        let page2 = deliveries
+            .list_for_instance("i1", None, None, Some(cursor), 2)
+            .await
+            .unwrap();
+        assert_eq!(page2.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), vec!["a"]);
+
+        let pings = deliveries
+            .list_for_instance("i1", Some("ping"), None, None, 10)
+            .await
+            .unwrap();
+        assert_eq!(pings.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), vec!["c", "a"]);
+
+        let opened = deliveries
+            .list_for_instance("i1", None, Some("OPENED"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(opened.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), vec!["a"]);
+    }
+
+    #[tokio::test]
+    async fn get_by_id_includes_body_and_scopes_to_instance() {
+        let pool = open_in_memory().await.unwrap();
+        seed_instance(pool.clone(), "i1").await;
+        seed_instance(pool.clone(), "i2").await;
+        let webhooks = SqlxWebhookStore::new(pool.clone());
+        webhooks.put(&row("i1", "ping")).await.unwrap();
+        let deliveries = SqlxDeliveryStore::new(pool);
+
+        deliveries.insert(&DeliveryRow {
+            id: "d1".into(),
+            instance_id: "i1".into(),
+            webhook_name: "ping".into(),
+            fired_at: 100,
+            status_code: 204,
+            latency_ms: 5,
+            request_id: Some("req-1".into()),
+            signature_ok: true,
+            error: None,
+            body: Some(b"{\"hello\":\"world\"}".to_vec()),
+            body_size: Some(17),
+            content_type: Some("application/json".into()),
+        }).await.unwrap();
+
+        let got = deliveries.get_by_id("i1", "d1").await.unwrap().unwrap();
+        assert_eq!(got.body.as_deref(), Some(b"{\"hello\":\"world\"}".as_slice()));
+        assert_eq!(got.content_type.as_deref(), Some("application/json"));
+
+        assert!(deliveries.get_by_id("i2", "d1").await.unwrap().is_none());
+        assert!(deliveries.get_by_id("i1", "missing").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
     async fn update_fields_partial_patch() {
         let pool = open_in_memory().await.unwrap();
         seed_instance(pool.clone(), "i1").await;

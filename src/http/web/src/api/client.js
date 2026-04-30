@@ -256,6 +256,35 @@ export class SwarmClient {
     );
   }
 
+  /// Cross-task audit log for an instance — newest first, cursor-paginated
+  /// by `fired_at` seconds.  `before` is the previous page's oldest
+  /// `fired_at`; `q` is a substring filter applied to the body+error
+  /// columns server-side.  Each row also carries `webhook_name` so the
+  /// SPA can render which task fired it.
+  listInstanceDeliveries(instanceId, { limit = 50, before, q, webhook } = {}) {
+    const params = new URLSearchParams();
+    if (limit) params.set('limit', String(limit));
+    if (before != null) params.set('before', String(before));
+    if (q) params.set('q', q);
+    if (webhook) params.set('webhook', webhook);
+    const qs = params.toString();
+    return this._json(
+      `/v1/instances/${encodeURIComponent(instanceId)}/deliveries${qs ? `?${qs}` : ''}`,
+      { headers: { Accept: 'application/json' } },
+    );
+  }
+
+  /// Single delivery row including the request body — for the audit
+  /// detail page.  Returns `{ ..., body_text, body_b64 }`; `body_text`
+  /// is set when the body is valid utf8, `body_b64` always carries the
+  /// raw bytes so binary payloads round-trip cleanly.
+  getDelivery(instanceId, deliveryId) {
+    return this._json(
+      `/v1/instances/${encodeURIComponent(instanceId)}/deliveries/${encodeURIComponent(deliveryId)}`,
+      { headers: { Accept: 'application/json' } },
+    );
+  }
+
   // ─── Admin (caller must carry the configured admin permission/role) ─
 
   adminListUsers() {

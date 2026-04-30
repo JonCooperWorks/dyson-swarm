@@ -163,6 +163,17 @@ export function removeWebhook(instanceId, name) {
 export function parseHashView() {
   if (typeof window === 'undefined') return { name: 'instances', id: null };
   const h = window.location.hash || '#/';
+  // Audit subroutes are checked before /tasks/new and /tasks/<name> —
+  // `audit` is a reserved task slug (the validator forbids slashes,
+  // but we still want a stable URL when someone hand-edits it).
+  const auditDetail = h.match(/^#\/i\/([^/?#]+)\/tasks\/audit\/([^/?#]+)/);
+  if (auditDetail) return {
+    name: 'instance-task-audit-detail',
+    id: decodeURIComponent(auditDetail[1]),
+    deliveryId: decodeURIComponent(auditDetail[2]),
+  };
+  const audit = h.match(/^#\/i\/([^/?#]+)\/tasks\/audit/);
+  if (audit) return { name: 'instance-task-audit', id: decodeURIComponent(audit[1]) };
   const taskNew = h.match(/^#\/i\/([^/?#]+)\/tasks\/new/);
   if (taskNew) return { name: 'instance-task-new', id: decodeURIComponent(taskNew[1]), taskName: null };
   const taskEdit = h.match(/^#\/i\/([^/?#]+)\/tasks\/([^/?#]+)/);

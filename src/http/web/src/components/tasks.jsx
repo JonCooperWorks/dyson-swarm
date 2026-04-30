@@ -1,11 +1,13 @@
 /* swarm — Tasks (webhooks) views.
  *
- * Three pages, all reachable from the instance detail header's
+ * Five pages, all reachable from the instance detail header's
  * `tasks <badge>` button:
  *
- *   #/i/<id>/tasks            → TasksListPage  (table, toggle, copy URL)
- *   #/i/<id>/tasks/new        → TaskFormPage   (create)
- *   #/i/<id>/tasks/<name>     → TaskFormPage   (edit + delivery log)
+ *   #/i/<id>/tasks                       → TasksListPage   (roster)
+ *   #/i/<id>/tasks/new                   → TaskFormPage    (create)
+ *   #/i/<id>/tasks/<name>                → TaskFormPage    (edit + recent log)
+ *   #/i/<id>/tasks/audit                 → AuditListPage   (cross-task log)
+ *   #/i/<id>/tasks/audit/<delivery_id>   → AuditDetailPage (body view)
  *
  * The form pages reuse the same `.page-edit` width and `.page-form`
  * layout the hire/edit flow uses so the tasks UI fits the rest of
@@ -60,6 +62,7 @@ export function TasksListPage({ instanceId }) {
   const [err, setErr] = React.useState(null);
   const backHref = `#/i/${encodeURIComponent(instanceId)}`;
   const newHref = `#/i/${encodeURIComponent(instanceId)}/tasks/new`;
+  const auditHref = `#/i/${encodeURIComponent(instanceId)}/tasks/audit`;
 
   const refresh = React.useCallback(async () => {
     setRefreshing(true); setErr(null);
@@ -128,6 +131,7 @@ export function TasksListPage({ instanceId }) {
             >
               {refreshing ? '…' : '↻'}
             </button>
+            <a className="btn btn-ghost btn-sm" href={auditHref} title="cross-task delivery audit log">audit</a>
             <a className="btn btn-sm" href={newHref}>+ new</a>
           </div>
         </div>
@@ -520,5 +524,416 @@ function DeliveriesPanel({ instanceId, taskName }) {
         </ul>
       )}
     </section>
+  );
+}
+
+// ─── Audit list + detail ──────────────────────────────────────────
+//
+// `AuditListPage` is the cross-task delivery log: every fire across
+// every task on the instance, newest first, with body-substring search
+// and cursor pagination.  Detail pages link from here.
+
+const AUDIT_PAGE_SIZE = 50;
+
+export function AuditListPage({ instanceId }) {
+  const { client } = useApi();
+  const backHref = `#/i/${encodeURIComponent(instanceId)}/tasks`;
+  // Pages are tracked as a stack of `before` cursors so the user can
+  // page forward by appending the oldest fired_at, and backward by
+  // popping.  The first page has cursor=null (= unbounded).
+  const [cursors, setCursors] = React.useState([null]);
+  const [rows, setRows] = React.useState(null);
+  const [loading, setLoading] = React.useState(true);
+  const [err, setErr] = React.useState(null);
+  // The form input is committed to `committedQ` on submit so each
+  // keystroke doesn't re-fire the query.  Submitting also resets the
+  // cursor stack — search invalidates the existing pagination.
+  const [qInput, setQInput] = React.useState('');
+  const [committedQ, setCommittedQ] = React.useState('');
+  const [webhookFilter, setWebhookFilter] = React.useState('');
+  const slot = useAppState(s => s.webhooks.byInstance[instanceId]);
+  const taskNames = React.useMemo(
+    () => (slot?.rows || []).map(r => r.name),
+    [slot],
+  );
+
+  React.useEffect(() => {
+    // Pull the task roster on mount so the webhook filter dropdown is
+    // populated before the user opens it.  Cached in the store so it
+    // doesn't blink on subsequent visits.
+    let cancelled = false;
+    if (!slot) {
+      client.listWebhooks(instanceId)
+        .then(list => { if (!cancelled) setWebhooksFor(instanceId, list || []); })
+        .catch(() => { /* surfaced on the tasks list page */ });
+    }
+    return () => { cancelled = true; };
+  }, [client, instanceId, slot]);
+
+  const cursor = cursors[cursors.length - 1];
+  const refresh = React.useCallback(async () => {
+    setLoading(true); setErr(null);
+    try {
+      const list = await client.listInstanceDeliveries(instanceId, {
+        limit: AUDIT_PAGE_SIZE,
+        before: cursor ?? undefined,
+        q: committedQ || undefined,
+        webhook: webhookFilter || undefined,
+      });
+      setRows(Array.isArray(list) ? list : []);
+    } catch (e) {
+      setErr(e?.detail || e?.message || 'load failed');
+      setRows([]);
+    } finally {
+      setLoading(false);
+    }
+  }, [client, instanceId, cursor, committedQ, webhookFilter]);
+
+  React.useEffect(() => { refresh(); }, [refresh]);
+
+  React.useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape') window.location.hash = backHref; };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [backHref]);
+
+  const submitSearch = (e) => {
+    e.preventDefault();
+    setCursors([null]);
+    setCommittedQ(qInput.trim());
+  };
+
+  const clearSearch = () => {
+    setQInput('');
+    setCommittedQ('');
+    setWebhookFilter('');
+    setCursors([null]);
+  };
+
+  const nextPage = () => {
+    if (!rows || rows.length < AUDIT_PAGE_SIZE) return;
+    const last = rows[rows.length - 1];
+    setCursors([...cursors, last.fired_at]);
+  };
+  const prevPage = () => {
+    if (cursors.length <= 1) return;
+    setCursors(cursors.slice(0, -1));
+  };
+
+  const onPage = cursors.length;
+  const canPrev = cursors.length > 1;
+  const canNext = !!rows && rows.length >= AUDIT_PAGE_SIZE;
+
+  return (
+    <main className="page page-edit">
+      <header className="page-header">
+        <a className="btn btn-ghost btn-sm" href={backHref}>← back</a>
+        <h1 className="page-title">audit</h1>
+        <p className="page-sub muted">
+          Every webhook fire on this dyson, newest first.  Click a row
+          to read the request body the agent saw.
+        </p>
+      </header>
+
+      <section className="panel">
+        <div className="panel-header">
+          <div className="panel-title">deliveries</div>
+          <div className="panel-actions">
+            <button
+              className="btn btn-ghost btn-sm"
+              onClick={refresh}
+              disabled={loading}
+              title="refresh"
+            >
+              {loading ? '…' : '↻'}
+            </button>
+          </div>
+        </div>
+
+        <form className="audit-filters" onSubmit={submitSearch}>
+          <input
+            type="search"
+            className="audit-search"
+            placeholder="search bodies + errors…"
+            value={qInput}
+            onChange={e => setQInput(e.target.value)}
+            maxLength={256}
+          />
+          <select
+            className="audit-task-filter"
+            value={webhookFilter}
+            onChange={e => { setWebhookFilter(e.target.value); setCursors([null]); }}
+            title="filter by task"
+          >
+            <option value="">all tasks</option>
+            {taskNames.map(n => (
+              <option key={n} value={n}>{n}</option>
+            ))}
+          </select>
+          <button type="submit" className="btn btn-sm">search</button>
+          {(committedQ || webhookFilter) ? (
+            <button type="button" className="btn btn-ghost btn-sm" onClick={clearSearch}>
+              clear
+            </button>
+          ) : null}
+        </form>
+
+        {err ? <div className="error">{err}</div> : null}
+
+        {rows === null ? (
+          <p className="muted small">loading…</p>
+        ) : rows.length === 0 ? (
+          <AuditEmpty
+            filtered={!!(committedQ || webhookFilter)}
+            onClear={clearSearch}
+          />
+        ) : (
+          <table className="rows audit-table">
+            <thead><tr>
+              <th>when</th>
+              <th>task</th>
+              <th>status</th>
+              <th>latency</th>
+              <th>size</th>
+              <th>request id</th>
+            </tr></thead>
+            <tbody>
+              {rows.map(d => {
+                const detailHref = `#/i/${encodeURIComponent(instanceId)}/tasks/audit/${encodeURIComponent(d.id)}`;
+                return (
+                  <tr key={d.id} className={d.signature_ok ? '' : 'sig-bad'}>
+                    <td className="muted small">
+                      <a className="audit-row-link" href={detailHref}>{fmtTime(d.fired_at)}</a>
+                    </td>
+                    <td><code className="mono-sm">{d.webhook_name}</code></td>
+                    <td>
+                      <span className={`badge ${d.status_code < 400 ? 'badge-ok' : 'badge-warn'}`}>
+                        {d.status_code}
+                      </span>
+                      {!d.signature_ok ? (
+                        <span className="badge badge-warn small" style={{ marginLeft: 6 }}>bad sig</span>
+                      ) : null}
+                    </td>
+                    <td className="muted small">{d.latency_ms}ms</td>
+                    <td className="muted small">{fmtBytes(d.body_size)}</td>
+                    <td className="muted small">
+                      {d.request_id ? <code className="mono-sm">{shortId(d.request_id)}</code> : '—'}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+
+        <div className="audit-pager">
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm"
+            onClick={prevPage}
+            disabled={!canPrev || loading}
+          >
+            ← newer
+          </button>
+          <span className="muted small">page {onPage}</span>
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm"
+            onClick={nextPage}
+            disabled={!canNext || loading}
+          >
+            older →
+          </button>
+        </div>
+      </section>
+    </main>
+  );
+}
+
+export function AuditDetailPage({ instanceId, deliveryId }) {
+  const { client } = useApi();
+  const backHref = `#/i/${encodeURIComponent(instanceId)}/tasks/audit`;
+  const [row, setRow] = React.useState(null);
+  const [err, setErr] = React.useState(null);
+  const [loading, setLoading] = React.useState(true);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    setLoading(true); setErr(null);
+    client.getDelivery(instanceId, deliveryId)
+      .then(r => { if (!cancelled) { setRow(r); setLoading(false); } })
+      .catch(e => {
+        if (!cancelled) {
+          setErr(e?.detail || e?.message || 'load failed');
+          setLoading(false);
+        }
+      });
+    return () => { cancelled = true; };
+  }, [client, instanceId, deliveryId]);
+
+  React.useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape') window.location.hash = backHref; };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [backHref]);
+
+  return (
+    <main className="page page-edit">
+      <header className="page-header">
+        <a className="btn btn-ghost btn-sm" href={backHref}>← back</a>
+        <h1 className="page-title">delivery</h1>
+        <p className="page-sub muted">
+          Exact request bytes the agent saw on this fire.
+        </p>
+      </header>
+
+      {err ? <div className="error">{err}</div> : null}
+
+      {loading ? (
+        <p className="muted">loading…</p>
+      ) : !row ? (
+        <p className="muted">delivery not found.</p>
+      ) : (
+        <>
+          <section className="panel">
+            <div className="panel-title">metadata</div>
+            <dl className="audit-meta">
+              <dt>id</dt><dd><code className="mono-sm">{row.id}</code></dd>
+              <dt>task</dt>
+              <dd>
+                <code className="mono-sm">{row.webhook_name}</code>{' '}
+                <a
+                  className="muted small"
+                  href={`#/i/${encodeURIComponent(instanceId)}/tasks/${encodeURIComponent(row.webhook_name)}`}
+                >
+                  open task
+                </a>
+              </dd>
+              <dt>fired</dt><dd>{fmtTime(row.fired_at)}</dd>
+              <dt>status</dt>
+              <dd>
+                <span className={`badge ${row.status_code < 400 ? 'badge-ok' : 'badge-warn'}`}>
+                  {row.status_code}
+                </span>{' '}
+                {row.signature_ok
+                  ? <span className="badge badge-ok small">signature ok</span>
+                  : <span className="badge badge-warn small">signature failed</span>}
+              </dd>
+              <dt>latency</dt><dd>{row.latency_ms}ms</dd>
+              <dt>request id</dt>
+              <dd>{row.request_id ? <code className="mono-sm">{row.request_id}</code> : '—'}</dd>
+              <dt>content-type</dt>
+              <dd>{row.content_type ? <code className="mono-sm">{row.content_type}</code> : '—'}</dd>
+              <dt>body size</dt><dd>{fmtBytes(row.body_size)}</dd>
+              {row.error ? (<><dt>error</dt><dd className="deliveries-row-err small">{row.error}</dd></>) : null}
+            </dl>
+          </section>
+
+          <DeliveryBodyPanel row={row}/>
+        </>
+      )}
+    </main>
+  );
+}
+
+function DeliveryBodyPanel({ row }) {
+  const [copied, setCopied] = React.useState(false);
+  const text = row.body_text;
+  const hasBody = text != null || row.body_b64 != null;
+
+  const copy = async () => {
+    if (text == null) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1100);
+    } catch { /* ignore */ }
+  };
+
+  // For JSON content, pretty-print on demand.  We don't pre-format
+  // because (a) the operator may want the exact bytes the signature
+  // was computed over, (b) JSON.parse silently strips whitespace and
+  // re-orders nothing, but a stringify+parse round-trip changes
+  // separators which is enough to confuse a "why does my HMAC fail"
+  // debug session.
+  const pretty = React.useMemo(() => {
+    if (text == null) return null;
+    if (!(row.content_type || '').toLowerCase().includes('json')) return null;
+    try {
+      const parsed = JSON.parse(text);
+      return JSON.stringify(parsed, null, 2);
+    } catch {
+      return null;
+    }
+  }, [text, row.content_type]);
+  const [showPretty, setShowPretty] = React.useState(false);
+
+  return (
+    <section className="panel">
+      <div className="panel-header">
+        <div className="panel-title">body</div>
+        <div className="panel-actions">
+          {pretty ? (
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              onClick={() => setShowPretty(p => !p)}
+            >
+              {showPretty ? 'raw' : 'pretty'}
+            </button>
+          ) : null}
+          {text != null ? (
+            <button type="button" className="btn btn-ghost btn-sm" onClick={copy}>
+              {copied ? 'copied!' : 'copy'}
+            </button>
+          ) : null}
+        </div>
+      </div>
+      {!hasBody ? (
+        <p className="muted small">no body recorded.</p>
+      ) : text != null ? (
+        <pre className="audit-body">{showPretty && pretty ? pretty : text}</pre>
+      ) : (
+        <>
+          <p className="muted small">
+            non-utf8 payload — base64-encoded:
+          </p>
+          <pre className="audit-body">{row.body_b64}</pre>
+        </>
+      )}
+    </section>
+  );
+}
+
+function fmtBytes(n) {
+  if (n == null) return '—';
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KiB`;
+  return `${(n / 1024 / 1024).toFixed(2)} MiB`;
+}
+
+function AuditEmpty({ filtered, onClear }) {
+  return (
+    <div className="audit-empty">
+      <div className="audit-empty-glyph" aria-hidden="true">∅</div>
+      <div className="audit-empty-title">
+        {filtered ? 'no deliveries match' : 'no deliveries yet'}
+      </div>
+      <div className="audit-empty-body muted small">
+        {filtered ? (
+          <>Try a different search term, or pick a different task.</>
+        ) : (
+          <>
+            Each successful or failed webhook fire records a row here.
+            POST to a task URL to see one show up.
+          </>
+        )}
+      </div>
+      {filtered ? (
+        <button type="button" className="btn btn-ghost btn-sm" onClick={onClear}>
+          clear filters
+        </button>
+      ) : null}
+    </div>
   );
 }

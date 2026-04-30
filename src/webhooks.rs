@@ -462,6 +462,45 @@ impl WebhookService {
             .await?)
     }
 
+    /// Cross-task audit listing.  Owner-scoped at the entry point, then
+    /// passes through to the store.  `webhook_name` narrows to a single
+    /// task when the operator is filtering by name in the SPA; `q` is
+    /// a substring match on body+error; `before` is the cursor (the
+    /// previous page's oldest `fired_at` value).
+    pub async fn list_instance_deliveries(
+        &self,
+        owner_id: &str,
+        instance_id: &str,
+        webhook_name: Option<&str>,
+        q: Option<&str>,
+        before: Option<i64>,
+        limit: u32,
+    ) -> Result<Vec<DeliveryRow>, WebhookError> {
+        self.ensure_owner(owner_id, instance_id).await?;
+        let limit = limit.min(MAX_DELIVERY_LIMIT).max(1);
+        Ok(self
+            .deliveries
+            .list_for_instance(instance_id, webhook_name, q, before, limit)
+            .await?)
+    }
+
+    /// Single delivery row including the request body — for the audit
+    /// detail page.  Owner-scoped at the entry; the store also bounds
+    /// the query by `instance_id` so a guessed delivery id can't reach
+    /// into another tenant.
+    pub async fn get_delivery(
+        &self,
+        owner_id: &str,
+        instance_id: &str,
+        delivery_id: &str,
+    ) -> Result<DeliveryRow, WebhookError> {
+        self.ensure_owner(owner_id, instance_id).await?;
+        self.deliveries
+            .get_by_id(instance_id, delivery_id)
+            .await?
+            .ok_or(WebhookError::NotFound)
+    }
+
     /// Public-facing entrypoint.  Owner-LESS — verification replaces
     /// user auth.  Returns 4xx-shaped errors as `Err(...)` so the HTTP
     /// layer can map them; on success returns the agent's status code

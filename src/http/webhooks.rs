@@ -46,6 +46,15 @@ pub fn router(state: AppState) -> Router {
             "/v1/instances/:id/webhooks/:name/deliveries",
             get(list_deliveries),
         )
+        // Cross-task audit log for the SPA's audit page.  Sibling of
+        // /webhooks rather than nested under it because it spans every
+        // task on the instance — the URL would otherwise lie about
+        // scope.
+        .route("/v1/instances/:id/deliveries", get(list_instance_deliveries))
+        .route(
+            "/v1/instances/:id/deliveries/:delivery_id",
+            get(get_delivery),
+        )
         .with_state(state)
 }
 
@@ -117,6 +126,126 @@ impl DeliveryView {
             content_type: r.content_type,
         }
     }
+}
+
+/// Cross-task audit listing row — adds `webhook_name` to the standard
+/// metadata view so the SPA can render which task each row belongs to.
+#[derive(Debug, Serialize)]
+pub struct AuditDeliveryView {
+    pub id: String,
+    pub webhook_name: String,
+    pub fired_at: i64,
+    pub status_code: i32,
+    pub latency_ms: i64,
+    pub signature_ok: bool,
+    pub request_id: Option<String>,
+    pub error: Option<String>,
+    pub body_size: Option<i64>,
+    pub content_type: Option<String>,
+}
+
+impl AuditDeliveryView {
+    fn from_row(r: DeliveryRow) -> Self {
+        Self {
+            id: r.id,
+            webhook_name: r.webhook_name,
+            fired_at: r.fired_at,
+            status_code: r.status_code,
+            latency_ms: r.latency_ms,
+            signature_ok: r.signature_ok,
+            request_id: r.request_id,
+            error: r.error,
+            body_size: r.body_size,
+            content_type: r.content_type,
+        }
+    }
+}
+
+/// Detail-page payload — same shape as `AuditDeliveryView` plus the
+/// request body.  We surface the body in two complementary forms:
+/// `body_text` is the utf8-decoded view (set whenever the bytes are
+/// valid utf8) so the SPA can render it directly; `body_b64` always
+/// carries the raw bytes so binary payloads (and any utf8 surrogates
+/// the JS layer would mangle) survive round-trip.  Operators reading
+/// JSON payloads — the common case — only need `body_text`.
+#[derive(Debug, Serialize)]
+pub struct DeliveryDetailView {
+    pub id: String,
+    pub webhook_name: String,
+    pub fired_at: i64,
+    pub status_code: i32,
+    pub latency_ms: i64,
+    pub signature_ok: bool,
+    pub request_id: Option<String>,
+    pub error: Option<String>,
+    pub body_size: Option<i64>,
+    pub content_type: Option<String>,
+    pub body_text: Option<String>,
+    pub body_b64: Option<String>,
+}
+
+impl DeliveryDetailView {
+    fn from_row(r: DeliveryRow) -> Self {
+        let (body_text, body_b64) = match r.body.as_deref() {
+            None => (None, None),
+            Some(bytes) => {
+                let text = std::str::from_utf8(bytes).ok().map(str::to_owned);
+                let b64 = base64_encode(bytes);
+                (text, Some(b64))
+            }
+        };
+        Self {
+            id: r.id,
+            webhook_name: r.webhook_name,
+            fired_at: r.fired_at,
+            status_code: r.status_code,
+            latency_ms: r.latency_ms,
+            signature_ok: r.signature_ok,
+            request_id: r.request_id,
+            error: r.error,
+            body_size: r.body_size,
+            content_type: r.content_type,
+            body_text,
+            body_b64,
+        }
+    }
+}
+
+/// Tiny base64 encoder so we don't drag a new crate in for one call
+/// site.  Standard alphabet, padded.  Called once per detail-page
+/// load, so a hot-path version isn't worth the bytes.
+fn base64_encode(input: &[u8]) -> String {
+    const ALPHA: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    let mut chunks = input.chunks_exact(3);
+    for chunk in &mut chunks {
+        let n = (u32::from(chunk[0]) << 16) | (u32::from(chunk[1]) << 8) | u32::from(chunk[2]);
+        out.push(ALPHA[((n >> 18) & 0x3F) as usize] as char);
+        out.push(ALPHA[((n >> 12) & 0x3F) as usize] as char);
+        out.push(ALPHA[((n >> 6) & 0x3F) as usize] as char);
+        out.push(ALPHA[(n & 0x3F) as usize] as char);
+    }
+    let rem = chunks.remainder();
+    match rem.len() {
+        0 => {}
+        1 => {
+            let n = u32::from(rem[0]) << 16;
+            out.push(ALPHA[((n >> 18) & 0x3F) as usize] as char);
+            out.push(ALPHA[((n >> 12) & 0x3F) as usize] as char);
+            out.push('=');
+            out.push('=');
+        }
+        2 => {
+            let n = (u32::from(rem[0]) << 16) | (u32::from(rem[1]) << 8);
+            out.push(ALPHA[((n >> 18) & 0x3F) as usize] as char);
+            out.push(ALPHA[((n >> 12) & 0x3F) as usize] as char);
+            out.push(ALPHA[((n >> 6) & 0x3F) as usize] as char);
+            out.push('=');
+        }
+        _ => unreachable!(),
+    }
+    out
 }
 
 #[derive(Debug, Deserialize)]
@@ -305,6 +434,98 @@ async fn list_deliveries(
         .await
         .map_err(|e| err_to_status(&e))?;
     Ok(Json(rows.into_iter().map(DeliveryView::from_row).collect()))
+}
+
+async fn list_instance_deliveries(
+    State(state): State<AppState>,
+    Extension(caller): Extension<CallerIdentity>,
+    Path(id): Path<String>,
+    uri: Uri,
+) -> Result<Json<Vec<AuditDeliveryView>>, StatusCode> {
+    let qs = parse_query(uri.query().unwrap_or(""));
+    let limit = qs
+        .get("limit")
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(DEFAULT_DELIVERY_LIMIT);
+    let before = qs.get("before").and_then(|v| v.parse::<i64>().ok());
+    let webhook = qs.get("webhook").map(String::as_str).filter(|s| !s.is_empty());
+    let q_raw = qs.get("q").map(String::as_str).filter(|s| !s.is_empty());
+    // Hard cap on the search needle — past a few hundred chars it's
+    // almost certainly a paste of a payload, and SQLite's LIKE on a
+    // BLOB cast happily eats CPU on long needles.
+    if q_raw.map_or(false, |q| q.len() > 256) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let rows = state
+        .webhooks
+        .list_instance_deliveries(&caller.user_id, &id, webhook, q_raw, before, limit)
+        .await
+        .map_err(|e| err_to_status(&e))?;
+    Ok(Json(rows.into_iter().map(AuditDeliveryView::from_row).collect()))
+}
+
+async fn get_delivery(
+    State(state): State<AppState>,
+    Extension(caller): Extension<CallerIdentity>,
+    Path((id, delivery_id)): Path<(String, String)>,
+) -> Result<Json<DeliveryDetailView>, StatusCode> {
+    let row = state
+        .webhooks
+        .get_delivery(&caller.user_id, &id, &delivery_id)
+        .await
+        .map_err(|e| err_to_status(&e))?;
+    Ok(Json(DeliveryDetailView::from_row(row)))
+}
+
+/// Tiny query-string parser — extracted so the audit handler can pull
+/// multiple keys without re-walking the string for each one.  Decodes
+/// `+` as space and percent-escapes; on malformed input the value is
+/// returned verbatim (the audit filters tolerate stray characters).
+fn parse_query(qs: &str) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    if qs.is_empty() {
+        return out;
+    }
+    for pair in qs.split('&') {
+        let Some((k, v)) = pair.split_once('=') else {
+            continue;
+        };
+        out.insert(qs_decode(k), qs_decode(v));
+    }
+    out
+}
+
+fn qs_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 2 < bytes.len() => {
+                let hi = (bytes[i + 1] as char).to_digit(16);
+                let lo = (bytes[i + 2] as char).to_digit(16);
+                match (hi, lo) {
+                    (Some(h), Some(l)) => {
+                        out.push((h * 16 + l) as u8);
+                        i += 3;
+                    }
+                    _ => {
+                        out.push(bytes[i]);
+                        i += 1;
+                    }
+                }
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).unwrap_or_else(|_| s.to_string())
 }
 
 /// Public webhook delivery.  Strictly POST.  Body is buffered up to

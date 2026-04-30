@@ -1514,3 +1514,96 @@
   .tasks-row-url { flex-direction: column; align-items: stretch; }
   .tasks-row-url code { white-space: normal; word-break: break-all; }
 }
+
+/* Audit page (cross-task delivery log). */
+.audit-filters {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 8px 0 12px;
+}
+.audit-search {
+  flex: 1 1 240px;
+  min-width: 0;
+}
+.audit-task-filter {
+  flex: 0 0 auto;
+}
+.audit-table tr.sig-bad td { color: var(--fg); }
+.audit-table tr:hover td { background: var(--bg-soft, rgba(255, 255, 255, 0.02)); }
+.audit-row-link {
+  color: inherit;
+  text-decoration: none;
+}
+.audit-row-link:hover { text-decoration: underline; }
+.audit-pager {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.audit-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 8px;
+  padding: 32px 16px;
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  margin: 4px 0 0;
+}
+.audit-empty-glyph {
+  font-size: 28px;
+  line-height: 1;
+  color: var(--fg-muted);
+  opacity: 0.6;
+}
+.audit-empty-title {
+  font-size: 0.95rem;
+  color: var(--fg);
+}
+.audit-empty-body {
+  max-width: 360px;
+  line-height: 1.4;
+}
+
+/* Detail page metadata + body view. */
+.audit-meta {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  column-gap: 16px;
+  row-gap: 6px;
+  margin: 8px 0 0;
+}
+.audit-meta dt {
+  color: var(--fg-muted);
+  font-size: 0.85em;
+}
+.audit-meta dd {
+  margin: 0;
+  word-break: break-word;
+}
+.audit-body {
+  margin: 8px 0 0;
+  padding: 12px;
+  background: var(--bg-soft, #11141a);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  max-height: 60vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 0.85rem;
+}
+
+@media (max-width: 640px) {
+  .audit-filters { flex-direction: column; align-items: stretch; }
+  .audit-search, .audit-task-filter { width: 100%; }
+  .audit-meta { grid-template-columns: 1fr; }
+  .audit-meta dt { margin-top: 6px; }
+}

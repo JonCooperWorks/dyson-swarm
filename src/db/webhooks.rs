@@ -247,6 +247,108 @@ impl DeliveryStore for SqlxDeliveryStore {
         rows.into_iter().map(metadata_row).collect()
     }
 
+    async fn list_for_instance(
+        &self,
+        instance_id: &str,
+        webhook_name: Option<&str>,
+        q: Option<&str>,
+        before: Option<i64>,
+        limit: u32,
+    ) -> Result<Vec<DeliveryRow>, StoreError> {
+        // Same projection rule as `list_for_webhook` — body bytes only
+        // come down the wire on the detail page.  We compose the
+        // optional filters with positional placeholders rather than
+        // string-concat'ing the values: SQLite treats bound parameters
+        // as data, never as SQL.
+        //
+        // For `q`: matches against either the body (cast to TEXT —
+        // SQLite folds BLOBs to TEXT byte-for-byte, which is correct
+        // for utf8 payloads and is the same semantics rg uses) or the
+        // recorded error string.  Lowercased on both sides via LOWER()
+        // so the search is case-insensitive without needing a special
+        // collation.
+        let mut sql = String::from(
+            "SELECT id, instance_id, webhook_name, fired_at, status_code, \
+                    latency_ms, request_id, signature_ok, error, \
+                    body_size, content_type \
+             FROM webhook_deliveries \
+             WHERE instance_id = ?",
+        );
+        if webhook_name.is_some() {
+            sql.push_str(" AND webhook_name = ?");
+        }
+        if before.is_some() {
+            sql.push_str(" AND fired_at < ?");
+        }
+        if q.is_some() {
+            sql.push_str(
+                " AND (LOWER(CAST(body AS TEXT)) LIKE ? \
+                       OR LOWER(COALESCE(error, '')) LIKE ?)",
+            );
+        }
+        sql.push_str(" ORDER BY fired_at DESC LIMIT ?");
+
+        let mut query = sqlx::query(&sql).bind(instance_id);
+        if let Some(name) = webhook_name {
+            query = query.bind(name.to_string());
+        }
+        if let Some(before) = before {
+            query = query.bind(before);
+        }
+        if let Some(needle) = q {
+            let like = format!("%{}%", needle.to_lowercase());
+            query = query.bind(like.clone()).bind(like);
+        }
+        query = query.bind(i64::from(limit));
+
+        let rows = query.fetch_all(&self.pool).await.map_err(map_sqlx)?;
+        rows.into_iter().map(metadata_row).collect()
+    }
+
+    async fn get_by_id(
+        &self,
+        instance_id: &str,
+        delivery_id: &str,
+    ) -> Result<Option<DeliveryRow>, StoreError> {
+        // Detail-page projection: includes `body` so an operator can
+        // see exactly what the agent received.  Owner scoping happens
+        // at the service layer; the `instance_id` predicate is the
+        // last line of defence in case a caller routes around it.
+        let row = sqlx::query(
+            "SELECT id, instance_id, webhook_name, fired_at, status_code, \
+                    latency_ms, request_id, signature_ok, error, \
+                    body, body_size, content_type \
+             FROM webhook_deliveries \
+             WHERE instance_id = ? AND id = ?",
+        )
+        .bind(instance_id)
+        .bind(delivery_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        match row {
+            None => Ok(None),
+            Some(r) => Ok(Some(DeliveryRow {
+                id: r.try_get("id").map_err(map_sqlx)?,
+                instance_id: r.try_get("instance_id").map_err(map_sqlx)?,
+                webhook_name: r.try_get("webhook_name").map_err(map_sqlx)?,
+                fired_at: r.try_get("fired_at").map_err(map_sqlx)?,
+                status_code: r
+                    .try_get::<i64, _>("status_code")
+                    .map_err(map_sqlx)? as i32,
+                latency_ms: r.try_get("latency_ms").map_err(map_sqlx)?,
+                request_id: r.try_get("request_id").map_err(map_sqlx)?,
+                signature_ok: r
+                    .try_get::<i64, _>("signature_ok")
+                    .map_err(map_sqlx)?
+                    != 0,
+                error: r.try_get("error").map_err(map_sqlx)?,
+                body: r.try_get::<Option<Vec<u8>>, _>("body").map_err(map_sqlx)?,
+                body_size: r.try_get("body_size").map_err(map_sqlx)?,
+                content_type: r.try_get("content_type").map_err(map_sqlx)?,
+            })),
+        }
+    }
 }
 
 fn metadata_row(r: sqlx::sqlite::SqliteRow) -> Result<DeliveryRow, StoreError> {

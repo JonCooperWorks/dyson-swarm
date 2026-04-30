@@ -671,6 +671,31 @@ pub trait DeliveryStore: Send + Sync {
         webhook_name: &str,
         limit: u32,
     ) -> Result<Vec<DeliveryRow>, StoreError>;
+    /// Newest-first audit listing across every webhook on an instance.
+    /// Cursor pagination by `fired_at`: pass the previous page's oldest
+    /// `fired_at` (in seconds) as `before` to fetch the next page.
+    /// Optional `webhook_name` narrows to a single task; optional `q`
+    /// is a case-insensitive substring filter applied to the request
+    /// body bytes (decoded as utf8) and to the error column.  Returned
+    /// rows omit the body bytes — callers fetch the body via
+    /// [`get_by_id`] when rendering the detail page.
+    async fn list_for_instance(
+        &self,
+        instance_id: &str,
+        webhook_name: Option<&str>,
+        q: Option<&str>,
+        before: Option<i64>,
+        limit: u32,
+    ) -> Result<Vec<DeliveryRow>, StoreError>;
+    /// Single delivery row including the request body — used by the
+    /// audit detail page.  `instance_id` is required so an attacker
+    /// who guesses a delivery id can't reach into another tenant's
+    /// audit log.
+    async fn get_by_id(
+        &self,
+        instance_id: &str,
+        delivery_id: &str,
+    ) -> Result<Option<DeliveryRow>, StoreError>;
 }
 
 #[async_trait]

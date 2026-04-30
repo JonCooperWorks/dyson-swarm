@@ -365,6 +365,48 @@ impl InstanceStore for SqlxInstanceStore {
         Ok(())
     }
 
+    async fn replace_cube_sandbox(
+        &self,
+        id: &str,
+        new_cube_sandbox_id: &str,
+        new_template_id: &str,
+        new_network_policy: &crate::network_policy::NetworkPolicy,
+        new_network_policy_cidrs: &[String],
+        now: i64,
+    ) -> Result<(), StoreError> {
+        let kind = new_network_policy.kind_str().to_owned();
+        let entries_csv = vec_to_csv(new_network_policy.entries());
+        let cidrs_csv = vec_to_csv(new_network_policy_cidrs);
+        let result = sqlx::query(
+            "UPDATE instances SET \
+                cube_sandbox_id = ?1, \
+                template_id = ?2, \
+                network_policy_kind = ?3, \
+                network_policy_entries = ?4, \
+                network_policy_cidrs = ?5, \
+                last_probe_at = NULL, \
+                last_probe_status = NULL, \
+                last_active_at = ?6, \
+                rotated_to = NULL, \
+                status = 'live' \
+             WHERE id = ?7",
+        )
+        .bind(new_cube_sandbox_id)
+        .bind(new_template_id)
+        .bind(kind)
+        .bind(entries_csv)
+        .bind(cidrs_csv)
+        .bind(now)
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        if result.rows_affected() == 0 {
+            return Err(StoreError::NotFound);
+        }
+        Ok(())
+    }
+
     async fn expired(&self, now: i64) -> Result<Vec<InstanceRow>, StoreError> {
         let rows = sqlx::query(
             "SELECT * FROM instances \

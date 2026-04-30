@@ -372,6 +372,25 @@ pub trait InstanceStore: Send + Sync {
     /// rejected by the service layer, not here — the store accepts
     /// any vec and serialises it as JSON.
     async fn set_models(&self, id: &str, models: &[String]) -> Result<(), StoreError>;
+    /// In-place rotation: swap the row's `cube_sandbox_id` and
+    /// `template_id` (and optionally network policy) onto a fresh
+    /// cube without changing the row's swarm-side id.  Used by the
+    /// rotate-template and change-network flows so DNS, bearer
+    /// tokens, secrets and webhook URLs all survive the operation.
+    /// Resets `last_probe_at` / `last_probe_status` (the new sandbox
+    /// has no probe history yet) and clears `rotated_to` (the row
+    /// IS the surviving identity now).  `last_active_at` is bumped
+    /// to `now`.  Owner-less because rotation is a system operation
+    /// triggered by an authorised path one layer up.
+    async fn replace_cube_sandbox(
+        &self,
+        id: &str,
+        new_cube_sandbox_id: &str,
+        new_template_id: &str,
+        new_network_policy: &crate::network_policy::NetworkPolicy,
+        new_network_policy_cidrs: &[String],
+        now: i64,
+    ) -> Result<(), StoreError>;
     /// Persist the operator's positive include list of built-in
     /// tools.  Mirrors `set_models`: same JSON-as-TEXT shape,
     /// called from the edit endpoint and the create-time row
@@ -626,6 +645,19 @@ pub struct DeliveryRow {
     pub request_id: Option<String>,
     pub signature_ok: bool,
     pub error: Option<String>,
+    /// Inbound request body, stored verbatim for audit.  Never
+    /// surfaced to the SPA; operators read it via SQL or the swarm
+    /// CLI.  `None` for failed verifications where we deliberately
+    /// don't keep the bytes (e.g. a 413 caught before insert).
+    #[serde(skip)]
+    pub body: Option<Vec<u8>>,
+    /// Inbound `Content-Type`, if present.  Recorded alongside the
+    /// body so a replay can pick the right shape.
+    pub content_type: Option<String>,
+    /// Size of the inbound body in bytes — recorded even when
+    /// `body` is None (e.g. on a 413 where we know the size from
+    /// `Content-Length` but didn't keep the bytes).
+    pub body_size: Option<i64>,
 }
 
 #[async_trait]

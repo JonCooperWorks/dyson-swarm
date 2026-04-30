@@ -732,8 +732,11 @@ impl InstanceService {
         Ok(report)
     }
 
-    /// Per-row state machine for [`rotate_binary_all`].  See that
-    /// method's doc for the re-runnability contract.
+    /// Per-row state machine for [`rotate_binary_all`].  Delegates to
+    /// [`rotate_in_place`] so DNS, bearer token, and secrets all
+    /// survive the rotation.  Returns Err with a `String` so the
+    /// sweep's `RotateReport.failed` can include the reason without
+    /// the typed `SwarmError` machinery.
     async fn rotate_one(
         &self,
         snapshot_svc: &crate::snapshot::SnapshotService,
@@ -741,85 +744,26 @@ impl InstanceService {
         _source_sandbox_id: &str,
         target_template_id: &str,
     ) -> Result<(), String> {
-        // Phase 1: snapshot+restore (skipped on a re-run if already done).
-        if source.rotated_to.is_none() {
-            let snap = snapshot_svc
-                .snapshot(SYSTEM_OWNER, &source.id)
-                .await
-                .map_err(|e| format!("snapshot: {e}"))?;
-            tracing::info!(
-                instance = %source.id,
-                snapshot = %snap.id,
-                "rotate-binary: snapshot taken"
-            );
-            // Owner_id MUST be carried — restoring under SYSTEM_OWNER
-            // would silently re-tenant the dyson and orphan it from
-            // the user's UI.  Name + task survive snapshot/restore by
-            // policy; copy them through verbatim.  ttl_seconds is
-            // intentionally None — copying the source's expires_at
-            // would leak a deadline that started ticking on the old
-            // row; an operator who wants the new instance to expire
-            // can re-set TTL after rotation.
-            let restored = self
-                .restore(&source.owner_id, RestoreRequest {
-                    template_id: target_template_id.to_owned(),
-                    snapshot_path: std::path::PathBuf::from(&snap.path),
-                    source_instance_id: Some(source.id.clone()),
-                    name: Some(source.name.clone()),
-                    task: Some(source.task.clone()),
-                    env: BTreeMap::new(),
-                    ttl_seconds: None,
-                    // Carry the source's network profile through to
-                    // the successor — a binary rotation must NOT
-                    // silently widen egress.
-                    network_policy: source.network_policy.clone(),
-                    // Same for the model list, so the rotated dyson
-                    // boots with the same primary + failover models.
-                    models: source.models.clone(),
-                    // And the tool include list — a binary rotation
-                    // must NOT silently widen the toolbox.
-                    tools: source.tools.clone(),
-                })
-                .await
-                .map_err(|e| format!("restore: {e}"))?;
-            tracing::info!(
-                instance = %source.id,
-                successor = %restored.id,
-                "rotate-binary: restore landed Live"
-            );
-            // Pin the source → successor relationship before the
-            // destroy step.  A crash between this stamp and the
-            // destroy leaves a re-runnable hint: next sweep sees
-            // `rotated_to`, skips the snapshot+restore, and just
-            // retries the destroy.
-            self.instances
-                .set_rotated_to(&source.id, &restored.id)
-                .await
-                .map_err(|e| format!("set_rotated_to: {e}"))?;
-        } else {
-            tracing::info!(
-                instance = %source.id,
-                successor = %source.rotated_to.as_deref().unwrap_or(""),
-                "rotate-binary: rotated_to already set — retrying destroy only"
-            );
-        }
-        // Phase 2: destroy the source (force=true so a dead cube
-        // doesn't strand the row Live forever).
-        self.destroy(&source.owner_id, &source.id, true)
-            .await
-            .map_err(|e| format!("destroy: {e}"))?;
-        Ok(())
+        self.rotate_in_place(
+            &source.owner_id,
+            &source.id,
+            snapshot_svc,
+            target_template_id,
+            None,
+        )
+        .await
+        .map(|_| ())
+        .map_err(|e| e.to_string())
     }
 
     /// Change the egress profile on a Live instance.
     ///
     /// CubeAPI doesn't expose a runtime PATCH for the eBPF egress
     /// maps (see the swarm README's "Network policies" section), so
-    /// "live policy change" is implemented as snapshot + restore-with-
-    /// new-policy + destroy(force=true).  The instance ID changes —
-    /// callers must navigate to the new id afterwards — but workspace
-    /// state survives via the snapshot.  Same trade-off the
-    /// binary-rotation sweep already accepts.
+    /// the implementation pivots to a fresh cube under the SAME swarm
+    /// id via [`rotate_in_place`] — DNS, bearer token, secrets, and
+    /// webhook URLs all survive.  Workspace state survives via the
+    /// snapshot.
     ///
     /// Owner-scoped via `get_for_owner`; admin uses `SYSTEM_OWNER`/`"*"`
     /// to override.  Validates the new policy BEFORE taking a
@@ -831,99 +775,247 @@ impl InstanceService {
         instance_id: &str,
         snapshot_svc: &crate::snapshot::SnapshotService,
         new_policy: NetworkPolicy,
-    ) -> Result<CreatedInstance, SwarmError> {
-        // Validate up front.  A bad policy MUST fail before we take a
-        // snapshot — taking a snapshot, then failing the restore, then
-        // having an orphan snapshot row is a worse failure mode than
-        // returning 400 immediately.
-        let _resolved = network_policy::resolve(
-            &new_policy,
-            self.llm_cidr.as_deref(),
-            &*self.resolver,
-        )
-        .await?;
-
-        // Owner-scoped lookup of the source row.  SYSTEM_OWNER bypasses.
+    ) -> Result<InstanceRow, SwarmError> {
+        // Read the row up front so the no-op check is opaque to
+        // callers — the same reason `rotate_in_place` enforces it.
         let source = self
             .instances
             .get_for_owner(owner_id, instance_id)
             .await?
             .ok_or(SwarmError::NotFound)?;
-        // No-op: caller asked for the same policy that's already on
-        // the row.  Refuse so the SPA doesn't accidentally churn a
-        // sandbox for nothing.  Compare via JSON serialisation to
-        // catch payload-level equivalence (e.g. different CIDR order
-        // would still be the same policy semantically — but we keep
-        // the simpler structural check here and let the SPA dedupe).
         if source.network_policy == new_policy {
             return Err(SwarmError::BadRequest(
                 "instance already has this network policy".into(),
             ));
         }
-        let sandbox_id = source.cube_sandbox_id.as_deref().filter(|s| !s.is_empty()).ok_or_else(|| {
-            SwarmError::BadRequest(
-                "instance has no live cube sandbox; change-network requires a Live row".into(),
-            )
-        })?;
+        let target_template = source.template_id.clone();
+        self.rotate_in_place(
+            owner_id,
+            instance_id,
+            snapshot_svc,
+            &target_template,
+            Some(new_policy),
+        )
+        .await
+    }
+
+    /// In-place rotation: pivot a Live row onto a new template (and
+    /// optionally a new network policy) WITHOUT changing the row's
+    /// swarm id.  Snapshot the workspace, spin up a fresh cube under
+    /// the new template + same swarm id, swap `cube_sandbox_id` +
+    /// `template_id` (+ policy when supplied) on the row, push the
+    /// configure envelope, then destroy the old cube.
+    ///
+    /// Side effects on the row that DO survive the rotation:
+    /// `id`, `name`, `task`, `bearer_token`, `models`, `tools`,
+    /// `pinned`, `expires_at`, `created_at`, owner.  Per-instance
+    /// secrets keyed by id likewise survive (they're never copied —
+    /// they live in `instance_secrets` keyed by swarm id, not cube id).
+    ///
+    /// What changes: `cube_sandbox_id` (fresh), `template_id` (target),
+    /// optionally `network_policy` + `network_policy_cidrs`,
+    /// `last_active_at` (now), and the probe fields are reset (the new
+    /// cube has no probe history yet).
+    ///
+    /// Returns the post-rotation row.  Caller-visible identity is the
+    /// same id they supplied — no successor surfaces, DNS keeps
+    /// resolving, bookmarks survive.
+    pub async fn rotate_in_place(
+        &self,
+        owner_id: &str,
+        instance_id: &str,
+        snapshot_svc: &crate::snapshot::SnapshotService,
+        new_template_id: &str,
+        new_network_policy: Option<NetworkPolicy>,
+    ) -> Result<InstanceRow, SwarmError> {
+        if new_template_id.trim().is_empty() {
+            return Err(SwarmError::BadRequest("template_id is required".into()));
+        }
+        let source = self
+            .instances
+            .get_for_owner(owner_id, instance_id)
+            .await?
+            .ok_or(SwarmError::NotFound)?;
+        if source.status == InstanceStatus::Destroyed {
+            return Err(SwarmError::BadRequest(
+                "cannot rotate a destroyed instance".into(),
+            ));
+        }
+        let old_sandbox_id = source
+            .cube_sandbox_id
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                SwarmError::BadRequest(
+                    "instance has no live cube sandbox; rotation requires a Live row".into(),
+                )
+            })?
+            .to_owned();
+
+        // Pick the policy: caller override or the row's existing one.
+        // Validate before snapshotting — bad input must fail fast.
+        let target_policy = new_network_policy.unwrap_or(source.network_policy.clone());
+        let resolved = network_policy::resolve(
+            &target_policy,
+            self.llm_cidr.as_deref(),
+            &*self.resolver,
+        )
+        .await?;
+
+        let no_op_template = source.template_id == new_template_id;
+        let no_op_policy = source.network_policy == target_policy;
+        if no_op_template && no_op_policy {
+            return Err(SwarmError::BadRequest(
+                "rotation is a no-op (same template, same network policy)".into(),
+            ));
+        }
 
         tracing::info!(
             instance = %source.id,
+            from_template = %source.template_id,
+            to_template = %new_template_id,
             from_policy = %source.network_policy.kind_str(),
-            to_policy = %new_policy.kind_str(),
-            "change-network: starting snapshot+restore+destroy pipeline"
+            to_policy = %target_policy.kind_str(),
+            "rotate-in-place: starting snapshot+swap+destroy pipeline"
         );
 
-        // Phase 1: snapshot.
-        let snap = snapshot_svc
-            .snapshot(SYSTEM_OWNER, &source.id)
-            .await?;
+        // Phase 1: snapshot the source workspace.
+        let snap = snapshot_svc.snapshot(SYSTEM_OWNER, &source.id).await?;
         tracing::info!(
             instance = %source.id,
             snapshot = %snap.id,
-            sandbox = %sandbox_id,
-            "change-network: snapshot taken"
+            sandbox = %old_sandbox_id,
+            "rotate-in-place: snapshot taken"
         );
 
-        // Phase 2: restore with the new policy.  Same pattern as
-        // rotate_one — owner_id, name, task, source_instance_id all
-        // carried; ttl_seconds intentionally None (don't leak the
-        // source's deadline).
-        let restored = self
-            .restore(&source.owner_id, RestoreRequest {
-                template_id: source.template_id.clone(),
-                snapshot_path: std::path::PathBuf::from(&snap.path),
-                source_instance_id: Some(source.id.clone()),
-                name: Some(source.name.clone()),
-                task: Some(source.task.clone()),
-                env: BTreeMap::new(),
-                ttl_seconds: None,
-                network_policy: new_policy.clone(),
-                models: source.models.clone(),
-                tools: source.tools.clone(),
+        // Phase 2: build env envelope using the EXISTING bearer + id.
+        // The proxy_token is reused — same token that already has a
+        // tokens row keyed on this instance id.  Legacy rows missing
+        // a token (Stage-7 vintage) get a fresh mint here.
+        let proxy_token = match self.tokens.lookup_by_instance(&source.id).await? {
+            Some(t) => t,
+            None => self.tokens.mint(&source.id, SHARED_PROVIDER).await?,
+        };
+        // Existing per-instance secrets pass straight through to the
+        // new cube's env envelope — same shape `restore` uses.  Note
+        // the SecretStore returns ciphertexts; we don't decrypt here.
+        let existing = self.secrets.list(&source.id).await?;
+        let managed = managed_env(
+            &self.proxy_base,
+            &proxy_token,
+            &source.id,
+            &source.bearer_token,
+            &source.name,
+            &source.task,
+        );
+        let env = compose_env(&BTreeMap::new(), &managed, &BTreeMap::new(), &existing);
+
+        // Phase 3: spin up a fresh cube under the new template using
+        // the snapshot we just took.
+        let info = self
+            .cube
+            .create_sandbox(CreateSandboxArgs {
+                template_id: new_template_id.to_owned(),
+                env,
+                from_snapshot_path: Some(std::path::PathBuf::from(&snap.path)),
+                resolved_policy: resolved.clone(),
             })
             .await?;
         tracing::info!(
             instance = %source.id,
-            successor = %restored.id,
-            "change-network: restore landed Live with new policy"
+            old_sandbox = %old_sandbox_id,
+            new_sandbox = %info.sandbox_id,
+            "rotate-in-place: new cube live"
         );
 
-        // Pin source → successor.  Re-runnability hint same as the
-        // rotation sweep: a crash between this stamp and the destroy
-        // leaves a marker so a future operator can reconcile.
+        // Phase 4: swap on the row.  After this commit, DNS for
+        // `<id>.<host>` resolves to the new sandbox — that's the
+        // user-visible cutover.
         self.instances
-            .set_rotated_to(&source.id, &restored.id)
+            .replace_cube_sandbox(
+                &source.id,
+                &info.sandbox_id,
+                new_template_id,
+                &target_policy,
+                &resolved.allow_out,
+                now_secs(),
+            )
             .await?;
 
-        // Phase 3: destroy the source (force=true so a dead cube
-        // doesn't strand the row Live forever).
-        self.destroy(&source.owner_id, &source.id, true).await?;
-        tracing::info!(
-            instance = %source.id,
-            successor = %restored.id,
-            "change-network: source destroyed"
-        );
-        Ok(restored)
+        // Phase 5: push the configure envelope so the new cube
+        // boots out of warmup-placeholder mode.  Mirrors the create
+        // path's body shape — name, task, models, image-gen,
+        // mcp_servers.  Best-effort: a failure here leaves the row
+        // pointing at a Live cube that hasn't been reconfigured yet,
+        // which the running `push-names` / `rewire-image-gen` sweeps
+        // at next swarm restart will pick up.
+        if let Some(reconfigurer) = self.reconfigurer.as_ref() {
+            let body = ReconfigureBody {
+                name: Some(source.name.clone()).filter(|s| !s.is_empty()),
+                task: Some(source.task.clone()).filter(|s| !s.is_empty()),
+                models: source.models.clone(),
+                instance_id: Some(source.id.clone()),
+                proxy_token: Some(proxy_token.clone()),
+                proxy_base: Some(format!(
+                    "{}/openrouter",
+                    self.proxy_base.trim_end_matches('/')
+                )),
+                image_provider_name: self
+                    .image_gen_defaults
+                    .as_ref()
+                    .map(|d| d.provider_name.clone()),
+                image_provider_block: self
+                    .image_gen_defaults
+                    .as_ref()
+                    .map(|d| d.provider_block(&self.image_proxy_base(), &proxy_token)),
+                image_generation_provider: self
+                    .image_gen_defaults
+                    .as_ref()
+                    .map(|d| d.provider_name.clone()),
+                image_generation_model: self
+                    .image_gen_defaults
+                    .as_ref()
+                    .map(|d| d.model.clone()),
+                reset_skills: true,
+                mcp_servers: None,
+            };
+            if let Err(err) =
+                push_with_retry(reconfigurer.as_ref(), &source.id, &info.sandbox_id, &body).await
+            {
+                tracing::warn!(
+                    instance = %source.id,
+                    error = %err,
+                    "rotate-in-place: configure-push failed; will be retried by next sweep"
+                );
+            }
+        }
+
+        // Phase 6: destroy the old cube.  Force=true so a stuck
+        // cube doesn't leave the row half-live.  This is the only
+        // step where a failure has lasting effect — but the swarm
+        // row already points to the new sandbox, so subsequent
+        // reads are correct; a leaked cube is a janitor problem,
+        // not a correctness problem.
+        if let Err(err) = self.cube.destroy_sandbox(&old_sandbox_id).await {
+            tracing::warn!(
+                instance = %source.id,
+                old_sandbox = %old_sandbox_id,
+                error = %err,
+                "rotate-in-place: old cube destroy failed (orphan cube — janitor will sweep)"
+            );
+        } else {
+            tracing::info!(
+                instance = %source.id,
+                old_sandbox = %old_sandbox_id,
+                "rotate-in-place: old cube destroyed"
+            );
+        }
+
+        // Re-fetch so callers see the post-swap row state.
+        self.instances
+            .get_for_owner(owner_id, &source.id)
+            .await?
+            .ok_or(SwarmError::NotFound)
     }
 
     pub async fn create(
@@ -3194,12 +3286,12 @@ mod tests {
 
     #[tokio::test]
     async fn rotate_binary_visits_each_outdated_instance() {
-        // Two outdated rows.  After the sweep:
+        // In-place rotation contract: after the sweep:
         //   * visited == 2, rotated == 2, failed empty.
-        //   * Each old row's status flips to Destroyed.
-        //   * Two new Live rows exist on the target template.
-        //   * Each old row's `rotated_to` points at the corresponding
-        //     successor (lets a re-run skip the re-rotation).
+        //   * Each row keeps its swarm id (DNS / bookmarks survive).
+        //   * Each row stays Live with template_id flipped to target.
+        //   * Each row's cube_sandbox_id is FRESH (old sandbox destroyed).
+        //   * Identity (name, task, owner) carries through.
         let (isvc, ssvc, cube, instances, _users, recorder) = build_with_snapshot().await;
         let a = isvc
             .create("legacy", CreateRequest {
@@ -3227,6 +3319,11 @@ mod tests {
             .unwrap();
         wait_for_pushes(&recorder, 2).await;
 
+        let pre_a = instances.get(&a.id).await.unwrap().unwrap();
+        let pre_b = instances.get(&b.id).await.unwrap().unwrap();
+        let old_cube_a = pre_a.cube_sandbox_id.clone().unwrap();
+        let old_cube_b = pre_b.cube_sandbox_id.clone().unwrap();
+
         let report = isvc.rotate_binary_all(&ssvc, "tpl-new").await.unwrap();
         assert_eq!(report.visited, 2);
         assert_eq!(report.rotated, 2);
@@ -3240,34 +3337,23 @@ mod tests {
         assert_eq!(cube.snapshotted.lock().unwrap().len(), 2);
         assert_eq!(cube.destroyed.lock().unwrap().len(), 2);
 
-        // Old rows: Destroyed + rotated_to populated.
-        let old_a = instances.get(&a.id).await.unwrap().unwrap();
-        let old_b = instances.get(&b.id).await.unwrap().unwrap();
-        assert_eq!(old_a.status, InstanceStatus::Destroyed);
-        assert_eq!(old_b.status, InstanceStatus::Destroyed);
-        assert!(old_a.rotated_to.is_some(), "source row must be pinned to its successor");
-        assert!(old_b.rotated_to.is_some());
-
-        // The successors are Live on the target template.
-        let new_a = instances
-            .get(old_a.rotated_to.as_deref().unwrap())
-            .await
-            .unwrap()
-            .unwrap();
-        let new_b = instances
-            .get(old_b.rotated_to.as_deref().unwrap())
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(new_a.status, InstanceStatus::Live);
-        assert_eq!(new_b.status, InstanceStatus::Live);
-        assert_eq!(new_a.template_id, "tpl-new");
-        assert_eq!(new_b.template_id, "tpl-new");
+        // In-place: same swarm id, Live, on the new template, fresh cube.
+        let post_a = instances.get(&a.id).await.unwrap().unwrap();
+        let post_b = instances.get(&b.id).await.unwrap().unwrap();
+        assert_eq!(post_a.status, InstanceStatus::Live);
+        assert_eq!(post_b.status, InstanceStatus::Live);
+        assert_eq!(post_a.template_id, "tpl-new");
+        assert_eq!(post_b.template_id, "tpl-new");
+        assert_ne!(post_a.cube_sandbox_id, Some(old_cube_a),
+            "rotation must spin up a fresh cube; the old sandbox is destroyed");
+        assert_ne!(post_b.cube_sandbox_id, Some(old_cube_b));
         // Identity carried through.
-        assert_eq!(new_a.name, "alpha");
-        assert_eq!(new_a.task, "alpha task");
-        assert_eq!(new_b.name, "beta");
-        assert_eq!(new_b.task, "beta task");
+        assert_eq!(post_a.name, "alpha");
+        assert_eq!(post_a.task, "alpha task");
+        assert_eq!(post_b.name, "beta");
+        assert_eq!(post_b.task, "beta task");
+        // Bearer survives — clients holding the old token keep working.
+        assert_eq!(post_a.bearer_token, pre_a.bearer_token);
     }
 
     #[tokio::test]
@@ -3295,13 +3381,14 @@ mod tests {
         let report = isvc.rotate_binary_all(&ssvc, "tpl-new").await.unwrap();
         assert_eq!(report.rotated, 1);
 
-        let old = instances.get(&src.id).await.unwrap().unwrap();
-        let new_id = old.rotated_to.as_deref().expect("successor pinned");
-        let new_row = instances.get(new_id).await.unwrap().unwrap();
+        // In-place: same id, owner preserved (no SYSTEM_OWNER re-tenant).
+        let row = instances.get(&src.id).await.unwrap().unwrap();
         assert_eq!(
-            new_row.owner_id, "alice",
-            "rotation must carry owner_id through; SYSTEM_OWNER re-tenant is the bug"
+            row.owner_id, "alice",
+            "rotation must preserve owner_id; SYSTEM_OWNER re-tenant is the bug"
         );
+        assert_eq!(row.template_id, "tpl-new");
+        assert_eq!(row.status, InstanceStatus::Live);
     }
 
     #[tokio::test]
@@ -3665,29 +3752,29 @@ mod tests {
         let report = isvc.rotate_binary_all(&ssvc, "tpl-new").await.unwrap();
         assert_eq!(report.rotated, 1);
 
-        let old = instances.get(&src.id).await.unwrap().unwrap();
-        let successor_id = old.rotated_to.as_deref().unwrap();
-        let successor = instances.get(successor_id).await.unwrap().unwrap();
+        // In-place: same id, same policy, fresh sandbox.
+        let row = instances.get(&src.id).await.unwrap().unwrap();
         assert_eq!(
-            successor.network_policy,
+            row.network_policy,
             NetworkPolicy::Allowlist {
                 entries: vec!["example.com".to_owned()],
             }
         );
-        // Cube saw two creates: the original and the successor.  The
-        // successor's resolved policy still carries the LLM CIDR + the
-        // hostname's resolved CIDR.
+        // Cube saw two creates: the original and the rotation's
+        // fresh sandbox.  The rotation's resolved policy still
+        // carries the LLM CIDR + the hostname's resolved CIDR.
         let captured = cube.last_create();
         assert!(captured.resolved_policy.allow_out.contains(&"93.184.216.34/32".to_owned()));
     }
 
     #[tokio::test]
-    async fn change_network_takes_snapshot_restores_with_new_policy_destroys_source() {
+    async fn change_network_takes_snapshot_swaps_policy_in_place() {
         // The full change-network pipeline.  Hire on Open, change to
-        // Airgap, verify:
+        // Airgap, verify in-place semantics:
         //   * cube.snapshotted records the source.
-        //   * a new row exists with the new policy.
-        //   * the old row is Destroyed and carries `rotated_to`.
+        //   * the row keeps its swarm id, name, owner, bearer.
+        //   * the row's network_policy flips to Airgap.
+        //   * the row's cube_sandbox_id is fresh (old destroyed).
         //   * the cube saw a second create call carrying the Airgap
         //     resolved policy (single LLM CIDR, no internet).
         let (isvc, ssvc, cube, instances, _users, _recorder) =
@@ -3704,26 +3791,25 @@ mod tests {
             })
             .await
             .unwrap();
+        let pre = instances.get(&src.id).await.unwrap().unwrap();
+        let old_cube = pre.cube_sandbox_id.clone().unwrap();
 
-        let new_inst = isvc
+        let row = isvc
             .change_network_policy("legacy", &src.id, &ssvc, NetworkPolicy::Airgap)
             .await
             .unwrap();
-        assert_ne!(new_inst.id, src.id);
+        // In-place: same swarm id surfaces.
+        assert_eq!(row.id, src.id);
+        assert_eq!(row.network_policy, NetworkPolicy::Airgap);
+        assert_eq!(row.network_policy_cidrs, vec!["10.0.0.1/32"]);
+        assert_ne!(row.cube_sandbox_id.as_deref(), Some(old_cube.as_str()));
+        assert_eq!(row.bearer_token, pre.bearer_token);
+        assert_eq!(row.status, InstanceStatus::Live);
 
-        // Source destroyed + pinned to successor.
-        let old = instances.get(&src.id).await.unwrap().unwrap();
-        assert_eq!(old.status, InstanceStatus::Destroyed);
-        assert_eq!(old.rotated_to.as_deref(), Some(new_inst.id.as_str()));
-
-        // Successor has the new policy.
-        let new_row = instances.get(&new_inst.id).await.unwrap().unwrap();
-        assert_eq!(new_row.network_policy, NetworkPolicy::Airgap);
-        assert_eq!(new_row.network_policy_cidrs, vec!["10.0.0.1/32"]);
-
-        // Cube saw exactly one snapshot of the source.
+        // Cube saw exactly one snapshot of the source and one destroy
+        // (the old sandbox).
         assert_eq!(cube.snapshotted.lock().unwrap().len(), 1);
-        // Cube saw the successor's create with the Airgap shape.
+        assert_eq!(cube.destroyed.lock().unwrap().len(), 1);
         let last = cube.last_create();
         assert!(!last.resolved_policy.allow_internet_access);
         assert_eq!(last.resolved_policy.allow_out, vec!["10.0.0.1/32"]);

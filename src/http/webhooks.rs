@@ -96,6 +96,11 @@ pub struct DeliveryView {
     pub signature_ok: bool,
     pub request_id: Option<String>,
     pub error: Option<String>,
+    /// Inbound body size in bytes — surfaced so the SPA can render
+    /// "<n> bytes" alongside the delivery.  The body itself is
+    /// audit-only and never crosses the wire here.
+    pub body_size: Option<i64>,
+    pub content_type: Option<String>,
 }
 
 impl DeliveryView {
@@ -108,6 +113,8 @@ impl DeliveryView {
             signature_ok: r.signature_ok,
             request_id: r.request_id,
             error: r.error,
+            body_size: r.body_size,
+            content_type: r.content_type,
         }
     }
 }
@@ -321,6 +328,10 @@ async fn fire_webhook(
         .get("x-request-id")
         .and_then(|v| v.to_str().ok())
         .map(str::to_owned);
+    let content_type = headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
 
     let forward = forward_header_subset(&headers);
 
@@ -333,6 +344,7 @@ async fn fire_webhook(
             bearer_header,
             request_id.as_deref(),
             forward,
+            content_type,
             body.as_ref(),
         )
         .await

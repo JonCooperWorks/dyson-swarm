@@ -115,7 +115,6 @@ function InstanceList({ selectedId, onNew }) {
                 <div className="rail-row-id muted small">{shortId(id)}</div>
                 <div className="rail-row-meta">
                   <StatusBadge status={row.status}/>
-                  <span className="muted small">{row.template_id}</span>
                 </div>
               </a>
             </li>
@@ -756,29 +755,9 @@ function NewInstanceForm() {
               Profiles are operator-curated in <code>config.env</code>.
             </span>
           </label>
-        ) : cubeProfiles.length === 1 ? (
-          // Single profile — picker would be a no-op dropdown.  Hide
-          // it; the form's templateId state is already seeded from
-          // that profile (see useState above).  Operators on a
-          // single-tier deployment shouldn't see UX they can't
-          // meaningfully interact with.
-          null
-        ) : (
-          <label className="field">
-            <span>template id</span>
-            <input
-              value={templateId}
-              onChange={e => setTemplateId(e.target.value)}
-              placeholder="dyson-default"
-              required
-            />
-            <span className="hint muted small">
-              The cube template the sandbox boots from.  Operators
-              curate <code>default_template_id</code>; override here for
-              staged rollouts.
-            </span>
-          </label>
-        )}
+        ) : null /* Single profile or none — the form's templateId
+                    is seeded from default_template_id; the operator
+                    doesn't need to think about the underlying id. */}
         <label className="field">
           <span>ttl (seconds, optional)</span>
           <input
@@ -907,8 +886,8 @@ function NetworkPolicyPicker({ value, onChange }) {
       ) : null}
       <p className="hint muted small">
         Network access can be changed any time from the instance's detail page —
-        the change snapshots the dyson and re-hires it with the new policy
-        (workspace state survives, but the URL changes).
+        the sandbox briefly restarts to apply the new policy.  Workspace
+        state, DNS, and webhook URLs all survive.
       </p>
     </div>
   );
@@ -1578,9 +1557,6 @@ function InstanceDetail({ id, onNew }) {
             {row.pinned ? <span className="badge badge-info">pinned</span> : null}
             <IdChip id={row.id}/>
           </div>
-          <div className="detail-template muted small">
-            template <code className="mono-sm">{row.template_id}</code>
-          </div>
         </div>
         <div className="detail-actions">
           <a
@@ -1711,8 +1687,8 @@ export function EditInstancePage({ instanceId }) {
         <h1 className="page-title">edit dyson</h1>
         <p className="page-sub muted">
           Change the dyson's identity, model, toolbox, or network access.
-          Identity / model / tools save in place; flipping network
-          access snapshots and re-hires the dyson under a new id.
+          Network changes restart the sandbox briefly; everything else
+          saves in place.
         </p>
       </header>
       {err ? <div className="error">{err}</div> : null}
@@ -1749,8 +1725,8 @@ function EditInstanceActionBar({ formId, backHref, policyChanged }) {
     return () => window.removeEventListener('edit-form-state', onState);
   }, [formId]);
   const label = submitting
-    ? (policyChanged ? 'snapshotting + re-hiring…' : 'saving…')
-    : (policyChanged ? 'save (snapshot + re-hire)' : 'save');
+    ? (policyChanged ? 'restarting sandbox…' : 'saving…')
+    : 'save';
   return (
     <div className="edit-action-bar">
       <button
@@ -1855,18 +1831,15 @@ function EditInstanceForm({ instance, backHref, formId }) {
         upsertInstance(updated);
       }
 
-      // Step 2: network policy — snapshot + restore + new id.  Done
-      // last because it navigates the URL to the successor.  Skipped
-      // when the policy is untouched.
+      // Step 2: network policy — restarts the sandbox under the same
+      // id (in-place rotation), so DNS, bearer tokens and webhook
+      // URLs all survive.  Skipped when the policy is untouched.
       if (policyChanged) {
-        const result = await client.changeInstanceNetwork(
+        const updated = await client.changeInstanceNetwork(
           instance.id,
           serializeNetworkPolicy(networkPolicy),
         );
-        if (result?.id) {
-          window.location.hash = `#/i/${encodeURIComponent(result.id)}`;
-          return;
-        }
+        if (updated) upsertInstance(updated);
       }
       window.location.hash = backHref;
     } catch (err) {
@@ -1920,9 +1893,9 @@ function EditInstanceForm({ instance, backHref, formId }) {
           <NetworkPolicyPicker value={networkPolicy} onChange={setNetworkPolicy}/>
           {policyChanged ? (
             <p className="hint muted small">
-              <strong>Heads up:</strong> changing network access snapshots this
-              dyson and re-hires it under a new id.  Workspace state survives
-              via the snapshot; the URL changes.
+              <strong>Heads up:</strong> the sandbox briefly restarts to apply
+              the new policy.  Workspace state, DNS, and webhook URLs all
+              survive.
             </p>
           ) : null}
         </section>
@@ -2761,17 +2734,13 @@ function NetworkPolicyPanel({ instance, disabled }) {
     setSubmitting(true);
     setError(null);
     try {
-      const result = await client.changeInstanceNetwork(
+      // In-place rotation: same swarm id, fresh sandbox under the new
+      // policy.  DNS, bearer, secrets and webhook URLs all survive.
+      const updated = await client.changeInstanceNetwork(
         instance.id,
         serializeNetworkPolicy(policy),
       );
-      // The successor has a NEW id — workspace state survives via the
-      // snapshot, but the URL changes.  Surface that in the UI by
-      // navigating to the new id; the user sees the old destroyed
-      // row in the rail and the new live row open.
-      if (result?.id) {
-        window.location.hash = `#/i/${encodeURIComponent(result.id)}`;
-      }
+      if (updated) upsertInstance(updated);
     } catch (err) {
       setError(err?.detail || err?.message || 'change-network failed');
     } finally {
@@ -2789,9 +2758,9 @@ function NetworkPolicyPanel({ instance, disabled }) {
         <div className="panel-title">network access</div>
       </div>
       <p className="muted small">
-        Egress profile enforced by the cube's eBPF map. Changing it
-        snapshots and re-hires this dyson under a new id (workspace
-        state survives, URL changes).
+        Egress profile enforced by the cube's eBPF map.  Changing it
+        briefly restarts the sandbox; workspace state, DNS, and
+        webhook URLs all survive.
       </p>
       <NetworkPolicyPicker value={policy} onChange={setPolicy}/>
       {error ? <div className="error">{error}</div> : null}
@@ -2803,7 +2772,7 @@ function NetworkPolicyPanel({ instance, disabled }) {
             onClick={submit}
             disabled={submitting || disabled}
           >
-            {submitting ? 'changing…' : 'snapshot, re-hire, destroy old'}
+            {submitting ? 'restarting sandbox…' : 'apply'}
           </button>
           <button
             type="button"

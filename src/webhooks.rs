@@ -477,6 +477,7 @@ impl WebhookService {
         bearer_header: Option<&str>,
         request_id: Option<&str>,
         forward_headers: Vec<(String, String)>,
+        content_type: Option<String>,
         body: &[u8],
     ) -> Result<u16, WebhookError> {
         let started = Instant::now();
@@ -517,6 +518,15 @@ impl WebhookService {
                 request_id: request_id.map(str::to_owned),
                 signature_ok,
                 error: error_text,
+                // Audit storage: keep the body for every delivery
+                // we accepted into the pipeline (signature failed
+                // OR succeeded — both are operator-relevant).  The
+                // SPA never reads this column.  Empty bodies still
+                // record body_size=0 so an audit can distinguish
+                // "no body" from "body purged".
+                body: Some(body.to_vec()),
+                body_size: Some(i64::try_from(body.len()).unwrap_or(i64::MAX)),
+                content_type,
             };
             if let Err(e) = self.deliveries.insert(&row).await {
                 tracing::warn!(

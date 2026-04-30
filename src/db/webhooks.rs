@@ -196,8 +196,9 @@ impl DeliveryStore for SqlxDeliveryStore {
         sqlx::query(
             "INSERT INTO webhook_deliveries \
                 (id, instance_id, webhook_name, fired_at, status_code, \
-                 latency_ms, request_id, signature_ok, error) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                 latency_ms, request_id, signature_ok, error, \
+                 body, body_size, content_type) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&row.id)
         .bind(&row.instance_id)
@@ -208,6 +209,9 @@ impl DeliveryStore for SqlxDeliveryStore {
         .bind(&row.request_id)
         .bind(i64::from(row.signature_ok))
         .bind(&row.error)
+        .bind(row.body.as_deref())
+        .bind(row.body_size)
+        .bind(&row.content_type)
         .execute(&self.pool)
         .await
         .map_err(map_sqlx)?;
@@ -220,9 +224,15 @@ impl DeliveryStore for SqlxDeliveryStore {
         webhook_name: &str,
         limit: u32,
     ) -> Result<Vec<DeliveryRow>, StoreError> {
+        // Deliberately omit `body` from the projection — the SPA's
+        // recent-deliveries panel is the only consumer and the body
+        // is operator-only audit material.  `body_size` and
+        // `content_type` go on the wire so the panel can show
+        // "<n> bytes / <ctype>" without exposing the payload.
         let rows = sqlx::query(
             "SELECT id, instance_id, webhook_name, fired_at, status_code, \
-                    latency_ms, request_id, signature_ok, error \
+                    latency_ms, request_id, signature_ok, error, \
+                    body_size, content_type \
              FROM webhook_deliveries \
              WHERE instance_id = ? AND webhook_name = ? \
              ORDER BY fired_at DESC \
@@ -234,27 +244,31 @@ impl DeliveryStore for SqlxDeliveryStore {
         .fetch_all(&self.pool)
         .await
         .map_err(map_sqlx)?;
-        rows.into_iter()
-            .map(|r| {
-                Ok(DeliveryRow {
-                    id: r.try_get("id").map_err(map_sqlx)?,
-                    instance_id: r.try_get("instance_id").map_err(map_sqlx)?,
-                    webhook_name: r.try_get("webhook_name").map_err(map_sqlx)?,
-                    fired_at: r.try_get("fired_at").map_err(map_sqlx)?,
-                    status_code: r
-                        .try_get::<i64, _>("status_code")
-                        .map_err(map_sqlx)? as i32,
-                    latency_ms: r.try_get("latency_ms").map_err(map_sqlx)?,
-                    request_id: r.try_get("request_id").map_err(map_sqlx)?,
-                    signature_ok: r
-                        .try_get::<i64, _>("signature_ok")
-                        .map_err(map_sqlx)?
-                        != 0,
-                    error: r.try_get("error").map_err(map_sqlx)?,
-                })
-            })
-            .collect()
+        rows.into_iter().map(metadata_row).collect()
     }
+
+}
+
+fn metadata_row(r: sqlx::sqlite::SqliteRow) -> Result<DeliveryRow, StoreError> {
+    Ok(DeliveryRow {
+        id: r.try_get("id").map_err(map_sqlx)?,
+        instance_id: r.try_get("instance_id").map_err(map_sqlx)?,
+        webhook_name: r.try_get("webhook_name").map_err(map_sqlx)?,
+        fired_at: r.try_get("fired_at").map_err(map_sqlx)?,
+        status_code: r
+            .try_get::<i64, _>("status_code")
+            .map_err(map_sqlx)? as i32,
+        latency_ms: r.try_get("latency_ms").map_err(map_sqlx)?,
+        request_id: r.try_get("request_id").map_err(map_sqlx)?,
+        signature_ok: r
+            .try_get::<i64, _>("signature_ok")
+            .map_err(map_sqlx)?
+            != 0,
+        error: r.try_get("error").map_err(map_sqlx)?,
+        body: None,
+        body_size: r.try_get("body_size").map_err(map_sqlx)?,
+        content_type: r.try_get("content_type").map_err(map_sqlx)?,
+    })
 }
 
 #[cfg(test)]
@@ -401,6 +415,9 @@ mod tests {
                     request_id: None,
                     signature_ok: true,
                     error: None,
+                    body: None,
+                    body_size: None,
+                    content_type: None,
                 })
                 .await
                 .unwrap();

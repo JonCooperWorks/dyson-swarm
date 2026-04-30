@@ -249,17 +249,13 @@ describe('EditInstancePage parity with hire form', () => {
 
   });
 
-  test('save button label switches when the network policy is dirty', async () => {
+  test('save button stays one label even when the network policy is dirty', async () => {
+    // Post-in-place-rotation: a network change still restarts the
+    // sandbox, but the swarm id (and all its surfaces) survive.
+    // The label stays "save" — there's no "successor" to call out.
     renderEdit(makeRow({ network_policy: { kind: 'open', entries: [] } }));
-
-    // Untouched: button reads "save".
     expect(await screen.findByRole('button', { name: /^save$/i })).toBeInTheDocument();
-
-    // Pick airgap — policy is now dirty, label updates to call
-    // out the snapshot+re-hire that's about to happen.
     fireEvent.click(screen.getByRole('radio', { name: /air-gapped/i }));
-    expect(screen.getByRole('button', { name: /snapshot \+ re-hire/i })).toBeInTheDocument();
-
-
+    expect(screen.getByRole('button', { name: /^save$/i })).toBeInTheDocument();
   });
 });

@@ -33,6 +33,10 @@ pub fn router(state: AppState) -> Router {
             "/v1/instances/:id/change-network",
             post(change_network),
         )
+        .route(
+            "/v1/instances/:id/rotate-template",
+            post(rotate_template),
+        )
         .with_state(state)
 }
 
@@ -100,29 +104,58 @@ struct ChangeNetworkBody {
 }
 
 /// Change a Live instance's egress profile.  CubeAPI doesn't expose
-/// a runtime PATCH for the eBPF maps, so this snapshot+restore+
-/// destroys.  The successor has a NEW id; the SPA should redirect to
-/// `#/i/<new-id>`.  Owner-scoped; `SYSTEM_OWNER`/`"*"` bypasses for
-/// admin paths.  Workspace state survives via the snapshot.
+/// a runtime PATCH for the eBPF maps, so the implementation pivots
+/// to a fresh cube under the SAME swarm id via `rotate_in_place` —
+/// DNS, bearer token, secrets, and webhook URLs all survive.
+/// Workspace state survives via the snapshot.  Returns the post-
+/// rotation row so the SPA can refresh its local copy without a
+/// follow-up GET.
 async fn change_network(
     State(state): State<AppState>,
     Extension(caller): Extension<CallerIdentity>,
     Path(id): Path<String>,
     Json(body): Json<ChangeNetworkBody>,
-) -> Result<(StatusCode, Json<CreatedInstance>), StatusCode> {
+) -> Result<Json<InstanceView>, StatusCode> {
     match state
         .instances
         .change_network_policy(&caller.user_id, &id, &state.snapshots, body.network_policy)
         .await
     {
-        Ok(mut c) => {
-            // Same `<id>.<hostname>` rewrite as `create_instance` so
-            // the SPA gets a usable url.
-            if let Some(host) = state.hostname.as_deref().filter(|h| !h.is_empty()) {
-                c.url = format!("https://{}.{}/", c.id, host.trim_end_matches('/'));
-            }
-            Ok((StatusCode::CREATED, Json(c)))
-        }
+        Ok(row) => Ok(Json(InstanceView::from_row(row, state.hostname.as_deref()))),
+        Err(e) => Err(swarm_err_to_status(e)),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct RotateTemplateBody {
+    /// Target cube template id.  When omitted, the swarm's
+    /// configured default template is used.
+    #[serde(default)]
+    template_id: Option<String>,
+}
+
+/// Rotate a Live instance onto a different cube template (or the
+/// configured default) without changing its swarm id.  Same in-place
+/// semantics as `change_network`: DNS, bearer, secrets, webhook URLs
+/// all survive.  Returns the post-rotation row.
+async fn rotate_template(
+    State(state): State<AppState>,
+    Extension(caller): Extension<CallerIdentity>,
+    Path(id): Path<String>,
+    Json(body): Json<RotateTemplateBody>,
+) -> Result<Json<InstanceView>, StatusCode> {
+    let target = body
+        .template_id
+        .clone()
+        .or_else(|| state.auth_config.default_template_id.clone())
+        .filter(|s| !s.trim().is_empty())
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    match state
+        .instances
+        .rotate_in_place(&caller.user_id, &id, &state.snapshots, &target, None)
+        .await
+    {
+        Ok(row) => Ok(Json(InstanceView::from_row(row, state.hostname.as_deref()))),
         Err(e) => Err(swarm_err_to_status(e)),
     }
 }

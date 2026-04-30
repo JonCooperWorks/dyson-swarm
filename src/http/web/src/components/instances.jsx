@@ -1534,6 +1534,32 @@ function InstanceDetail({ id, onNew }) {
     }
   };
 
+  // Snapshot this instance and hire a fresh one on the latest cube
+  // template with the same name, task, models, tools, network policy,
+  // workspace files, per-instance secrets, and MCP servers (active
+  // OAuth sessions preserved).  Source row keeps running.
+  const clone = async () => {
+    const label = row.name && row.name.trim() ? row.name : id;
+    if (!confirm(`clone ${label}? snapshots this dyson and hires a fresh one on the latest template with the same config, files, secrets, and MCP servers.`)) return;
+    setBusy(true); setErr(null);
+    try {
+      const created = await client.cloneInstance(id);
+      // Refresh the new instance's row in the store, then navigate.
+      try {
+        const detail = await client.getInstance(created.id);
+        if (detail) upsertInstance(detail);
+      } catch {
+        // Detail fetch is best-effort — the list page refreshes on
+        // mount and will pick up the new row anyway.
+      }
+      window.location.hash = `#/i/${encodeURIComponent(created.id)}`;
+    } catch (e) {
+      setErr(e?.message || 'clone failed');
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const displayName = row.name && row.name.trim() ? row.name : '(unnamed)';
   // open_url is computed by the backend from `[server] hostname` + the
   // instance id.  Null when swarm has no hostname configured (the
@@ -1609,6 +1635,14 @@ function InstanceDetail({ id, onNew }) {
               ? <span className="btn-count-badge" aria-label={`${activeShareCount} active`}>{activeShareCount}</span>
               : null}
           </a>
+          <button
+            className="btn btn-ghost"
+            onClick={clone}
+            disabled={busy || row.status === 'destroyed' || !row.cube_sandbox_id}
+            title="snapshot this dyson and hire a fresh one on the latest template with the same config, files, secrets, and MCP servers"
+          >
+            clone
+          </button>
           <button className="btn btn-danger" onClick={destroy} disabled={busy || row.status === 'destroyed'}>
             destroy
           </button>

@@ -41,6 +41,10 @@ pub fn router(state: AppState) -> Router {
             "/v1/instances/:id/recreate",
             post(recreate_instance),
         )
+        .route(
+            "/v1/instances/:id/clone",
+            post(clone_instance),
+        )
         .with_state(state)
 }
 
@@ -187,6 +191,54 @@ async fn recreate_instance(
         .await
     {
         Ok(row) => Ok(Json(InstanceView::from_row(row, state.hostname.as_deref()))),
+        Err(e) => Err(swarm_err_to_status(e)),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct CloneInstanceBody {
+    /// Target cube template id.  When omitted, the swarm's configured
+    /// default template is used (the "latest" template).
+    #[serde(default)]
+    template_id: Option<String>,
+    /// Optional new display name.  When omitted, the clone inherits
+    /// the source's name verbatim.
+    #[serde(default)]
+    name: Option<String>,
+}
+
+/// Snapshot the source instance and restore onto a fresh swarm id +
+/// cube under the target template.  The clone inherits name, task,
+/// models, tools, network policy, per-instance secrets, and any MCP
+/// server records (with active OAuth sessions preserved).  Source row
+/// is left running.  Returns a `CreatedInstance` shaped exactly like
+/// `POST /v1/instances` so the SPA can reuse its post-create flow.
+async fn clone_instance(
+    State(state): State<AppState>,
+    Extension(caller): Extension<CallerIdentity>,
+    Path(id): Path<String>,
+    Json(body): Json<CloneInstanceBody>,
+) -> Result<(StatusCode, Json<CreatedInstance>), StatusCode> {
+    let target = body
+        .template_id
+        .clone()
+        .or_else(|| state.auth_config.default_template_id.clone())
+        .filter(|s| !s.trim().is_empty())
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    match state
+        .instances
+        .clone_instance(&caller.user_id, &id, &state.snapshots, &target, body.name)
+        .await
+    {
+        Ok(mut c) => {
+            // Same hostname rewrite as create_instance — turn the raw
+            // <sandbox>.cube.app URL into <id>.<hostname> so the SPA
+            // gets a browser-resolvable open_url back.
+            if let Some(host) = state.hostname.as_deref().filter(|h| !h.is_empty()) {
+                c.url = format!("https://{}.{}/", c.id, host.trim_end_matches('/'));
+            }
+            Ok((StatusCode::CREATED, Json(c)))
+        }
         Err(e) => Err(swarm_err_to_status(e)),
     }
 }

@@ -68,6 +68,24 @@ export class SwarmClient {
     return this._json(`/v1/instances/${encodeURIComponent(id)}`, { method: 'DELETE' });
   }
 
+  /// Clone an existing instance: snapshot+restore onto a fresh swarm id
+  /// under the operator's default template (or the supplied
+  /// `templateId`).  Carries name, task, models, tools, network policy,
+  /// per-instance secrets, and MCP server records (with active OAuth
+  /// sessions preserved); mints a fresh bearer + proxy token + DNS
+  /// subdomain.  Source row stays running.  Response shape matches
+  /// `createInstance` so callers can share the post-create UX.
+  cloneInstance(id, { templateId, name } = {}) {
+    const body = {};
+    if (typeof templateId === 'string' && templateId) body.template_id = templateId;
+    if (typeof name === 'string') body.name = name;
+    return this._json(`/v1/instances/${encodeURIComponent(id)}/clone`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  }
+
   /// PATCH the employee profile.  Body fields are optional — pass only
   /// what you want changed.  When `models` is supplied (non-empty
   /// array), swarm also pushes the new list into the running dyson

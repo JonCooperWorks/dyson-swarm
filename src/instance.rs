@@ -1188,6 +1188,104 @@ impl InstanceService {
             .ok_or(SwarmError::NotFound)
     }
 
+    /// Snapshot the source instance and restore onto a fresh swarm id +
+    /// cube under `new_template_id`.  The new instance inherits the
+    /// source's name, task, models, tools, network policy, and per-
+    /// instance secrets; gets a brand-new bearer, proxy token, and DNS
+    /// subdomain; and boots from the latest template's rootfs with the
+    /// source's workspace volume restored on top.  The source row is
+    /// left running and untouched.
+    ///
+    /// MCP server records (URL + auth + any active OAuth session) are
+    /// re-keyed onto the clone too, so the user doesn't have to re-
+    /// authorise upstream MCP after cloning.
+    ///
+    /// Callers should resolve `new_template_id` from the operator's
+    /// `default_template_id` (same as `rotate_template` in the HTTP
+    /// layer); an empty string is a 400 BadRequest.
+    pub async fn clone_instance(
+        &self,
+        owner_id: &str,
+        source_id: &str,
+        snapshot_svc: &crate::snapshot::SnapshotService,
+        new_template_id: &str,
+        name_override: Option<String>,
+    ) -> Result<CreatedInstance, SwarmError> {
+        if new_template_id.trim().is_empty() {
+            return Err(SwarmError::BadRequest("template_id is required".into()));
+        }
+        let source = self
+            .instances
+            .get_for_owner(owner_id, source_id)
+            .await?
+            .ok_or(SwarmError::NotFound)?;
+        if source.status == InstanceStatus::Destroyed {
+            return Err(SwarmError::BadRequest(
+                "cannot clone a destroyed instance".into(),
+            ));
+        }
+        if source
+            .cube_sandbox_id
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .is_none()
+        {
+            return Err(SwarmError::BadRequest(
+                "instance has no live cube sandbox; clone requires a Live row".into(),
+            ));
+        }
+
+        let snap = snapshot_svc.snapshot(SYSTEM_OWNER, &source.id).await?;
+        tracing::info!(
+            source = %source.id,
+            snapshot = %snap.id,
+            to_template = %new_template_id,
+            "clone: snapshot taken; restoring onto fresh swarm id"
+        );
+
+        let req = RestoreRequest {
+            template_id: new_template_id.to_owned(),
+            snapshot_path: std::path::PathBuf::from(&snap.path),
+            source_instance_id: Some(source.id.clone()),
+            name: Some(name_override.unwrap_or_else(|| source.name.clone()))
+                .filter(|s| !s.is_empty()),
+            task: Some(source.task.clone()).filter(|s| !s.is_empty()),
+            env: BTreeMap::new(),
+            ttl_seconds: None,
+            network_policy: source.network_policy.clone(),
+            models: source.models.clone(),
+            tools: source.tools.clone(),
+        };
+        let created = self.restore(owner_id, req).await?;
+
+        // Carry MCP server records (URL, auth, and any active OAuth
+        // session) onto the new instance id.  Best-effort: a failure
+        // here leaves a Live cube with no MCP attached — better than
+        // tearing down the freshly-hired clone.  The mcp_servers sweep
+        // (~line 573) renders the new id's index into dyson.json on
+        // its next pass, so the cloned MCP servers light up without an
+        // extra explicit reconfigure.
+        if let Some(secrets) = self.mcp_secrets.as_ref() {
+            match mcp_servers::copy_all(secrets, owner_id, &source.id, &created.id).await {
+                Ok(n) if n > 0 => tracing::info!(
+                    source = %source.id,
+                    clone = %created.id,
+                    count = n,
+                    "clone: mcp servers copied"
+                ),
+                Ok(_) => {}
+                Err(err) => tracing::warn!(
+                    source = %source.id,
+                    clone = %created.id,
+                    error = %err,
+                    "clone: mcp copy failed; clone will boot without MCP attached"
+                ),
+            }
+        }
+
+        Ok(created)
+    }
+
     pub async fn create(
         &self,
         owner_id: &str,
@@ -4152,5 +4250,252 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, SwarmError::BadRequest(_)));
         assert_eq!(cube.snapshotted.lock().unwrap().len(), snapshots_before);
+    }
+
+    /// Build the everything-wired stack a clone test needs: the
+    /// InstanceService has both a reconfigurer recorder AND mcp_secrets,
+    /// and shares its InstanceStore + SecretStore + SnapshotStore +
+    /// UserSecretsService with the SnapshotService so a single test can
+    /// exercise the full clone pipeline (snapshot → restore → MCP carry).
+    async fn build_with_snapshot_and_mcp() -> (
+        Arc<InstanceService>,
+        Arc<SnapshotService>,
+        Arc<MockCube>,
+        Arc<dyn InstanceStore>,
+        Arc<dyn SecretStore>,
+        Arc<UserSecretsService>,
+        String,
+    ) {
+        let pool = open_in_memory().await.unwrap();
+        let owner = "deadbeef".repeat(4);
+        sqlx::query(
+            "INSERT INTO users (id, subject, status, created_at) VALUES (?, ?, 'active', ?)",
+        )
+        .bind(&owner)
+        .bind(&owner)
+        .bind(0i64)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let cube = MockCube::new();
+        let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(pool.clone()));
+        let secrets_store: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
+        let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(pool.clone()));
+        let snaps: Arc<dyn SnapshotStore> = Arc::new(SqliteSnapshotStore::new(pool.clone()));
+        let recorder = Arc::new(RecordingReconfigurer::default());
+        let tmp = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+        let cipher_dir: Arc<dyn crate::envelope::CipherDirectory> =
+            Arc::new(crate::envelope::AgeCipherDirectory::new(tmp.path()).unwrap());
+        let user_secrets_store: Arc<dyn crate::traits::UserSecretStore> =
+            Arc::new(crate::db::secrets::SqlxUserSecretStore::new(pool.clone()));
+        let user_secrets = Arc::new(UserSecretsService::new(user_secrets_store, cipher_dir));
+        let isvc = Arc::new(
+            InstanceService::new(
+                cube.clone(),
+                instances.clone(),
+                secrets_store.clone(),
+                tokens,
+                "https://swarm.test/llm",
+            )
+            .with_reconfigurer(recorder.clone())
+            .with_mcp_secrets(user_secrets.clone()),
+        );
+        let backup: Arc<dyn BackupSink> = Arc::new(LocalDiskBackupSink::new(cube.clone()));
+        let ssvc = Arc::new(SnapshotService::new(
+            cube.clone(),
+            instances.clone(),
+            snaps,
+            backup,
+            isvc.clone(),
+        ));
+        (isvc, ssvc, cube, instances, secrets_store, user_secrets, owner)
+    }
+
+    #[tokio::test]
+    async fn clone_carries_config_files_secrets_and_mcp_onto_fresh_id() {
+        // End-to-end: a Live source with name/task/models/tools/policy,
+        // an instance secret, and one MCP server gets cloned to a fresh
+        // id under a new template.  Every carried-over field round-trips,
+        // ids/bearers diverge, and the source is untouched.
+        let (isvc, ssvc, cube, instances, secrets_store, user_secrets, owner) =
+            build_with_snapshot_and_mcp().await;
+
+        let src = isvc
+            .create(&owner, CreateRequest {
+                template_id: "tpl-v1".into(),
+                name: Some("axelrod".into()),
+                task: Some("game-theory triage".into()),
+                env: {
+                    let mut m = env_with_model();
+                    m.insert("EXTRA".into(), "x".into());
+                    m
+                },
+                ttl_seconds: None,
+                network_policy: NetworkPolicy::Open,
+                mcp_servers: vec![crate::mcp_servers::McpServerSpec {
+                    name: "linear".into(),
+                    url: "https://api.linear.app/mcp".into(),
+                    auth: crate::mcp_servers::McpAuthSpec::Bearer {
+                        token: "lin_secret".into(),
+                    },
+                }],
+            })
+            .await
+            .unwrap();
+
+        // Stash an instance secret so we can prove it round-trips.
+        // The store API takes opaque ciphertext as &str — for this test
+        // we don't need real envelope sealing; the carry-over loop just
+        // copies whatever bytes are at rest.
+        secrets_store
+            .put(&src.id, "FOO", "bar")
+            .await
+            .unwrap();
+
+        // Stamp an oauth_tokens blob into the MCP entry so we can
+        // prove the active OAuth session survives the clone.
+        let entry = crate::mcp_servers::McpServerEntry {
+            url: "https://api.linear.app/mcp".into(),
+            auth: crate::mcp_servers::McpAuthSpec::Bearer {
+                token: "lin_secret".into(),
+            },
+            oauth_tokens: Some(crate::mcp_servers::McpOAuthTokens {
+                access_token: "atk".into(),
+                refresh_token: Some("rtk".into()),
+                expires_at: Some(9_999_999_999),
+                token_url: "https://auth/token".into(),
+                client_id: "cid".into(),
+                client_secret: None,
+            }),
+        };
+        crate::mcp_servers::put(&user_secrets, &owner, &src.id, "linear", &entry)
+            .await
+            .unwrap();
+
+        let snapshots_before = cube.snapshotted.lock().unwrap().len();
+
+        let cloned = isvc
+            .clone_instance(&owner, &src.id, &ssvc, "tpl-v2", None)
+            .await
+            .unwrap();
+
+        // 1. New id ≠ source; new bearer ≠ source bearer.
+        assert_ne!(cloned.id, src.id);
+        assert_ne!(cloned.bearer_token, src.bearer_token);
+
+        // 2. New row carries name, task, models, tools, network policy
+        //    from source; template_id is the override.
+        let new_row = instances.get(&cloned.id).await.unwrap().unwrap();
+        assert_eq!(new_row.owner_id, owner);
+        assert_eq!(new_row.name, "axelrod");
+        assert_eq!(new_row.task, "game-theory triage");
+        assert_eq!(new_row.template_id, "tpl-v2");
+        assert_eq!(new_row.network_policy, NetworkPolicy::Open);
+        assert_eq!(new_row.status, InstanceStatus::Live);
+
+        // 3. Instance secret round-trips: the clone's row has FOO=bar.
+        let copied = secrets_store.list(&cloned.id).await.unwrap();
+        assert!(
+            copied.iter().any(|(n, v)| n == "FOO" && v == "bar"),
+            "instance secret FOO must be carried to the clone (got {copied:?})"
+        );
+
+        // 4. MCP entry was re-keyed onto the new instance, with
+        //    oauth_tokens preserved.
+        let names = crate::mcp_servers::list_names(&user_secrets, &owner, &cloned.id)
+            .await
+            .unwrap();
+        assert_eq!(names, vec!["linear".to_string()]);
+        let cloned_entry = crate::mcp_servers::get(&user_secrets, &owner, &cloned.id, "linear")
+            .await
+            .unwrap()
+            .expect("clone must have a linear MCP entry");
+        assert_eq!(cloned_entry.url, "https://api.linear.app/mcp");
+        let oauth = cloned_entry.oauth_tokens.expect("oauth_tokens preserved");
+        assert_eq!(oauth.access_token, "atk");
+        assert_eq!(oauth.refresh_token.as_deref(), Some("rtk"));
+
+        // 5. A snapshot was actually taken.
+        assert_eq!(
+            cube.snapshotted.lock().unwrap().len(),
+            snapshots_before + 1,
+            "clone must take exactly one snapshot of the source"
+        );
+
+        // 6. The cube create call for the clone passed both the new
+        //    template id AND a from_snapshot path — that's the
+        //    "new template, old workspace" composition.
+        let captured = cube.last_create();
+        assert_eq!(captured.template_id, "tpl-v2");
+        assert!(
+            captured.from_snapshot.is_some(),
+            "clone must hire the new cube with from_snapshot set"
+        );
+
+        // 7. Source row is left running and untouched.
+        let src_row = instances.get(&src.id).await.unwrap().unwrap();
+        assert_eq!(src_row.status, InstanceStatus::Live);
+        assert_eq!(src_row.template_id, "tpl-v1");
+    }
+
+    #[tokio::test]
+    async fn clone_rejects_destroyed_source() {
+        let (isvc, ssvc, _cube, instances, _secrets, _user_secrets, owner) =
+            build_with_snapshot_and_mcp().await;
+        let src = isvc
+            .create(&owner, CreateRequest {
+                template_id: "tpl".into(),
+                name: None,
+                task: None,
+                env: env_with_model(),
+                ttl_seconds: None,
+                network_policy: NetworkPolicy::default(),
+                mcp_servers: Vec::new(),
+            })
+            .await
+            .unwrap();
+        instances
+            .update_status(&src.id, InstanceStatus::Destroyed)
+            .await
+            .unwrap();
+        let err = isvc
+            .clone_instance(&owner, &src.id, &ssvc, "tpl-v2", None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SwarmError::BadRequest(_)));
+    }
+
+    #[tokio::test]
+    async fn clone_empty_template_id_rejected() {
+        let (isvc, ssvc, _cube, _instances, _secrets, _user_secrets, owner) =
+            build_with_snapshot_and_mcp().await;
+        let src = isvc
+            .create(&owner, CreateRequest {
+                template_id: "tpl".into(),
+                name: None,
+                task: None,
+                env: env_with_model(),
+                ttl_seconds: None,
+                network_policy: NetworkPolicy::default(),
+                mcp_servers: Vec::new(),
+            })
+            .await
+            .unwrap();
+        let err = isvc
+            .clone_instance(&owner, &src.id, &ssvc, "   ", None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SwarmError::BadRequest(_)));
+    }
+
+    #[tokio::test]
+    async fn clone_unknown_source_returns_not_found() {
+        let (isvc, ssvc, _cube, _instances, _secrets, _user_secrets, owner) =
+            build_with_snapshot_and_mcp().await;
+        let err = isvc
+            .clone_instance(&owner, "no-such-instance", &ssvc, "tpl-v2", None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SwarmError::NotFound));
     }
 }

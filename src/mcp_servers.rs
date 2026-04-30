@@ -213,6 +213,42 @@ pub async fn list_names(
     Ok(names)
 }
 
+/// Copy every MCP server record from `src_instance_id` to
+/// `dst_instance_id` under the same owner.  Preserves URL, auth, AND
+/// `oauth_tokens` — the active OAuth session is cloned with the
+/// instance, so the user doesn't have to re-authorise after cloning.
+/// Used by [`crate::instance::InstanceService::clone_instance`].
+///
+/// Idempotent: re-running overwrites the dst index and entries.
+/// Returns the number of entries copied (0 when source had no MCP).
+pub async fn copy_all(
+    secrets: &UserSecretsService,
+    owner_id: &str,
+    src_instance_id: &str,
+    dst_instance_id: &str,
+) -> Result<usize, SecretsError> {
+    let names = list_names(secrets, owner_id, src_instance_id).await?;
+    let mut copied = 0usize;
+    for name in &names {
+        // Index drift defence: an index name with no row gets skipped
+        // rather than failing the whole clone.
+        let Some(entry) = get(secrets, owner_id, src_instance_id, name).await? else {
+            continue;
+        };
+        put(secrets, owner_id, dst_instance_id, name, &entry).await?;
+        copied += 1;
+    }
+    if !names.is_empty() {
+        let idx = serde_json::to_vec(&names).map_err(|e| {
+            SecretsError::Envelope(crate::envelope::EnvelopeError::Age(format!(
+                "serialise mcp index: {e}"
+            )))
+        })?;
+        secrets.put(owner_id, &index_key(dst_instance_id), &idx).await?;
+    }
+    Ok(copied)
+}
+
 /// Delete every MCP server record for an instance.  Best-effort —
 /// individual row failures are logged but don't fail the whole call.
 /// Called from the instance destroy path so plaintext doesn't linger.

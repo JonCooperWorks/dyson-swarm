@@ -260,6 +260,26 @@ async fn full_walkthrough() {
         .put(&user_id, "byok_openai", b"sk-real")
         .await
         .expect("seed byok_openai for e2e");
+    let webhook_store: Arc<dyn dyson_swarm::traits::WebhookStore> = Arc::new(
+        dyson_swarm::db::webhooks::SqlxWebhookStore::new(pool.clone()),
+    );
+    let delivery_store: Arc<dyn dyson_swarm::traits::DeliveryStore> = Arc::new(
+        dyson_swarm::db::webhooks::SqlxDeliveryStore::new(pool.clone()),
+    );
+    let webhooks_svc = Arc::new(dyson_swarm::webhooks::WebhookService::new(
+        webhook_store,
+        delivery_store,
+        secrets_svc.clone(),
+        instance_svc.clone(),
+        Arc::new(dyson_swarm::webhooks::NullWebhookDispatcher),
+    ));
+    let shares_svc = Arc::new(dyson_swarm::shares::ShareService::new(
+        pool.clone(),
+        user_secrets_svc.clone(),
+        instance_svc.clone(),
+        dyson_swarm::shares::ShareMetrics::new(),
+        None,
+    ));
     let app_state = http::AppState {
         secrets: secrets_svc,
         user_secrets: user_secrets_svc,
@@ -279,6 +299,8 @@ async fn full_walkthrough() {
         openrouter_provisioning: None,
         user_or_keys: None,
         providers: std::sync::Arc::new(dyson_swarm::config::Providers::default()),
+        webhooks: webhooks_svc,
+        shares: shares_svc,
     };
     // Stage 5 retired the legacy `admin-token` shared bearer; this e2e
     // exercises admin endpoints via `--dangerous-no-auth`, the same

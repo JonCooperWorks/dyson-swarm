@@ -20,6 +20,7 @@ import {
   upsertInstance, removeInstance, selectInstance, setLoadError, setInstances,
   setWebhooksFor,
 } from '../store/app.js';
+import { SharesPanel } from './shares.jsx';
 
 // Links inside task markdown open in a new tab — the task pane is a
 // scratchpad, not a navigation target, and following a link in-place
@@ -1622,6 +1623,7 @@ function InstanceDetail({ id, onNew }) {
       <ToolsView instance={row}/>
       <SecretsPanel instanceId={id}/>
       <McpServersPanel instanceId={id} disabled={row.status === 'destroyed'}/>
+      <SharesPanel instanceId={id} disabled={row.status === 'destroyed'}/>
 
       {/* IDENTITY.md prose lives at the very bottom — operators reach
           for actions / runtime / snapshots / policy first; the agent's

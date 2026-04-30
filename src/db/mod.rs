@@ -20,6 +20,7 @@ pub mod audit;
 pub mod instances;
 pub mod policies;
 pub mod secrets;
+pub mod shares;
 pub mod snapshots;
 pub mod tokens;
 pub mod users;

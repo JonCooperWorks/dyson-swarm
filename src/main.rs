@@ -688,6 +688,19 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         webhook_dispatcher,
     ));
 
+    // Anonymous artefact-share service — wires the SQLite pool, the
+    // user-secrets handle (per-user signing keys are sealed under the
+    // user's age cipher), and the apex hostname through one place.
+    // The Prometheus-shaped metrics live as process-local atomics
+    // inside an Arc<ShareMetrics>.
+    let shares_svc = Arc::new(dyson_swarm::shares::ShareService::new(
+        pool.clone(),
+        user_secrets_svc.clone(),
+        instance_svc.clone(),
+        dyson_swarm::shares::ShareMetrics::new(),
+        cfg.hostname.clone(),
+    ));
+
     let app_state = http::AppState {
         secrets: secrets_svc,
         user_secrets: user_secrets_svc,
@@ -716,6 +729,7 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         user_or_keys,
         providers: providers_for_app,
         webhooks: webhooks_svc,
+        shares: shares_svc,
     };
     let app = http::router(app_state, auth, user_auth, llm_router, mcp_user_router);
 

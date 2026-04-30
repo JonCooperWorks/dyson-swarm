@@ -22,6 +22,8 @@ pub mod instances;
 pub mod models;
 pub mod proxy_admin;
 pub mod secrets;
+pub mod share_public;
+pub mod shares;
 pub mod snapshots;
 pub mod static_assets;
 pub mod webhooks;
@@ -95,6 +97,11 @@ pub struct AppState {
     /// management routes under `/v1/instances/:id/webhooks` and the
     /// public delivery endpoint `/webhooks/:id/:name`.
     pub webhooks: Arc<crate::webhooks::WebhookService>,
+    /// Anonymous artefact-share service — backs `/v1/instances/:id/...`
+    /// admin CRUD and the public read path on `share.<apex>`.  Holds
+    /// the SQLite pool, the per-user-secrets handle, and the metrics
+    /// counters; stateless across requests.
+    pub shares: Arc<crate::shares::ShareService>,
 }
 
 /// Build the public `Router`.
@@ -152,6 +159,7 @@ pub fn router(
         .merge(byok::router(state.clone()))
         .merge(models::router(state.clone()))
         .merge(webhooks::router(state.clone()))
+        .merge(shares::router(state.clone()))
         .merge(mcp_user_router)
         .layer(middleware::from_fn_with_state(user_auth.clone(), user_middleware));
 
@@ -175,19 +183,29 @@ pub fn router(
         .merge(extra)
         .merge(static_assets::router());
 
-    // Outer layer: host-based dispatcher.  When a request's Host header
-    // is `<instance_id>.<hostname>`, forward to the matching Dyson
-    // sandbox.  Otherwise fall through to `normal`.  Hostname comes
-    // from config; when unset, the dispatcher is a pass-through.
+    // Outer layers: two host-based dispatchers in sequence.  Layers
+    // apply outside-in — the LAST `.layer()` is the OUTERMOST one
+    // and runs FIRST on inbound traffic.  share_public must run
+    // before dyson_proxy because `share.<hostname>` is technically
+    // a one-label subdomain of the apex and `extract_instance_subdomain`
+    // would otherwise treat it as instance_id="share" and 404.
+    // dyson_proxy then runs second, catching legitimate
+    // `<id>.<hostname>` traffic, and finally `normal` handles
+    // everything for the apex host.
     let dispatch_state = dyson_proxy::DispatchState::new(
         state.clone(),
         user_auth.authenticator.clone(),
         state.hostname.clone(),
     );
-    normal.layer(middleware::from_fn_with_state(
-        dispatch_state,
-        dyson_proxy::dispatch,
-    ))
+    normal
+        .layer(middleware::from_fn_with_state(
+            dispatch_state,
+            dyson_proxy::dispatch,
+        ))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            share_public::dispatch,
+        ))
 }
 
 #[cfg(test)]
@@ -284,13 +302,20 @@ mod tests {
         let webhook_store: Arc<dyn crate::traits::WebhookStore> =
             Arc::new(crate::db::webhooks::SqlxWebhookStore::new(pool.clone()));
         let delivery_store: Arc<dyn crate::traits::DeliveryStore> =
-            Arc::new(crate::db::webhooks::SqlxDeliveryStore::new(pool));
+            Arc::new(crate::db::webhooks::SqlxDeliveryStore::new(pool.clone()));
         let webhooks_svc = Arc::new(crate::webhooks::WebhookService::new(
             webhook_store,
             delivery_store,
             svc.clone(),
             instance_svc.clone(),
             Arc::new(crate::webhooks::NullWebhookDispatcher),
+        ));
+        let shares_svc = Arc::new(crate::shares::ShareService::new(
+            pool.clone(),
+            user_secrets.clone(),
+            instance_svc.clone(),
+            crate::shares::ShareMetrics::new(),
+            None,
         ));
         let state = AppState {
             secrets: svc,
@@ -312,6 +337,7 @@ mod tests {
             user_or_keys: None,
             providers: Arc::new(crate::config::Providers::default()),
             webhooks: webhooks_svc,
+            shares: shares_svc,
         };
         (state, users_store)
     }

@@ -420,13 +420,20 @@ mod tests {
         let webhook_store: Arc<dyn crate::traits::WebhookStore> =
             Arc::new(crate::db::webhooks::SqlxWebhookStore::new(pool.clone()));
         let delivery_store: Arc<dyn crate::traits::DeliveryStore> =
-            Arc::new(crate::db::webhooks::SqlxDeliveryStore::new(pool));
+            Arc::new(crate::db::webhooks::SqlxDeliveryStore::new(pool.clone()));
         let webhooks_svc = Arc::new(crate::webhooks::WebhookService::new(
             webhook_store,
             delivery_store,
             svc.clone(),
             instance_svc.clone(),
             Arc::new(crate::webhooks::NullWebhookDispatcher),
+        ));
+        let shares_svc = Arc::new(crate::shares::ShareService::new(
+            pool,
+            user_secrets.clone(),
+            instance_svc.clone(),
+            crate::shares::ShareMetrics::new(),
+            None,
         ));
         let state = AppState {
             secrets: svc,
@@ -448,6 +455,7 @@ mod tests {
             user_or_keys: None,
             providers: Arc::new(providers),
             webhooks: webhooks_svc,
+            shares: shares_svc,
         };
         // We don't return the upstream URL here; tests close over their
         // own variables.  The third return is kept stable for symmetry

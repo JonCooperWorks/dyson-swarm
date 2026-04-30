@@ -285,6 +285,55 @@ export class SwarmClient {
     );
   }
 
+  // ─── Anonymous artefact shares ─────────────────────────────────
+  //
+  // `mintShare` returns `{url, jti, expires_at, label, created_at}`;
+  // the URL is shown to the user once and never stored plaintext.
+  // listShares returns rows of `{jti, instance_id, chat_id,
+  // artefact_id, created_at, expires_at, revoked_at, label, active}`.
+  // Revocation is by jti and is idempotent.
+
+  mintShare(instanceId, artefactId, body) {
+    return this._json(
+      `/v1/instances/${encodeURIComponent(instanceId)}/artefacts/${encodeURIComponent(artefactId)}/shares`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      },
+    );
+  }
+
+  listShares(instanceId) {
+    return this._json(
+      `/v1/instances/${encodeURIComponent(instanceId)}/shares`,
+      { headers: { Accept: 'application/json' } },
+    );
+  }
+
+  revokeShare(jti) {
+    return this._json(`/v1/shares/${encodeURIComponent(jti)}`, { method: 'DELETE' });
+  }
+
+  reissueShare(jti, ttl) {
+    return this._json(`/v1/shares/${encodeURIComponent(jti)}/reissue`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ttl }),
+    });
+  }
+
+  listShareAccesses(jti) {
+    return this._json(`/v1/shares/${encodeURIComponent(jti)}/accesses`);
+  }
+
+  /// Panic-button: rotate the user's signing key.  Every share they've
+  /// ever issued instantly fails verification; the rows survive on
+  /// the server for audit but the URLs are dead.
+  rotateShareSigningKey() {
+    return this._json('/v1/shares/rotate-key', { method: 'POST' });
+  }
+
   // ─── Admin (caller must carry the configured admin permission/role) ─
 
   adminListUsers() {

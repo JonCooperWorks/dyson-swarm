@@ -73,6 +73,19 @@ parking_lot = "0.12"
 # promoting to a runtime dep so `mcp_servers` can build PKCE without
 # reaching for a different encoder.
 base64 = "0.22.1"
+# Compact, schema-versioned binary encoding for the SharePayload struct
+# carried in `share.<apex>/v1/<base64url(payload)>.<base64url(sig)>`
+# URLs.  postcard is no_std-friendly, has no schema-evolution footguns
+# of the JWT/CBOR families, and produces the smallest payload of any
+# serde-compatible format we already had a credible alternative for.
+postcard = { version = "1.0", default-features = false, features = ["use-std"] }
+# Markdown rendering for the public artefact share page (server-side).
+# pulldown-cmark is the reference Rust implementation; ammonia
+# sanitises the resulting HTML against an allowlist before we ship it
+# to a viewer's browser.  The share endpoint does not load JS; CSP
+# also blocks `script-src` so an XSS in markdown is doubly contained.
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
+ammonia = "4"
 # Process-wide umask hardening.  Set 0o077 at startup so newly created
 # files (sqlite db, age key files) default to owner-only even if a
 # call site forgets to chmod after create — closes the TOCTOU window

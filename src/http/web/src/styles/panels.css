@@ -301,9 +301,15 @@
   flex-wrap: wrap;
 }
 @media (max-width: 720px) {
+  /* Hoist action buttons above the title block on mobile — operators
+     reach for "open" / "edit" first, and the IDENTITY.md prose can
+     push them off-screen on a phone.  Done with `order` so the JSX
+     stays in its desktop-friendly order (title block first). */
   .detail-header {
     flex-direction: column;
   }
+  .detail-header .employee-card { order: 2; }
+  .detail-header .detail-actions { order: 1; }
   .detail-actions {
     width: 100%;
   }

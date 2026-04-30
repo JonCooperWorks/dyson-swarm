@@ -94,14 +94,29 @@ static SENTINEL: LazyLock<(Arc<dyn EnvelopeCipher>, Vec<u8>)> = LazyLock::new(||
     (cipher, ciphertext)
 });
 
-fn row_to_user(row: &sqlx::sqlite::SqliteRow) -> Result<UserRow, StoreError> {
+/// Row decode that opens the per-user envelope on `email_ciphertext`
+/// and falls back to the legacy plaintext `email` column when no
+/// ciphertext is on file.  Cipher failures (missing key file, bad
+/// ciphertext) collapse to `None` rather than erroring the read —
+/// orphaned key material shouldn't 500 the admin list.
+fn row_to_user(
+    row: &sqlx::sqlite::SqliteRow,
+    ciphers: &dyn CipherDirectory,
+) -> Result<UserRow, StoreError> {
     let status_text: String = row.try_get("status").map_err(map_sqlx)?;
     let status = UserStatus::parse(&status_text)
         .ok_or_else(|| StoreError::Malformed(format!("status={status_text}")))?;
+    let id: String = row.try_get("id").map_err(map_sqlx)?;
+    let ciphertext: Option<String> = row.try_get("email_ciphertext").map_err(map_sqlx)?;
+    let legacy_email: Option<String> = row.try_get("email").map_err(map_sqlx)?;
+    let email = match ciphertext.as_deref().filter(|s| !s.is_empty()) {
+        Some(ct) => open_email_ciphertext(ciphers, &id, ct).or(legacy_email),
+        None => legacy_email,
+    };
     Ok(UserRow {
-        id: row.try_get("id").map_err(map_sqlx)?,
+        id,
         subject: row.try_get("subject").map_err(map_sqlx)?,
-        email: row.try_get("email").map_err(map_sqlx)?,
+        email,
         display_name: row.try_get("display_name").map_err(map_sqlx)?,
         status,
         created_at: row.try_get("created_at").map_err(map_sqlx)?,
@@ -110,6 +125,31 @@ fn row_to_user(row: &sqlx::sqlite::SqliteRow) -> Result<UserRow, StoreError> {
         openrouter_key_id: row.try_get("openrouter_key_id").map_err(map_sqlx)?,
         openrouter_key_limit_usd: row.try_get("openrouter_key_limit_usd").map_err(map_sqlx)?,
     })
+}
+
+fn open_email_ciphertext(
+    ciphers: &dyn CipherDirectory,
+    user_id: &str,
+    ct: &str,
+) -> Option<String> {
+    let cipher = ciphers.for_user(user_id).ok()?;
+    let bytes = cipher.open(ct.as_bytes()).ok()?;
+    String::from_utf8(bytes).ok()
+}
+
+fn seal_email_plaintext(
+    ciphers: &dyn CipherDirectory,
+    user_id: &str,
+    plain: &str,
+) -> Result<String, StoreError> {
+    let cipher = ciphers
+        .for_user(user_id)
+        .map_err(|e| StoreError::Io(format!("envelope: {e}")))?;
+    let ct = cipher
+        .seal(plain.as_bytes())
+        .map_err(|e| StoreError::Io(format!("envelope seal: {e}")))?;
+    String::from_utf8(ct)
+        .map_err(|_| StoreError::Malformed("email ciphertext not ASCII".into()))
 }
 
 #[derive(Clone)]
@@ -233,15 +273,36 @@ impl UserStore for SqlxUserStore {
     /// up with `get_by_subject` — the row id they constructed is
     /// authoritative only on the winner's path.
     async fn create(&self, row: UserRow) -> Result<(), StoreError> {
+        // Seal the email under the user's per-row age cipher and write
+        // it into `email_ciphertext`; leave the legacy plaintext column
+        // NULL for sealed rows.  The cipher directory mints a fresh
+        // key file for the user on first seal — same lazy pattern the
+        // api-key envelope uses.
+        //
+        // Fallback: when the cipher refuses (e.g. legacy non-hex
+        // user_ids, test fixtures, or the seeded `legacy` row) we
+        // write the email to the plaintext `email` column instead.
+        // Production user ids are uuid-simple (32 hex), so this path
+        // only fires for synthetic ids that already lived outside
+        // the envelope contract.
+        let (ciphertext, plaintext): (Option<String>, Option<String>) =
+            match row.email.as_deref().filter(|s| !s.is_empty()) {
+                Some(plain) => match seal_email_plaintext(&*self.ciphers, &row.id, plain) {
+                    Ok(ct) => (Some(ct), None),
+                    Err(_) => (None, Some(plain.to_owned())),
+                },
+                None => (None, None),
+            };
         sqlx::query(
             "INSERT INTO users \
-             (id, subject, email, display_name, status, created_at, activated_at, last_seen_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+             (id, subject, email, email_ciphertext, display_name, status, created_at, activated_at, last_seen_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT(subject) DO NOTHING",
         )
         .bind(&row.id)
         .bind(&row.subject)
-        .bind(&row.email)
+        .bind(&plaintext)
+        .bind(&ciphertext)
         .bind(&row.display_name)
         .bind(row.status.as_str())
         .bind(row.created_at)
@@ -260,7 +321,7 @@ impl UserStore for SqlxUserStore {
             .await
             .map_err(map_sqlx)?;
         match r {
-            Some(row) => Ok(Some(row_to_user(&row)?)),
+            Some(row) => Ok(Some(row_to_user(&row, &*self.ciphers)?)),
             None => Ok(None),
         }
     }
@@ -272,7 +333,7 @@ impl UserStore for SqlxUserStore {
             .await
             .map_err(map_sqlx)?;
         match r {
-            Some(row) => Ok(Some(row_to_user(&row)?)),
+            Some(row) => Ok(Some(row_to_user(&row, &*self.ciphers)?)),
             None => Ok(None),
         }
     }
@@ -282,7 +343,7 @@ impl UserStore for SqlxUserStore {
             .fetch_all(&self.pool)
             .await
             .map_err(map_sqlx)?;
-        rows.iter().map(row_to_user).collect()
+        rows.iter().map(|r| row_to_user(r, &*self.ciphers)).collect()
     }
 
     async fn set_status(&self, id: &str, status: UserStatus) -> Result<(), StoreError> {

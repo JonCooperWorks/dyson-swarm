@@ -1,0 +1,18 @@
+-- Move OIDC-captured emails off the plaintext `email` column and into
+-- a per-user envelope-encrypted `email_ciphertext`.  The plaintext
+-- column stays for backward-compat reads of pre-feature rows; new
+-- rows write only to the ciphertext column.  The admin SPA never
+-- sees plaintext on the wire — UserView::from masks it server-side
+-- to `a***@gmail.com` shape after opening the envelope.
+--
+-- Sealed under the same per-user age cipher (`ciphers.for_user(id)`)
+-- the api-key envelope uses; the row's owner is the only key holder.
+-- Swarm itself is also a key holder (the keys live on the swarm
+-- host, mode 0400, dyson-swarm-only) — that's intentional, since the
+-- admin "email at a glance" feature requires the server to open the
+-- ciphertext to render a mask.
+--
+-- No constraint on email_ciphertext.  NULL means "fall back to the
+-- legacy plaintext column" on read; the legacy column is also NULL
+-- for any row that was created without an email claim.
+ALTER TABLE users ADD COLUMN email_ciphertext TEXT;

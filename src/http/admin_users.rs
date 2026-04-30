@@ -99,7 +99,7 @@ impl From<UserRow> for UserView {
         Self {
             id: r.id,
             subject: r.subject,
-            email: r.email,
+            email: r.email.as_deref().map(mask_email),
             display_name: r.display_name,
             status: r.status.as_str().into(),
             created_at: r.created_at,
@@ -108,6 +108,24 @@ impl From<UserRow> for UserView {
             openrouter_key_present: r.openrouter_key_id.is_some(),
             openrouter_key_limit_usd: r.openrouter_key_limit_usd,
         }
+    }
+}
+
+/// Render `alice@gmail.com` as `a***@gmail.com` for the admin
+/// list view — operators can recognise their tenants without the
+/// SPA pulling the full address over the wire.  Single-char locals
+/// collapse to `***@domain` (no information leak from a one-letter
+/// preview).  No-`@` strings collapse to a flat `***`; the input
+/// shouldn't reach here but masking-not-asserting keeps the route
+/// safe under malformed data.
+fn mask_email(email: &str) -> String {
+    let Some((local, domain)) = email.split_once('@') else {
+        return "***".to_string();
+    };
+    let mut chars = local.chars();
+    match chars.next() {
+        Some(first) if chars.next().is_some() => format!("{first}***@{domain}"),
+        _ => format!("***@{domain}"),
     }
 }
 

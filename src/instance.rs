@@ -456,6 +456,59 @@ impl InstanceService {
         format!("{}/openrouter", self.proxy_base.trim_end_matches('/'))
     }
 
+    /// Re-push the per-instance `name` to every Live instance.  The
+    /// dyson side rewrites IDENTITY.md when name lands, so this fixes
+    /// any running dyson whose IDENTITY.md fell out of sync with the
+    /// swarm-side row (typical cause: the row was renamed while the
+    /// instance was offline, or the instance pre-dates the name push).
+    /// Idempotent.  Returns `(visited, succeeded)` for the log line.
+    pub async fn push_names_all(&self) -> Result<(usize, usize), SwarmError> {
+        let Some(reconfigurer) = self.reconfigurer.as_ref() else {
+            return Ok((0, 0));
+        };
+        let live = self
+            .instances
+            .list(SYSTEM_OWNER, ListFilter {
+                status: Some(InstanceStatus::Live),
+                include_destroyed: false,
+            })
+            .await?;
+        let mut succeeded = 0usize;
+        for row in &live {
+            let name = row.name.trim();
+            if name.is_empty() {
+                continue;
+            }
+            let Some(sandbox_id) = &row.cube_sandbox_id else {
+                tracing::debug!(
+                    instance = %row.id,
+                    "push-names: skipping — no cube_sandbox_id on row"
+                );
+                continue;
+            };
+            let body = ReconfigureBody {
+                name: Some(name.to_owned()),
+                ..Default::default()
+            };
+            match reconfigurer.push(&row.id, sandbox_id, &body).await {
+                Ok(()) => {
+                    succeeded += 1;
+                    tracing::debug!(instance = %row.id, name = %name, "push-names: pushed");
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        instance = %row.id,
+                        error = %e,
+                        "push-names: push failed (will retry next sweep)"
+                    );
+                }
+            }
+        }
+        let visited = live.len();
+        tracing::info!(visited, succeeded, "push-names: sweep complete");
+        Ok((visited, succeeded))
+    }
+
     /// Re-push the image-generation defaults to every Live instance.
     /// Idempotent — a dyson that already has the right values gets
     /// the same JSON written back.  Best-effort: a sandbox that's

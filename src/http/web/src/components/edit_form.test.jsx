@@ -82,23 +82,21 @@ function makeRow(overrides = {}) {
 }
 
 describe('EditInstancePage layout', () => {
-  test('tools panel renders ABOVE the network access section', async () => {
+  test('network access renders ABOVE the tools panel (same as hire form)', async () => {
     renderEdit(makeRow());
     // Wait for the form to materialise (useEffect re-fetches on mount).
-    const toolsTitle = await screen.findByText(/^tools$/i);
     const networkHeading = await screen.findByRole('heading', { name: /network access/i });
+    const toolsTitle = await screen.findByText(/^tools$/i);
 
     // DOM order: comparing positions inside the same parent stack.
-    const stack = toolsTitle.closest('section').parentElement;
-    expect(stack).toBe(networkHeading.closest('section').parentElement);
+    const stack = networkHeading.closest('section').parentElement;
+    expect(stack).toBe(toolsTitle.closest('section').parentElement);
     const positions = [...stack.children];
-    const toolsIdx = positions.indexOf(toolsTitle.closest('section'));
     const netIdx = positions.indexOf(networkHeading.closest('section'));
-    expect(toolsIdx).toBeGreaterThan(-1);
+    const toolsIdx = positions.indexOf(toolsTitle.closest('section'));
     expect(netIdx).toBeGreaterThan(-1);
-    expect(toolsIdx).toBeLessThan(netIdx);
-
-
+    expect(toolsIdx).toBeGreaterThan(-1);
+    expect(netIdx).toBeLessThan(toolsIdx);
   });
 });
 
@@ -201,27 +199,28 @@ describe('EditInstancePage airgap rule', () => {
 });
 
 describe('EditInstancePage parity with hire form', () => {
-  test('renders identity, model, tools, network access in that order', async () => {
+  test('renders identity, model, network access, tools in that order', async () => {
     renderEdit(makeRow());
 
     const identity = await screen.findByRole('heading', { name: /^identity$/i });
     const model = await screen.findByRole('heading', { name: /^model$/i });
-    const tools = await screen.findByText(/^tools$/i);
     const network = await screen.findByRole('heading', { name: /^network access$/i });
+    const tools = await screen.findByText(/^tools$/i);
 
     // All four headings live inside the same form element.
     const form = identity.closest('form');
     expect(form).not.toBeNull();
     expect(form.contains(model)).toBe(true);
-    expect(form.contains(tools)).toBe(true);
     expect(form.contains(network)).toBe(true);
+    expect(form.contains(tools)).toBe(true);
 
-    // DOM-order check via document position.
+    // DOM-order check via document position.  Mirrors the hire
+    // form: identity → model → network → tools.
     const order = (a, b) =>
       Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
     expect(order(identity, model)).toBe(true);
-    expect(order(model, tools)).toBe(true);
-    expect(order(tools, network)).toBe(true);
+    expect(order(model, network)).toBe(true);
+    expect(order(network, tools)).toBe(true);
 
 
   });

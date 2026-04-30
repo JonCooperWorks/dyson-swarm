@@ -617,7 +617,14 @@
    detail page) share grid + cell styling; only the cell hover
    state differs (read-only shows a faint "off" treatment for
    unticked cells so the operator can tell at a glance which
-   builtins are enabled). */
+   builtins are enabled).
+
+   When the picker sits inside a hire/edit form (.page-form), the
+   surrounding .page-section containers use --bg-2 — bump the
+   picker panel + its inner cells to match so the form reads as
+   one consistent stack instead of a lighter-bg outlier. */
+.page-form .panel { background: var(--bg-2); }
+.page-form .tools-cell { background: var(--bg-1); }
 .tools-body {
   display: flex;
   flex-direction: column;

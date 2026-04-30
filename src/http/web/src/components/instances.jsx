@@ -1881,12 +1881,6 @@ function EditInstanceForm({ instance, backHref, formId }) {
           />
         </section>
 
-        <ToolsPicker
-          value={tools}
-          onChange={setToolsTracked}
-          policyKind={networkPolicy.kind}
-        />
-
         <section className="page-section">
           <h2 className="section-title">network access</h2>
           <NetworkPolicyPicker value={networkPolicy} onChange={setNetworkPolicy}/>
@@ -1898,6 +1892,12 @@ function EditInstanceForm({ instance, backHref, formId }) {
             </p>
           ) : null}
         </section>
+
+        <ToolsPicker
+          value={tools}
+          onChange={setToolsTracked}
+          policyKind={networkPolicy.kind}
+        />
 
         {error ? <div className="error">{error}</div> : null}
       </form>

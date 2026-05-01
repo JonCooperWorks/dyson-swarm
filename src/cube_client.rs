@@ -76,6 +76,18 @@ struct CreateBody<'a> {
     /// used in CubeSandbox's `network_denylist.py` example.
     allow_internet_access: bool,
     network: SandboxNetwork<'a>,
+    /// CubeMaster's restore-from-snapshot path
+    /// (`handleColdStartCompatibility`) requires either an inbound
+    /// `com.netid` annotation OR a populated `cube_box_req_template`
+    /// in CubeMaster's conf.yaml.  Stock cube installs leave the
+    /// template's annotations block empty, so the snapshot-restore
+    /// 500s with `netID is missing in CubeBoxReqTemplate`.  Sending
+    /// the annotation from here is harmless on the from-scratch path
+    /// (the cold-start branch only fires when restoring) and unblocks
+    /// rotation without a host-side cube config patch.  Value is
+    /// opaque to CubeMaster — any non-empty string works.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    annotations: BTreeMap<&'static str, &'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -163,6 +175,11 @@ impl CubeClient for HttpCubeClient {
             .from_snapshot_path
             .as_ref()
             .map(|p| p.display().to_string());
+        // See `CreateBody.annotations` doc for why we always send
+        // `com.netid` — closes a CubeMaster cold-start path bug
+        // without requiring a host config edit.
+        let mut annotations = BTreeMap::new();
+        annotations.insert("com.netid", "dyson");
         let body = CreateBody {
             template_id: &args.template_id,
             env: &args.env,
@@ -172,6 +189,7 @@ impl CubeClient for HttpCubeClient {
                 allow_out: &args.resolved_policy.allow_out,
                 deny_out: &args.resolved_policy.deny_out,
             },
+            annotations,
         };
         let url = self.url("/sandboxes");
         let resp: CreateResp = with_retry(MAX_ATTEMPTS, || async {
@@ -491,6 +509,7 @@ mod tests {
                 allow_out: &allow,
                 deny_out: &deny,
             },
+            annotations: BTreeMap::new(),
         };
         let v = serde_json::to_value(&body).unwrap();
         assert_eq!(v["templateID"], "tpl");

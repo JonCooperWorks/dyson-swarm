@@ -281,7 +281,11 @@ impl Providers {
         self.0.get_mut(name)
     }
 
-    pub fn insert(&mut self, name: impl Into<String>, cfg: ProviderConfig) -> Option<ProviderConfig> {
+    pub fn insert(
+        &mut self,
+        name: impl Into<String>,
+        cfg: ProviderConfig,
+    ) -> Option<ProviderConfig> {
         self.0.insert(name.into(), cfg)
     }
 
@@ -364,9 +368,7 @@ pub enum ConfigError {
     Parse(#[from] toml::de::Error),
     #[error("required field is empty: {0}")]
     EmptyField(&'static str),
-    #[error(
-        "DB file {path} has insecure permissions ({mode:o}); set mode 0600 (chmod 600 {path})"
-    )]
+    #[error("DB file {path} has insecure permissions ({mode:o}); set mode 0600 (chmod 600 {path})")]
     InsecureDbPermissions { path: String, mode: u32 },
     #[error("backup.sink = \"s3\" requires [backup.s3] section")]
     MissingS3Section,
@@ -417,7 +419,11 @@ impl Config {
             self.db_path = PathBuf::from(v);
         }
         if let Some(v) = env.get("SWARM_KEYS_DIR") {
-            self.keys_dir = if v.is_empty() { None } else { Some(PathBuf::from(v)) };
+            self.keys_dir = if v.is_empty() {
+                None
+            } else {
+                Some(PathBuf::from(v))
+            };
         }
         if let Some(v) = env.get("SWARM_HOSTNAME") {
             self.hostname = if v.is_empty() { None } else { Some(v.clone()) };
@@ -444,7 +450,9 @@ impl Config {
         // so an env var with no matching stanza is a no-op rather
         // than an error — same back-compat semantics as before.
         for (env_key, env_val) in env {
-            let Some(rest) = env_key.strip_prefix("SWARM_PROVIDERS_") else { continue };
+            let Some(rest) = env_key.strip_prefix("SWARM_PROVIDERS_") else {
+                continue;
+            };
             let (name_upper, field) = if let Some(n) = rest.strip_suffix("_API_KEY") {
                 (n, "api_key")
             } else if let Some(n) = rest.strip_suffix("_UPSTREAM") {
@@ -453,7 +461,9 @@ impl Config {
                 continue;
             };
             let name = name_upper.to_lowercase();
-            let Some(slot) = self.providers.get_mut(&name) else { continue };
+            let Some(slot) = self.providers.get_mut(&name) else {
+                continue;
+            };
             match field {
                 "api_key" => slot.api_key = Some(env_val.clone()),
                 "upstream" => slot.upstream.clone_from(env_val),
@@ -589,7 +599,10 @@ local_cache_dir = "/tmp/cache"
         assert_eq!(cfg.cube.api_key, "k");
         assert_eq!(cfg.health_probe_interval_seconds, 60);
         assert_eq!(cfg.backup.sink, BackupSinkKind::Local);
-        assert_eq!(cfg.providers.get("anthropic").unwrap().api_key.as_deref(), Some("a"));
+        assert_eq!(
+            cfg.providers.get("anthropic").unwrap().api_key.as_deref(),
+            Some("a")
+        );
         std::fs::remove_file(&path).ok();
     }
 
@@ -598,7 +611,10 @@ local_cache_dir = "/tmp/cache"
         let path = write_tmp("env_override.toml", example_toml());
         let mut env = BTreeMap::new();
         env.insert("SWARM_CUBE_URL".into(), "https://override".into());
-        env.insert("SWARM_PROVIDERS_ANTHROPIC_API_KEY".into(), "from-env".into());
+        env.insert(
+            "SWARM_PROVIDERS_ANTHROPIC_API_KEY".into(),
+            "from-env".into(),
+        );
         let cfg = Config::load(&path, &env, false).expect("loads");
         assert_eq!(cfg.cube.url, "https://override");
         assert_eq!(

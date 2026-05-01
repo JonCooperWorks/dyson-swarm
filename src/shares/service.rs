@@ -16,9 +16,8 @@ use std::sync::Arc;
 use sqlx::SqlitePool;
 
 use super::{
-    build_url, decode_token, ensure_signing_key, jti_hex, load_signing_key, new_payload,
-    rotate_signing_key, sign_token, verify_with_key, RejectReason, ShareError, ShareMetrics,
-    ShareTtl,
+    RejectReason, ShareError, ShareMetrics, ShareTtl, build_url, decode_token, ensure_signing_key,
+    jti_hex, load_signing_key, new_payload, rotate_signing_key, sign_token, verify_with_key,
 };
 use crate::db::shares::{self, ShareRow, ShareSpec};
 use crate::error::{StoreError, SwarmError};
@@ -132,9 +131,7 @@ impl ShareService {
         );
         let jti = jti_hex(payload.jti);
         let token = sign_token(&payload, &key).map_err(|e| match e {
-            ShareError::Malformed => {
-                ShareServiceError::Upstream("payload encode failed".into())
-            }
+            ShareError::Malformed => ShareServiceError::Upstream("payload encode failed".into()),
             other => ShareServiceError::Upstream(other.to_string()),
         })?;
         let label_ref = label.as_deref();
@@ -182,11 +179,7 @@ impl ShareService {
     /// belonged to someone else.  The defensive case here is the
     /// cross-tenant probe: a guessed jti from an admin shouldn't leak
     /// "this jti exists but isn't yours" via differential status.
-    pub async fn revoke(
-        &self,
-        caller_user_id: &str,
-        jti: &str,
-    ) -> Result<(), ShareServiceError> {
+    pub async fn revoke(&self, caller_user_id: &str, jti: &str) -> Result<(), ShareServiceError> {
         let _ = shares::revoke(&self.pool, jti, caller_user_id).await?;
         Ok(())
     }
@@ -228,10 +221,7 @@ impl ShareService {
     /// one.  Every share they've ever issued now fails verification at
     /// the HMAC step.  The `artefact_shares` rows survive (audit), but
     /// the URLs are all dead.
-    pub async fn rotate_key(
-        &self,
-        caller_user_id: &str,
-    ) -> Result<(), ShareServiceError> {
+    pub async fn rotate_key(&self, caller_user_id: &str) -> Result<(), ShareServiceError> {
         rotate_signing_key(&self.user_secrets, caller_user_id).await?;
         Ok(())
     }
@@ -314,14 +304,8 @@ impl ShareService {
         user_agent: Option<&str>,
         status: i32,
     ) {
-        if let Err(e) = shares::record_access(
-            &self.pool,
-            jti,
-            remote_addr,
-            user_agent,
-            status,
-        )
-        .await
+        if let Err(e) =
+            shares::record_access(&self.pool, jti, remote_addr, user_agent, status).await
         {
             tracing::warn!(jti, %e, "share access audit insert failed");
         }
@@ -363,9 +347,8 @@ impl ShareService {
             exp: row.expires_at,
             jti: jti_bytes,
         };
-        let token = sign_token(&payload, &key).map_err(|_| {
-            ShareServiceError::Upstream("payload encode failed".into())
-        })?;
+        let token = sign_token(&payload, &key)
+            .map_err(|_| ShareServiceError::Upstream("payload encode failed".into()))?;
         Ok(Some(super::build_url(self.apex.as_deref(), &token)))
     }
 

@@ -11,12 +11,12 @@
 //! path and the OS may treat them surprisingly.
 
 use axum::{
+    Router,
     body::Body,
     extract::Request,
-    http::{header, HeaderValue, StatusCode},
+    http::{HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
     routing::get,
-    Router,
 };
 
 use super::assets;
@@ -26,7 +26,9 @@ pub fn router() -> Router {
     // `/assets/<hash>.js`, `/favicon.ico`, etc.  API routes (healthz,
     // /v1/*, /llm/*) are merged at the outer router and win the route
     // match before the fallback fires.
-    Router::new().route("/", get(serve_root)).fallback(serve_fallback)
+    Router::new()
+        .route("/", get(serve_root))
+        .fallback(serve_fallback)
 }
 
 async fn serve_root() -> Response {

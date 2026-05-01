@@ -15,7 +15,7 @@
 //! `cargo build` doesn't grow a third place to update styles when the
 //! brand changes — when it does, this constant moves.
 
-use pulldown_cmark::{html, Options, Parser};
+use pulldown_cmark::{Options, Parser, html};
 
 /// Rough categories — mirrors dyson's `ArtefactKind` enum but lives
 /// here decoupled.  We pick a render strategy off the dyson-emitted
@@ -76,7 +76,9 @@ pub fn render_image_page(title: &str, kind_label: &str, raw_path: &str) -> Strin
         src = escape_attr(raw_path),
         alt = escape_attr(title),
     );
-    wrap_page(title, kind_label, &body, /* is_image = */ true, raw_path)
+    wrap_page(
+        title, kind_label, &body, /* is_image = */ true, raw_path,
+    )
 }
 
 /// Render the public HTML page for a generic file artefact.  Shows a
@@ -92,7 +94,9 @@ pub fn render_download_page(title: &str, kind_label: &str, raw_path: &str) -> St
         kind = escape_text(kind_label),
         href = escape_attr(raw_path),
     );
-    wrap_page(title, kind_label, &body, /* is_image = */ false, raw_path)
+    wrap_page(
+        title, kind_label, &body, /* is_image = */ false, raw_path,
+    )
 }
 
 /// Sanitize pulldown-cmark output against an XSS allowlist.  Image
@@ -109,14 +113,24 @@ fn sanitize_markdown_html(input: &str) -> String {
         .url_schemes(allowed_protocols)
         .link_rel(Some("noopener noreferrer"))
         .add_generic_attributes(["class", "id"])
-        .rm_tags(["img", "object", "embed", "iframe", "form", "input", "button"])
+        .rm_tags([
+            "img", "object", "embed", "iframe", "form", "input", "button",
+        ])
         .clean(input)
         .to_string()
 }
 
 fn wrap_page(title: &str, kind_label: &str, body: &str, is_image: bool, raw_path: &str) -> String {
-    let body_class = if is_image { "share-page is-image" } else { "share-page" };
-    let download_label = if is_image { "Open original" } else { "Download" };
+    let body_class = if is_image {
+        "share-page is-image"
+    } else {
+        "share-page"
+    };
+    let download_label = if is_image {
+        "Open original"
+    } else {
+        "Download"
+    };
     let download_link = if raw_path.is_empty() {
         String::new()
     } else {

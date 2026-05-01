@@ -16,13 +16,15 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use axum::http::HeaderMap;
-use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
+use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
 use tokio::sync::Mutex;
 
-use crate::auth::{extract_bearer, looks_like_jwt, AuthError, AuthSource, Authenticator, UserIdentity};
+use crate::auth::{
+    AuthError, AuthSource, Authenticator, UserIdentity, extract_bearer, looks_like_jwt,
+};
 
 #[derive(Debug, Clone)]
 pub struct OidcConfig {
@@ -198,8 +200,8 @@ impl Authenticator for OidcAuthenticator {
         if !looks_like_jwt(&token) {
             return Err(AuthError::Unsupported);
         }
-        let header = decode_header(&token)
-            .map_err(|e| AuthError::Invalid(format!("bad header: {e}")))?;
+        let header =
+            decode_header(&token).map_err(|e| AuthError::Invalid(format!("bad header: {e}")))?;
         let kid = header
             .kid
             .ok_or_else(|| AuthError::Invalid("missing kid".into()))?;
@@ -210,11 +212,16 @@ impl Authenticator for OidcAuthenticator {
             // (Auth0 custom domains, mismatched API identifiers, etc.).
             // We re-decode without verification just to read the claims;
             // the original error from the verifier is what we propagate.
-            if let Ok(unverified) =
-                jsonwebtoken::dangerous::insecure_decode::<JsonValue>(&token)
-            {
-                let iss = unverified.claims.get("iss").and_then(|v| v.as_str()).unwrap_or("?");
-                let aud = unverified.claims.get("aud").map_or_else(|| "?".into(), std::string::ToString::to_string);
+            if let Ok(unverified) = jsonwebtoken::dangerous::insecure_decode::<JsonValue>(&token) {
+                let iss = unverified
+                    .claims
+                    .get("iss")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                let aud = unverified
+                    .claims
+                    .get("aud")
+                    .map_or_else(|| "?".into(), std::string::ToString::to_string);
                 tracing::debug!(
                     error = %e,
                     token_iss = %iss,
@@ -276,10 +283,10 @@ mod tests {
     use axum::http::HeaderValue;
     use axum::routing::get;
     use axum::{Json, Router};
-    use jsonwebtoken::{encode, EncodingKey, Header};
+    use jsonwebtoken::{EncodingKey, Header, encode};
+    use rsa::RsaPrivateKey;
     use rsa::pkcs1::EncodeRsaPrivateKey;
     use rsa::traits::PublicKeyParts;
-    use rsa::RsaPrivateKey;
     use serde::Serialize;
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -337,7 +344,7 @@ mod tests {
         let kid_for_state = kid.clone();
         let calls_for_state = jwks_calls.clone();
 
-#[derive(Clone)]
+        #[derive(Clone)]
         struct DiscoveryState {
             issuer: String,
             jwks_calls: Arc<AtomicU32>,

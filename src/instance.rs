@@ -28,8 +28,18 @@ fn auth_shape_matches(prev: &McpAuthSpec, next: &McpAuthSpec) -> bool {
         (None, None) => true,
         (Bearer { .. }, Bearer { .. }) => true,
         (
-            Oauth { scopes: a_s, authorization_url: a_a, token_url: a_t, .. },
-            Oauth { scopes: b_s, authorization_url: b_a, token_url: b_t, .. },
+            Oauth {
+                scopes: a_s,
+                authorization_url: a_a,
+                token_url: a_t,
+                ..
+            },
+            Oauth {
+                scopes: b_s,
+                authorization_url: b_a,
+                token_url: b_t,
+                ..
+            },
         ) => a_s == b_s && a_a == b_a && a_t == b_t,
         _ => false,
     }
@@ -58,8 +68,14 @@ fn keep_existing_secrets(prev: &McpAuthSpec, next: &mut McpAuthSpec) {
             }
         }
         (
-            Oauth { client_secret: Some(prev_cs), .. },
-            Oauth { client_secret: Some(next_cs), .. },
+            Oauth {
+                client_secret: Some(prev_cs),
+                ..
+            },
+            Oauth {
+                client_secret: Some(next_cs),
+                ..
+            },
         ) => {
             if next_cs == MCP_KEEP_TOKEN {
                 *next_cs = prev_cs.clone();
@@ -70,7 +86,7 @@ fn keep_existing_secrets(prev: &McpAuthSpec, next: &mut McpAuthSpec) {
 }
 use crate::network_policy::{self, DnsHostResolver, HostResolver, NetworkPolicy};
 use crate::now_secs;
-use crate::secrets::{compose_env, UserSecretsService};
+use crate::secrets::{UserSecretsService, compose_env};
 use crate::traits::{
     CreateSandboxArgs, CubeClient, HealthProber, InstanceRow, InstanceStatus, InstanceStore,
     ListFilter, ProbeResult, SecretStore, TokenStore,
@@ -296,11 +312,7 @@ pub trait DysonReconfigurer: Send + Sync {
     /// `Ok((true, 0))` so test mocks that only exercise `push`
     /// continue to compile — production overrides on
     /// `DysonReconfigurerHttp`.
-    async fn is_idle(
-        &self,
-        _instance_id: &str,
-        _sandbox_id: &str,
-    ) -> Result<(bool, u32), String> {
+    async fn is_idle(&self, _instance_id: &str, _sandbox_id: &str) -> Result<(bool, u32), String> {
         Ok((true, 0))
     }
 
@@ -308,11 +320,7 @@ pub trait DysonReconfigurer: Send + Sync {
     /// nothing is in flight.  Returns `Ok(true)` on success, `Ok(false)`
     /// if dyson is busy (caller retries later).  Default impl is a
     /// no-op success so unrelated tests don't have to plumb it.
-    async fn quiesce(
-        &self,
-        _instance_id: &str,
-        _sandbox_id: &str,
-    ) -> Result<bool, String> {
+    async fn quiesce(&self, _instance_id: &str, _sandbox_id: &str) -> Result<bool, String> {
         Ok(true)
     }
 
@@ -320,11 +328,7 @@ pub trait DysonReconfigurer: Send + Sync {
     /// attempt aborts AFTER quiesce succeeded so the user's chat
     /// resumes on the original cube instead of being wedged behind
     /// 503.  Default no-op.
-    async fn unquiesce(
-        &self,
-        _instance_id: &str,
-        _sandbox_id: &str,
-    ) -> Result<(), String> {
+    async fn unquiesce(&self, _instance_id: &str, _sandbox_id: &str) -> Result<(), String> {
         Ok(())
     }
 }
@@ -636,10 +640,13 @@ impl InstanceService {
         };
         let live = self
             .instances
-            .list(SYSTEM_OWNER, ListFilter {
-                status: Some(InstanceStatus::Live),
-                include_destroyed: false,
-            })
+            .list(
+                SYSTEM_OWNER,
+                ListFilter {
+                    status: Some(InstanceStatus::Live),
+                    include_destroyed: false,
+                },
+            )
             .await?;
         let mut succeeded = 0usize;
         for row in &live {
@@ -693,10 +700,13 @@ impl InstanceService {
         let proxy_base = self.image_proxy_base();
         let live = self
             .instances
-            .list(SYSTEM_OWNER, ListFilter {
-                status: Some(InstanceStatus::Live),
-                include_destroyed: false,
-            })
+            .list(
+                SYSTEM_OWNER,
+                ListFilter {
+                    status: Some(InstanceStatus::Live),
+                    include_destroyed: false,
+                },
+            )
             .await?;
         let mut succeeded = 0usize;
         for row in &live {
@@ -735,26 +745,26 @@ impl InstanceService {
             // no attached MCP servers and no mcp_secrets store is
             // configured, this stays None and the dyson handler skips
             // the patch.
-            let mcp_servers = self
-                .mcp_secrets
-                .as_ref()
-                .map(|secrets| async {
-                    match mcp_servers::list_names(secrets, &row.owner_id, &row.id).await {
-                        Ok(names) if !names.is_empty() => {
-                            let mut block = serde_json::Map::with_capacity(names.len());
-                            for name in names {
-                                block.insert(
-                                    name.clone(),
-                                    mcp_servers::dyson_json_block(
-                                        &row.id, &name, &self.proxy_base, &token,
-                                    ),
-                                );
-                            }
-                            Some(block)
+            let mcp_servers = self.mcp_secrets.as_ref().map(|secrets| async {
+                match mcp_servers::list_names(secrets, &row.owner_id, &row.id).await {
+                    Ok(names) if !names.is_empty() => {
+                        let mut block = serde_json::Map::with_capacity(names.len());
+                        for name in names {
+                            block.insert(
+                                name.clone(),
+                                mcp_servers::dyson_json_block(
+                                    &row.id,
+                                    &name,
+                                    &self.proxy_base,
+                                    &token,
+                                ),
+                            );
                         }
-                        _ => None,
+                        Some(block)
                     }
-                });
+                    _ => None,
+                }
+            });
             let mcp_servers = match mcp_servers {
                 Some(fut) => fut.await,
                 None => None,
@@ -837,10 +847,13 @@ impl InstanceService {
         }
         let live = self
             .instances
-            .list(SYSTEM_OWNER, ListFilter {
-                status: Some(InstanceStatus::Live),
-                include_destroyed: false,
-            })
+            .list(
+                SYSTEM_OWNER,
+                ListFilter {
+                    status: Some(InstanceStatus::Live),
+                    include_destroyed: false,
+                },
+            )
             .await?;
         let mut report = RotateReport::default();
         for row in live {
@@ -1020,12 +1033,9 @@ impl InstanceService {
         // Pick the policy: caller override or the row's existing one.
         // Validate before snapshotting — bad input must fail fast.
         let target_policy = new_network_policy.unwrap_or(source.network_policy.clone());
-        let resolved = network_policy::resolve(
-            &target_policy,
-            self.llm_cidr.as_deref(),
-            &*self.resolver,
-        )
-        .await?;
+        let resolved =
+            network_policy::resolve(&target_policy, self.llm_cidr.as_deref(), &*self.resolver)
+                .await?;
 
         let no_op_template = source.template_id == new_template_id;
         let no_op_policy = source.network_policy == target_policy;
@@ -1290,10 +1300,7 @@ impl InstanceService {
                     .image_gen_defaults
                     .as_ref()
                     .map(|d| d.provider_name.clone()),
-                image_generation_model: self
-                    .image_gen_defaults
-                    .as_ref()
-                    .map(|d| d.model.clone()),
+                image_generation_model: self.image_gen_defaults.as_ref().map(|d| d.model.clone()),
                 reset_skills: source.tools.is_empty(),
                 tools: (!source.tools.is_empty()).then(|| source.tools.clone()),
                 mcp_servers: None,
@@ -1380,12 +1387,9 @@ impl InstanceService {
             })?
             .to_owned();
         let target_policy = new_network_policy.unwrap_or(source.network_policy.clone());
-        let resolved = network_policy::resolve(
-            &target_policy,
-            self.llm_cidr.as_deref(),
-            &*self.resolver,
-        )
-        .await?;
+        let resolved =
+            network_policy::resolve(&target_policy, self.llm_cidr.as_deref(), &*self.resolver)
+                .await?;
 
         tracing::warn!(
             instance = %source.id,
@@ -1474,10 +1478,7 @@ impl InstanceService {
                     .image_gen_defaults
                     .as_ref()
                     .map(|d| d.provider_name.clone()),
-                image_generation_model: self
-                    .image_gen_defaults
-                    .as_ref()
-                    .map(|d| d.model.clone()),
+                image_generation_model: self.image_gen_defaults.as_ref().map(|d| d.model.clone()),
                 reset_skills: source.tools.is_empty(),
                 tools: (!source.tools.is_empty()).then(|| source.tools.clone()),
                 mcp_servers: None,
@@ -1802,7 +1803,12 @@ impl InstanceService {
         let mut models: Vec<String> = req
             .env
             .get(ENV_MODELS)
-            .map(|s| s.split(',').map(|m| m.trim().to_owned()).filter(|m| !m.is_empty()).collect())
+            .map(|s| {
+                s.split(',')
+                    .map(|m| m.trim().to_owned())
+                    .filter(|m| !m.is_empty())
+                    .collect()
+            })
             .unwrap_or_default();
         if models.is_empty()
             && let Some(m) = req.env.get(ENV_MODEL).map(|s| s.trim().to_owned())
@@ -1818,7 +1824,12 @@ impl InstanceService {
         let tools: Vec<String> = req
             .env
             .get(ENV_TOOLS)
-            .map(|s| s.split(',').map(|m| m.trim().to_owned()).filter(|m| !m.is_empty()).collect())
+            .map(|s| {
+                s.split(',')
+                    .map(|m| m.trim().to_owned())
+                    .filter(|m| !m.is_empty())
+                    .collect()
+            })
             .unwrap_or_default();
 
         // Insert the instance row first so the FK target exists; mint the
@@ -1990,10 +2001,7 @@ impl InstanceService {
                     .image_gen_defaults
                     .as_ref()
                     .map(|d| d.provider_name.clone()),
-                image_generation_model: self
-                    .image_gen_defaults
-                    .as_ref()
-                    .map(|d| d.model.clone()),
+                image_generation_model: self.image_gen_defaults.as_ref().map(|d| d.model.clone()),
                 // Belt-and-braces: the new dyson swarm boot writer
                 // already honors SWARM_TOOLS, but creates that ride an
                 // older binary template ship a stale skills block.
@@ -2137,7 +2145,9 @@ impl InstanceService {
         name: &str,
         task: &str,
     ) -> Result<InstanceRow, SwarmError> {
-        self.instances.update_identity(owner_id, id, name, task).await?;
+        self.instances
+            .update_identity(owner_id, id, name, task)
+            .await?;
         let row = self
             .instances
             .get_for_owner(owner_id, id)
@@ -2190,11 +2200,7 @@ impl InstanceService {
     /// - `PolicyDenied` when reconfigurer / mcp_secrets isn't configured
     ///   (test/local-dev), the instance has no live sandbox, or no
     ///   active proxy_token (pre-Stage-8 instances).
-    pub async fn sync_mcp_to_dyson(
-        &self,
-        owner_id: &str,
-        id: &str,
-    ) -> Result<(), SwarmError> {
+    pub async fn sync_mcp_to_dyson(&self, owner_id: &str, id: &str) -> Result<(), SwarmError> {
         let row = self
             .instances
             .get_for_owner(owner_id, id)
@@ -2207,21 +2213,17 @@ impl InstanceService {
             .ok_or_else(|| {
                 SwarmError::PolicyDenied("instance has no live sandbox to reconfigure".into())
             })?;
-        let r = self.reconfigurer.as_ref().ok_or_else(|| {
-            SwarmError::PolicyDenied("dyson reconfigurer not configured".into())
+        let r = self
+            .reconfigurer
+            .as_ref()
+            .ok_or_else(|| SwarmError::PolicyDenied("dyson reconfigurer not configured".into()))?;
+        let secrets = self
+            .mcp_secrets
+            .as_ref()
+            .ok_or_else(|| SwarmError::PolicyDenied("mcp secrets store not configured".into()))?;
+        let proxy_token = self.tokens.lookup_by_instance(id).await?.ok_or_else(|| {
+            SwarmError::PolicyDenied("instance has no active proxy_token (pre-Stage-8 row)".into())
         })?;
-        let secrets = self.mcp_secrets.as_ref().ok_or_else(|| {
-            SwarmError::PolicyDenied("mcp secrets store not configured".into())
-        })?;
-        let proxy_token = self
-            .tokens
-            .lookup_by_instance(id)
-            .await?
-            .ok_or_else(|| {
-                SwarmError::PolicyDenied(
-                    "instance has no active proxy_token (pre-Stage-8 row)".into(),
-                )
-            })?;
 
         let names = mcp_servers::list_names(secrets, owner_id, id)
             .await
@@ -2270,10 +2272,16 @@ impl InstanceService {
             .get_for_owner(owner_id, id)
             .await?
             .ok_or(SwarmError::NotFound)?;
-        let secrets = self.mcp_secrets.as_ref().ok_or_else(|| {
-            SwarmError::PolicyDenied("mcp secrets store not configured".into())
-        })?;
-        let McpServerSpec { name, url, mut auth, enabled_tools } = spec;
+        let secrets = self
+            .mcp_secrets
+            .as_ref()
+            .ok_or_else(|| SwarmError::PolicyDenied("mcp secrets store not configured".into()))?;
+        let McpServerSpec {
+            name,
+            url,
+            mut auth,
+            enabled_tools,
+        } = spec;
         if name.trim().is_empty() {
             return Err(SwarmError::BadRequest("server name is required".into()));
         }
@@ -2328,9 +2336,8 @@ impl InstanceService {
             // put_all rewrites the whole index.  Pass empty specs so we
             // don't rewrite each server's blob (already sealed above);
             // we just need the index touched.
-            let idx = serde_json::to_vec(&names).map_err(|e| {
-                SwarmError::Internal(format!("mcp index serialise: {e}"))
-            })?;
+            let idx = serde_json::to_vec(&names)
+                .map_err(|e| SwarmError::Internal(format!("mcp index serialise: {e}")))?;
             // Direct index rewrite — same shape mcp_servers::put_all uses.
             secrets
                 .put(owner_id, &mcp_servers::index_key(id), &idx)
@@ -2361,11 +2368,15 @@ impl InstanceService {
             .get_for_owner(owner_id, id)
             .await?
             .ok_or(SwarmError::NotFound)?;
-        let secrets = self.mcp_secrets.as_ref().ok_or_else(|| {
-            SwarmError::PolicyDenied("mcp secrets store not configured".into())
-        })?;
+        let secrets = self
+            .mcp_secrets
+            .as_ref()
+            .ok_or_else(|| SwarmError::PolicyDenied("mcp secrets store not configured".into()))?;
         // Idempotent: a delete on a missing entry just returns Ok.
-        if let Err(err) = secrets.delete(owner_id, &mcp_servers::entry_key(id, name)).await {
+        if let Err(err) = secrets
+            .delete(owner_id, &mcp_servers::entry_key(id, name))
+            .await
+        {
             tracing::warn!(error = %err, instance = %id, server = %name, "mcp delete: row delete failed");
         }
         let names: Vec<String> = mcp_servers::list_names(secrets, owner_id, id)
@@ -2379,9 +2390,8 @@ impl InstanceService {
             // tidy when the user clears every MCP server.
             let _ = secrets.delete(owner_id, &mcp_servers::index_key(id)).await;
         } else {
-            let idx = serde_json::to_vec(&names).map_err(|e| {
-                SwarmError::Internal(format!("mcp index serialise: {e}"))
-            })?;
+            let idx = serde_json::to_vec(&names)
+                .map_err(|e| SwarmError::Internal(format!("mcp index serialise: {e}")))?;
             secrets
                 .put(owner_id, &mcp_servers::index_key(id), &idx)
                 .await
@@ -2408,9 +2418,10 @@ impl InstanceService {
             .get_for_owner(owner_id, id)
             .await?
             .ok_or(SwarmError::NotFound)?;
-        let secrets = self.mcp_secrets.as_ref().ok_or_else(|| {
-            SwarmError::PolicyDenied("mcp secrets store not configured".into())
-        })?;
+        let secrets = self
+            .mcp_secrets
+            .as_ref()
+            .ok_or_else(|| SwarmError::PolicyDenied("mcp secrets store not configured".into()))?;
         let mut entry = mcp_servers::get(secrets, owner_id, id, name)
             .await
             .map_err(|e| SwarmError::Internal(format!("mcp get: {e}")))?
@@ -2447,9 +2458,10 @@ impl InstanceService {
             .ok_or_else(|| {
                 SwarmError::PolicyDenied("instance has no live sandbox to reconfigure".into())
             })?;
-        let r = self.reconfigurer.as_ref().ok_or_else(|| {
-            SwarmError::PolicyDenied("dyson reconfigurer not configured".into())
-        })?;
+        let r = self
+            .reconfigurer
+            .as_ref()
+            .ok_or_else(|| SwarmError::PolicyDenied("dyson reconfigurer not configured".into()))?;
         let body = ReconfigureBody {
             name: None,
             task: None,
@@ -2497,9 +2509,10 @@ impl InstanceService {
             .ok_or_else(|| {
                 SwarmError::PolicyDenied("instance has no live sandbox to reconfigure".into())
             })?;
-        let r = self.reconfigurer.as_ref().ok_or_else(|| {
-            SwarmError::PolicyDenied("dyson reconfigurer not configured".into())
-        })?;
+        let r = self
+            .reconfigurer
+            .as_ref()
+            .ok_or_else(|| SwarmError::PolicyDenied("dyson reconfigurer not configured".into()))?;
         // Empty list = "use dyson defaults" (per PatchInstanceBody
         // docstring).  Map it to `reset_skills: true, tools: None` so
         // the loader's no-skills-block branch fires and every builtin
@@ -2841,10 +2854,7 @@ mod tests {
 
     #[async_trait]
     impl CubeClient for MockCube {
-        async fn create_sandbox(
-            &self,
-            args: CreateSandboxArgs,
-        ) -> Result<SandboxInfo, CubeError> {
+        async fn create_sandbox(&self, args: CreateSandboxArgs) -> Result<SandboxInfo, CubeError> {
             let mut n = self.next_sandbox_id.lock().unwrap();
             *n += 1;
             let sid = format!("sb-{}", *n);
@@ -2944,21 +2954,27 @@ mod tests {
     async fn create_with_name_and_task_stamps_row_and_env() {
         let (svc, cube, _tokens, _secrets, instances) = build().await;
         let created = svc
-            .create("legacy", CreateRequest {
-                template_id: "tpl".into(),
-                name: Some("PR reviewer".into()),
-                task: Some("Watch foo/bar PRs and comment on style".into()),
-                env: env_with_model(),
-                ttl_seconds: None,
-                network_policy: NetworkPolicy::default(),
-                mcp_servers: Vec::new(),
-            })
+            .create(
+                "legacy",
+                CreateRequest {
+                    template_id: "tpl".into(),
+                    name: Some("PR reviewer".into()),
+                    task: Some("Watch foo/bar PRs and comment on style".into()),
+                    env: env_with_model(),
+                    ttl_seconds: None,
+                    network_policy: NetworkPolicy::default(),
+                    mcp_servers: Vec::new(),
+                },
+            )
             .await
             .unwrap();
 
         let captured = cube.last_create();
         assert_eq!(captured.env[ENV_NAME], "PR reviewer");
-        assert_eq!(captured.env[ENV_TASK], "Watch foo/bar PRs and comment on style");
+        assert_eq!(
+            captured.env[ENV_TASK],
+            "Watch foo/bar PRs and comment on style"
+        );
 
         let row = instances.get(&created.id).await.unwrap().unwrap();
         assert_eq!(row.name, "PR reviewer");
@@ -2973,19 +2989,25 @@ mod tests {
         // env snapshot still has the original (empty) values.
         let (svc, cube, _tokens, _secrets, _instances) = build().await;
         let created = svc
-            .create("legacy", CreateRequest {
-                template_id: "tpl".into(),
-                name: None,
-                task: None,
-                env: env_with_model(),
-                ttl_seconds: None,
-                network_policy: NetworkPolicy::default(),
-                mcp_servers: Vec::new(),
-            })
+            .create(
+                "legacy",
+                CreateRequest {
+                    template_id: "tpl".into(),
+                    name: None,
+                    task: None,
+                    env: env_with_model(),
+                    ttl_seconds: None,
+                    network_policy: NetworkPolicy::default(),
+                    mcp_servers: Vec::new(),
+                },
+            )
             .await
             .unwrap();
 
-        let renamed = svc.rename("legacy", &created.id, "renamed", "new task").await.unwrap();
+        let renamed = svc
+            .rename("legacy", &created.id, "renamed", "new task")
+            .await
+            .unwrap();
         assert_eq!(renamed.name, "renamed");
         assert_eq!(renamed.task, "new task");
 
@@ -3002,15 +3024,18 @@ mod tests {
         let mut caller = env_with_model();
         caller.insert("EXTRA".into(), "yes".into());
         let created = svc
-            .create("legacy", CreateRequest {
-                template_id: "tpl-x".into(),
-                name: None,
-                task: None,
-                env: caller,
-                ttl_seconds: Some(60),
-                network_policy: NetworkPolicy::default(),
-                mcp_servers: Vec::new(),
-            })
+            .create(
+                "legacy",
+                CreateRequest {
+                    template_id: "tpl-x".into(),
+                    name: None,
+                    task: None,
+                    env: caller,
+                    ttl_seconds: Some(60),
+                    network_policy: NetworkPolicy::default(),
+                    mcp_servers: Vec::new(),
+                },
+            )
             .await
             .unwrap();
         assert!(created.url.starts_with("https://sb-1."));
@@ -3040,9 +3065,15 @@ mod tests {
         // the chat token's `pt_`) and the URL is derived from the
         // operator's proxy_base (apex + /v1/internal/ingest/artefact).
         let ingest_token = &captured.env[ENV_INGEST_TOKEN];
-        assert!(ingest_token.starts_with("it_"), "ingest env carries an it_ token");
+        assert!(
+            ingest_token.starts_with("it_"),
+            "ingest env carries an it_ token"
+        );
         assert_eq!(ingest_token.len(), 35);
-        assert_eq!(captured.env[ENV_INGEST_URL], "http://swarm.test:8080/v1/internal/ingest/artefact");
+        assert_eq!(
+            captured.env[ENV_INGEST_URL],
+            "http://swarm.test:8080/v1/internal/ingest/artefact"
+        );
         let ingest_resolved = tokens.resolve(ingest_token).await.unwrap().unwrap();
         assert_eq!(ingest_resolved.instance_id, created.id);
         assert_eq!(ingest_resolved.provider, crate::db::tokens::INGEST_PROVIDER);
@@ -3174,7 +3205,10 @@ mod tests {
             &NetworkPolicy::Open,
         );
         assert_eq!(env[ENV_INGEST_TOKEN], "it_ingest");
-        assert_eq!(env[ENV_INGEST_URL], "http://swarm.example/v1/internal/ingest/artefact");
+        assert_eq!(
+            env[ENV_INGEST_URL],
+            "http://swarm.example/v1/internal/ingest/artefact"
+        );
     }
 
     #[test]
@@ -3210,15 +3244,18 @@ mod tests {
         let (svc, cube, _tokens, _secrets, _instances) = build().await;
         let mut caller = env_with_model();
         caller.insert(ENV_PROXY_URL.into(), "http://override".into());
-        svc.create("legacy", CreateRequest {
-            template_id: "tpl".into(),
+        svc.create(
+            "legacy",
+            CreateRequest {
+                template_id: "tpl".into(),
                 name: None,
                 task: None,
-            env: caller,
-            ttl_seconds: None,
-            network_policy: NetworkPolicy::default(),
-            mcp_servers: Vec::new(),
-        })
+                env: caller,
+                ttl_seconds: None,
+                network_policy: NetworkPolicy::default(),
+                mcp_servers: Vec::new(),
+            },
+        )
         .await
         .unwrap();
         let captured = cube.last_create();
@@ -3229,18 +3266,27 @@ mod tests {
     async fn destroy_revokes_proxy_tokens_and_marks_destroyed() {
         let (svc, cube, tokens, _secrets, instances) = build().await;
         let created = svc
-            .create("legacy", CreateRequest {
-                template_id: "tpl".into(),
-                name: None,
-                task: None,
-                env: env_with_model(),
-                ttl_seconds: None,
-                network_policy: NetworkPolicy::default(),
-                mcp_servers: Vec::new(),
-            })
+            .create(
+                "legacy",
+                CreateRequest {
+                    template_id: "tpl".into(),
+                    name: None,
+                    task: None,
+                    env: env_with_model(),
+                    ttl_seconds: None,
+                    network_policy: NetworkPolicy::default(),
+                    mcp_servers: Vec::new(),
+                },
+            )
             .await
             .unwrap();
-        assert!(tokens.resolve(&created.proxy_token).await.unwrap().is_some());
+        assert!(
+            tokens
+                .resolve(&created.proxy_token)
+                .await
+                .unwrap()
+                .is_some()
+        );
         // Pull the ingest token sibling that create() also minted
         // (we don't expose it on CreatedInstance) so we can assert
         // destroy revokes it alongside the chat token.
@@ -3251,7 +3297,13 @@ mod tests {
             .expect("create must mint an ingest token");
 
         svc.destroy("legacy", &created.id, false).await.unwrap();
-        assert!(tokens.resolve(&created.proxy_token).await.unwrap().is_none());
+        assert!(
+            tokens
+                .resolve(&created.proxy_token)
+                .await
+                .unwrap()
+                .is_none()
+        );
         assert!(
             tokens.resolve(&ingest_token).await.unwrap().is_none(),
             "destroy must revoke ingest token alongside chat token",
@@ -3267,7 +3319,10 @@ mod tests {
     #[tokio::test]
     async fn destroy_unknown_returns_not_found() {
         let (svc, _cube, _tokens, _secrets, _instances) = build().await;
-        let err = svc.destroy("legacy", "nope", false).await.expect_err("must error");
+        let err = svc
+            .destroy("legacy", "nope", false)
+            .await
+            .expect_err("must error");
         matches!(err, SwarmError::NotFound);
     }
 
@@ -3281,15 +3336,18 @@ mod tests {
     async fn destroy_force_proceeds_when_cube_errors() {
         let (svc, cube, tokens, _secrets, instances) = build().await;
         let created = svc
-            .create("legacy", CreateRequest {
-                template_id: "tpl".into(),
-                name: None,
-                task: None,
-                env: env_with_model(),
-                ttl_seconds: None,
-                network_policy: NetworkPolicy::default(),
-                mcp_servers: Vec::new(),
-            })
+            .create(
+                "legacy",
+                CreateRequest {
+                    template_id: "tpl".into(),
+                    name: None,
+                    task: None,
+                    env: env_with_model(),
+                    ttl_seconds: None,
+                    network_policy: NetworkPolicy::default(),
+                    mcp_servers: Vec::new(),
+                },
+            )
             .await
             .unwrap();
 
@@ -3303,11 +3361,23 @@ mod tests {
         assert!(matches!(err, SwarmError::Cube(_)));
         let row = instances.get(&created.id).await.unwrap().unwrap();
         assert_eq!(row.status, InstanceStatus::Live);
-        assert!(tokens.resolve(&created.proxy_token).await.unwrap().is_some());
+        assert!(
+            tokens
+                .resolve(&created.proxy_token)
+                .await
+                .unwrap()
+                .is_some()
+        );
 
         // Force path swallows the cube error and reaps DB-side.
         svc.destroy("legacy", &created.id, true).await.unwrap();
-        assert!(tokens.resolve(&created.proxy_token).await.unwrap().is_none());
+        assert!(
+            tokens
+                .resolve(&created.proxy_token)
+                .await
+                .unwrap()
+                .is_none()
+        );
         let row = instances.get(&created.id).await.unwrap().unwrap();
         assert_eq!(row.status, InstanceStatus::Destroyed);
         assert!(row.destroyed_at.is_some());
@@ -3321,32 +3391,38 @@ mod tests {
     async fn restore_carries_existing_secrets_and_uses_snapshot_path() {
         let (svc, cube, _tokens, secrets, _instances) = build().await;
         let src = svc
-            .create("legacy", CreateRequest {
-                template_id: "tpl".into(),
-                name: None,
-                task: None,
-                env: env_with_model(),
-                ttl_seconds: None,
-                network_policy: NetworkPolicy::default(),
-                mcp_servers: Vec::new(),
-            })
+            .create(
+                "legacy",
+                CreateRequest {
+                    template_id: "tpl".into(),
+                    name: None,
+                    task: None,
+                    env: env_with_model(),
+                    ttl_seconds: None,
+                    network_policy: NetworkPolicy::default(),
+                    mcp_servers: Vec::new(),
+                },
+            )
             .await
             .unwrap();
         secrets.put(&src.id, "K", "v-existing").await.unwrap();
 
         let restored = svc
-            .restore("legacy", RestoreRequest {
-                template_id: "tpl".into(),
-                snapshot_path: "/var/snaps/snap-1".into(),
-                source_instance_id: Some(src.id.clone()),
-                name: None,
-                task: None,
-                env: env_with_model(),
-                ttl_seconds: None,
-                network_policy: NetworkPolicy::default(),
-                models: Vec::new(),
-                tools: Vec::new(),
-            })
+            .restore(
+                "legacy",
+                RestoreRequest {
+                    template_id: "tpl".into(),
+                    snapshot_path: "/var/snaps/snap-1".into(),
+                    source_instance_id: Some(src.id.clone()),
+                    name: None,
+                    task: None,
+                    env: env_with_model(),
+                    ttl_seconds: None,
+                    network_policy: NetworkPolicy::default(),
+                    models: Vec::new(),
+                    tools: Vec::new(),
+                },
+            )
             .await
             .unwrap();
         assert_ne!(restored.id, src.id);
@@ -3414,15 +3490,18 @@ mod tests {
         let recorder = Arc::new(RecordingReconfigurer::default());
         let svc = svc.with_reconfigurer(recorder.clone());
 
-        svc.create("legacy", CreateRequest {
-            template_id: "tpl".into(),
-            name: Some("alice".into()),
-            task: Some("review prs".into()),
-            env: env_with_model(),
-            ttl_seconds: None,
-            network_policy: NetworkPolicy::default(),
-            mcp_servers: Vec::new(),
-        })
+        svc.create(
+            "legacy",
+            CreateRequest {
+                template_id: "tpl".into(),
+                name: Some("alice".into()),
+                task: Some("review prs".into()),
+                env: env_with_model(),
+                ttl_seconds: None,
+                network_policy: NetworkPolicy::default(),
+                mcp_servers: Vec::new(),
+            },
+        )
         .await
         .unwrap();
 
@@ -3500,22 +3579,28 @@ mod tests {
         // reused proxy_token authenticates) and the agent fields
         // resolve to that block's name.
         let (svc, _cube, _tokens, _instances, recorder) = build_with_recorder().await;
-        svc.create("legacy", CreateRequest {
-            template_id: "tpl".into(),
-            name: Some("alice".into()),
-            task: Some("review prs".into()),
-            env: env_with_model(),
-            ttl_seconds: None,
-            network_policy: NetworkPolicy::default(),
-            mcp_servers: Vec::new(),
-        })
+        svc.create(
+            "legacy",
+            CreateRequest {
+                template_id: "tpl".into(),
+                name: Some("alice".into()),
+                task: Some("review prs".into()),
+                env: env_with_model(),
+                ttl_seconds: None,
+                network_policy: NetworkPolicy::default(),
+                mcp_servers: Vec::new(),
+            },
+        )
         .await
         .unwrap();
         wait_for_pushes(&recorder, 1).await;
         let pushed = recorder.pushed.lock().unwrap();
         let (_, _, body) = &pushed[0];
 
-        assert_eq!(body.image_provider_name.as_deref(), Some("openrouter-image"));
+        assert_eq!(
+            body.image_provider_name.as_deref(),
+            Some("openrouter-image")
+        );
         assert_eq!(
             body.image_generation_provider.as_deref(),
             Some("openrouter-image"),
@@ -3529,7 +3614,10 @@ mod tests {
             .as_ref()
             .expect("image provider block must be present");
         assert_eq!(block["type"], "openrouter");
-        assert_eq!(block["base_url"], "https://dyson.example.com/llm/openrouter");
+        assert_eq!(
+            block["base_url"],
+            "https://dyson.example.com/llm/openrouter"
+        );
         assert_eq!(block["models"][0], "google/gemini-3-pro-image-preview");
         // The api_key on the image block is the same proxy_token the
         // chat block uses — proves the swarm hop is reused (no second
@@ -3558,12 +3646,9 @@ mod tests {
         //       dyson reloads with MCP wired up on the next turn.
         let pool = crate::db::open_in_memory().await.unwrap();
         let cube = MockCube::new();
-        let tokens: Arc<dyn TokenStore> =
-            Arc::new(SqlxTokenStore::new(pool.clone()));
-        let instances: Arc<dyn InstanceStore> =
-            Arc::new(SqlxInstanceStore::new(pool.clone()));
-        let secrets_store: Arc<dyn SecretStore> =
-            Arc::new(SqlxSecretStore::new(pool.clone()));
+        let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(pool.clone()));
+        let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(pool.clone()));
+        let secrets_store: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
         let recorder = Arc::new(RecordingReconfigurer::default());
         let tmp = tempfile::tempdir().unwrap();
         let dir: Arc<dyn crate::envelope::CipherDirectory> =
@@ -3598,28 +3683,33 @@ mod tests {
         .unwrap();
 
         let created = svc
-            .create(&owner, CreateRequest {
-                template_id: "tpl".into(),
-                name: Some("alice".into()),
-                task: Some("triage".into()),
-                env: env_with_model(),
-                ttl_seconds: None,
-                network_policy: NetworkPolicy::default(),
-                mcp_servers: vec![
-                    crate::mcp_servers::McpServerSpec {
-                        name: "linear".into(),
-                        url: "https://api.linear.app/mcp".into(),
-                        auth: crate::mcp_servers::McpAuthSpec::Bearer { token: "lin_secret".into() },
-                        enabled_tools: None,
-                    },
-                    crate::mcp_servers::McpServerSpec {
-                        name: "no_auth".into(),
-                        url: "https://example/mcp".into(),
-                        auth: crate::mcp_servers::McpAuthSpec::None,
-                        enabled_tools: None,
-                    },
-                ],
-            })
+            .create(
+                &owner,
+                CreateRequest {
+                    template_id: "tpl".into(),
+                    name: Some("alice".into()),
+                    task: Some("triage".into()),
+                    env: env_with_model(),
+                    ttl_seconds: None,
+                    network_policy: NetworkPolicy::default(),
+                    mcp_servers: vec![
+                        crate::mcp_servers::McpServerSpec {
+                            name: "linear".into(),
+                            url: "https://api.linear.app/mcp".into(),
+                            auth: crate::mcp_servers::McpAuthSpec::Bearer {
+                                token: "lin_secret".into(),
+                            },
+                            enabled_tools: None,
+                        },
+                        crate::mcp_servers::McpServerSpec {
+                            name: "no_auth".into(),
+                            url: "https://example/mcp".into(),
+                            auth: crate::mcp_servers::McpAuthSpec::None,
+                            enabled_tools: None,
+                        },
+                    ],
+                },
+            )
             .await
             .unwrap();
 
@@ -3635,15 +3725,14 @@ mod tests {
         let linear = &block["linear"];
         // Origin only — `/llm` is stripped because LLM and MCP mount
         // off the same swarm origin.  See `dyson_json_block`.
-        let expected_url = format!(
-            "https://dyson.example.com/mcp/{}/linear",
-            created.id,
-        );
+        let expected_url = format!("https://dyson.example.com/mcp/{}/linear", created.id,);
         assert_eq!(linear["url"], expected_url);
         let header = linear["headers"]["Authorization"].as_str().unwrap();
         let want_header = format!("Bearer {}", created.proxy_token);
-        assert_eq!(header, want_header,
-            "agent's MCP bearer must equal the per-instance proxy_token");
+        assert_eq!(
+            header, want_header,
+            "agent's MCP bearer must equal the per-instance proxy_token"
+        );
 
         // Persistence: the upstream URL + bearer are sealed in user_secrets.
         let entry = crate::mcp_servers::get(&user_secrets, &owner, &created.id, "linear")
@@ -3653,8 +3742,10 @@ mod tests {
         assert_eq!(entry.url, "https://api.linear.app/mcp");
         match entry.auth {
             crate::mcp_servers::McpAuthSpec::Bearer { token } => {
-                assert_eq!(token, "lin_secret",
-                    "real upstream token round-trips through user_secrets verbatim");
+                assert_eq!(
+                    token, "lin_secret",
+                    "real upstream token round-trips through user_secrets verbatim"
+                );
             }
             other => panic!("expected bearer auth, got {other:?}"),
         }
@@ -3686,18 +3777,27 @@ mod tests {
         wait_for_pushes(&recorder, 1).await;
         recorder.pushed.lock().unwrap().clear();
 
-        svc.put_mcp_server(&owner, &created.id, McpServerSpec {
-            name: "linear".into(),
-            url: "https://api.linear.app/mcp".into(),
-            auth: crate::mcp_servers::McpAuthSpec::Bearer { token: "lin_xxx".into() },
-            enabled_tools: None,
-        })
+        svc.put_mcp_server(
+            &owner,
+            &created.id,
+            McpServerSpec {
+                name: "linear".into(),
+                url: "https://api.linear.app/mcp".into(),
+                auth: crate::mcp_servers::McpAuthSpec::Bearer {
+                    token: "lin_xxx".into(),
+                },
+                enabled_tools: None,
+            },
+        )
         .await
         .unwrap();
         wait_for_pushes(&recorder, 1).await;
         let pushed = recorder.pushed.lock().unwrap();
         let (_, _, body) = pushed.last().unwrap();
-        let block = body.mcp_servers.as_ref().expect("put must push mcp_servers");
+        let block = body
+            .mcp_servers
+            .as_ref()
+            .expect("put must push mcp_servers");
         assert!(block.contains_key("linear"));
 
         // Persistence carried the real upstream + bearer.
@@ -3729,20 +3829,31 @@ mod tests {
         let created = hire_minimal(&svc, &owner).await;
 
         // Initial OAuth server with no tokens yet.
-        svc.put_mcp_server(&owner, &created.id, McpServerSpec {
-            name: "gh".into(),
-            url: "https://gh/mcp".into(),
-            auth: crate::mcp_servers::McpAuthSpec::Oauth {
-                scopes: vec!["read".into()],
-                client_id: None, client_secret: None,
-                authorization_url: None, token_url: None, registration_url: None,
+        svc.put_mcp_server(
+            &owner,
+            &created.id,
+            McpServerSpec {
+                name: "gh".into(),
+                url: "https://gh/mcp".into(),
+                auth: crate::mcp_servers::McpAuthSpec::Oauth {
+                    scopes: vec!["read".into()],
+                    client_id: None,
+                    client_secret: None,
+                    authorization_url: None,
+                    token_url: None,
+                    registration_url: None,
+                },
+                enabled_tools: None,
             },
-            enabled_tools: None,
-        }).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         // Stamp tokens directly (simulates a completed OAuth callback).
         let mut entry = crate::mcp_servers::get(&user_secrets, &owner, &created.id, "gh")
-            .await.unwrap().unwrap();
+            .await
+            .unwrap()
+            .unwrap();
         entry.oauth_tokens = Some(crate::mcp_servers::McpOAuthTokens {
             access_token: "AT".into(),
             refresh_token: Some("RT".into()),
@@ -3751,21 +3862,34 @@ mod tests {
             client_id: "c".into(),
             client_secret: None,
         });
-        crate::mcp_servers::put(&user_secrets, &owner, &created.id, "gh", &entry).await.unwrap();
+        crate::mcp_servers::put(&user_secrets, &owner, &created.id, "gh", &entry)
+            .await
+            .unwrap();
 
         // Edit only the URL — auth shape unchanged.
-        svc.put_mcp_server(&owner, &created.id, McpServerSpec {
-            name: "gh".into(),
-            url: "https://gh-v2/mcp".into(),
-            auth: crate::mcp_servers::McpAuthSpec::Oauth {
-                scopes: vec!["read".into()],
-                client_id: None, client_secret: None,
-                authorization_url: None, token_url: None, registration_url: None,
+        svc.put_mcp_server(
+            &owner,
+            &created.id,
+            McpServerSpec {
+                name: "gh".into(),
+                url: "https://gh-v2/mcp".into(),
+                auth: crate::mcp_servers::McpAuthSpec::Oauth {
+                    scopes: vec!["read".into()],
+                    client_id: None,
+                    client_secret: None,
+                    authorization_url: None,
+                    token_url: None,
+                    registration_url: None,
+                },
+                enabled_tools: None,
             },
-            enabled_tools: None,
-        }).await.unwrap();
+        )
+        .await
+        .unwrap();
         let after = crate::mcp_servers::get(&user_secrets, &owner, &created.id, "gh")
-            .await.unwrap().unwrap();
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(after.url, "https://gh-v2/mcp");
         let tokens = after.oauth_tokens.expect("oauth tokens must be preserved");
         assert_eq!(tokens.access_token, "AT");
@@ -3780,37 +3904,68 @@ mod tests {
             build_with_mcp_secrets().await;
         let created = hire_minimal(&svc, &owner).await;
 
-        svc.put_mcp_server(&owner, &created.id, McpServerSpec {
-            name: "x".into(),
-            url: "https://x/mcp".into(),
-            auth: crate::mcp_servers::McpAuthSpec::Oauth {
-                scopes: vec!["read".into()],
-                client_id: None, client_secret: None,
-                authorization_url: None, token_url: None, registration_url: None,
+        svc.put_mcp_server(
+            &owner,
+            &created.id,
+            McpServerSpec {
+                name: "x".into(),
+                url: "https://x/mcp".into(),
+                auth: crate::mcp_servers::McpAuthSpec::Oauth {
+                    scopes: vec!["read".into()],
+                    client_id: None,
+                    client_secret: None,
+                    authorization_url: None,
+                    token_url: None,
+                    registration_url: None,
+                },
+                enabled_tools: None,
             },
-            enabled_tools: None,
-        }).await.unwrap();
+        )
+        .await
+        .unwrap();
         let mut e = crate::mcp_servers::get(&user_secrets, &owner, &created.id, "x")
-            .await.unwrap().unwrap();
+            .await
+            .unwrap()
+            .unwrap();
         e.oauth_tokens = Some(crate::mcp_servers::McpOAuthTokens {
-            access_token: "old".into(), refresh_token: None, expires_at: None,
-            token_url: "u".into(), client_id: "c".into(), client_secret: None,
+            access_token: "old".into(),
+            refresh_token: None,
+            expires_at: None,
+            token_url: "u".into(),
+            client_id: "c".into(),
+            client_secret: None,
         });
-        crate::mcp_servers::put(&user_secrets, &owner, &created.id, "x", &e).await.unwrap();
+        crate::mcp_servers::put(&user_secrets, &owner, &created.id, "x", &e)
+            .await
+            .unwrap();
 
-        svc.put_mcp_server(&owner, &created.id, McpServerSpec {
-            name: "x".into(),
-            url: "https://x/mcp".into(),
-            auth: crate::mcp_servers::McpAuthSpec::Oauth {
-                scopes: vec!["write".into()],
-                client_id: None, client_secret: None,
-                authorization_url: None, token_url: None, registration_url: None,
+        svc.put_mcp_server(
+            &owner,
+            &created.id,
+            McpServerSpec {
+                name: "x".into(),
+                url: "https://x/mcp".into(),
+                auth: crate::mcp_servers::McpAuthSpec::Oauth {
+                    scopes: vec!["write".into()],
+                    client_id: None,
+                    client_secret: None,
+                    authorization_url: None,
+                    token_url: None,
+                    registration_url: None,
+                },
+                enabled_tools: None,
             },
-            enabled_tools: None,
-        }).await.unwrap();
+        )
+        .await
+        .unwrap();
         let after = crate::mcp_servers::get(&user_secrets, &owner, &created.id, "x")
-            .await.unwrap().unwrap();
-        assert!(after.oauth_tokens.is_none(), "scope change must wipe stale tokens");
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            after.oauth_tokens.is_none(),
+            "scope change must wipe stale tokens"
+        );
     }
 
     #[tokio::test]
@@ -3822,18 +3977,34 @@ mod tests {
             build_with_mcp_secrets().await;
         let created = hire_minimal(&svc, &owner).await;
 
-        svc.put_mcp_server(&owner, &created.id, McpServerSpec {
-            name: "only".into(),
-            url: "https://only/mcp".into(),
-            auth: crate::mcp_servers::McpAuthSpec::None,
-            enabled_tools: None,
-        }).await.unwrap();
-        svc.delete_mcp_server(&owner, &created.id, "only").await.unwrap();
+        svc.put_mcp_server(
+            &owner,
+            &created.id,
+            McpServerSpec {
+                name: "only".into(),
+                url: "https://only/mcp".into(),
+                auth: crate::mcp_servers::McpAuthSpec::None,
+                enabled_tools: None,
+            },
+        )
+        .await
+        .unwrap();
+        svc.delete_mcp_server(&owner, &created.id, "only")
+            .await
+            .unwrap();
 
-        assert!(crate::mcp_servers::get(&user_secrets, &owner, &created.id, "only")
-            .await.unwrap().is_none());
-        assert!(crate::mcp_servers::list_names(&user_secrets, &owner, &created.id)
-            .await.unwrap().is_empty());
+        assert!(
+            crate::mcp_servers::get(&user_secrets, &owner, &created.id, "only")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            crate::mcp_servers::list_names(&user_secrets, &owner, &created.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -3848,14 +4019,23 @@ mod tests {
             build_with_mcp_secrets().await;
         let created = hire_minimal(&svc, &owner).await;
         let other = "feedface".repeat(4);
-        let err = svc.put_mcp_server(&other, &created.id, McpServerSpec {
-            name: "x".into(),
-            url: "https://x/mcp".into(),
-            auth: crate::mcp_servers::McpAuthSpec::None,
-            enabled_tools: None,
-        }).await.unwrap_err();
-        assert!(matches!(err, SwarmError::NotFound),
-            "cross-owner put must surface as NotFound, got {err:?}");
+        let err = svc
+            .put_mcp_server(
+                &other,
+                &created.id,
+                McpServerSpec {
+                    name: "x".into(),
+                    url: "https://x/mcp".into(),
+                    auth: crate::mcp_servers::McpAuthSpec::None,
+                    enabled_tools: None,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, SwarmError::NotFound),
+            "cross-owner put must surface as NotFound, got {err:?}"
+        );
     }
 
     /// Build a service with everything wired (recorder, mcp_secrets, real
@@ -3908,15 +4088,18 @@ mod tests {
     }
 
     async fn hire_minimal(svc: &InstanceService, owner: &str) -> CreatedInstance {
-        svc.create(owner, CreateRequest {
-            template_id: "tpl".into(),
-            name: None,
-            task: None,
-            env: env_with_model(),
-            ttl_seconds: None,
-            network_policy: NetworkPolicy::default(),
-            mcp_servers: Vec::new(),
-        })
+        svc.create(
+            owner,
+            CreateRequest {
+                template_id: "tpl".into(),
+                name: None,
+                task: None,
+                env: env_with_model(),
+                ttl_seconds: None,
+                network_policy: NetworkPolicy::default(),
+                mcp_servers: Vec::new(),
+            },
+        )
         .await
         .unwrap()
     }
@@ -3928,22 +4111,27 @@ mod tests {
         // block alone", so we never accidentally clobber a manually-
         // patched dyson.json when the user hires without MCP.
         let (svc, _cube, _tokens, _instances, recorder) = build_with_recorder().await;
-        svc.create("legacy", CreateRequest {
-            template_id: "tpl".into(),
-            name: None,
-            task: None,
-            env: env_with_model(),
-            ttl_seconds: None,
-            network_policy: NetworkPolicy::default(),
-            mcp_servers: Vec::new(),
-        })
+        svc.create(
+            "legacy",
+            CreateRequest {
+                template_id: "tpl".into(),
+                name: None,
+                task: None,
+                env: env_with_model(),
+                ttl_seconds: None,
+                network_policy: NetworkPolicy::default(),
+                mcp_servers: Vec::new(),
+            },
+        )
         .await
         .unwrap();
         wait_for_pushes(&recorder, 1).await;
         let pushed = recorder.pushed.lock().unwrap();
         let (_, _, body) = &pushed[0];
-        assert!(body.mcp_servers.is_none(),
-            "an empty hire-form mcp_servers must serialise as None, not Some({{}})");
+        assert!(
+            body.mcp_servers.is_none(),
+            "an empty hire-form mcp_servers must serialise as None, not Some({{}})"
+        );
     }
 
     #[tokio::test]
@@ -3955,25 +4143,33 @@ mod tests {
         // (no token row) are skipped silently.
         let (svc, _cube, tokens, _instances, recorder) = build_with_recorder().await;
         let a = svc
-            .create("legacy", CreateRequest {
-                template_id: "tpl".into(),
-                name: None, task: None,
-                env: env_with_model(),
-                ttl_seconds: None,
-                network_policy: NetworkPolicy::default(),
-                mcp_servers: Vec::new(),
-            })
+            .create(
+                "legacy",
+                CreateRequest {
+                    template_id: "tpl".into(),
+                    name: None,
+                    task: None,
+                    env: env_with_model(),
+                    ttl_seconds: None,
+                    network_policy: NetworkPolicy::default(),
+                    mcp_servers: Vec::new(),
+                },
+            )
             .await
             .unwrap();
         let b = svc
-            .create("legacy", CreateRequest {
-                template_id: "tpl".into(),
-                name: None, task: None,
-                env: env_with_model(),
-                ttl_seconds: None,
-                network_policy: NetworkPolicy::default(),
-                mcp_servers: Vec::new(),
-            })
+            .create(
+                "legacy",
+                CreateRequest {
+                    template_id: "tpl".into(),
+                    name: None,
+                    task: None,
+                    env: env_with_model(),
+                    ttl_seconds: None,
+                    network_policy: NetworkPolicy::default(),
+                    mcp_servers: Vec::new(),
+                },
+            )
             .await
             .unwrap();
         wait_for_pushes(&recorder, 2).await;
@@ -3992,14 +4188,15 @@ mod tests {
         assert_eq!(pushed.len(), 2);
         // Map by instance_id for stable assertions regardless of
         // store iteration order.
-        let by_id: std::collections::HashMap<_, _> = pushed
-            .into_iter()
-            .map(|(id, _, body)| (id, body))
-            .collect();
+        let by_id: std::collections::HashMap<_, _> =
+            pushed.into_iter().map(|(id, _, body)| (id, body)).collect();
 
         for (created, expect_token) in [(&a.id, &a.proxy_token), (&b.id, &b.proxy_token)] {
             let body = by_id.get(created).expect("each instance must be visited");
-            assert_eq!(body.image_provider_name.as_deref(), Some("openrouter-image"));
+            assert_eq!(
+                body.image_provider_name.as_deref(),
+                Some("openrouter-image")
+            );
             assert_eq!(
                 body.image_generation_model.as_deref(),
                 Some("google/gemini-3-pro-image-preview"),
@@ -4009,13 +4206,16 @@ mod tests {
             // Sweep pushes ONLY image-gen fields — no chat-side
             // mutation that could clobber a legitimate operator
             // override of dyson.json.
-            assert!(body.proxy_token.is_none(), "sweep must not push proxy_token");
-            assert!(body.proxy_base.is_none(),  "sweep must not push proxy_base");
-            assert!(body.models.is_empty(),     "sweep must not push models");
+            assert!(
+                body.proxy_token.is_none(),
+                "sweep must not push proxy_token"
+            );
+            assert!(body.proxy_base.is_none(), "sweep must not push proxy_base");
+            assert!(body.models.is_empty(), "sweep must not push models");
             // Skills reset rides on every sweep push so toolless
             // instances self-heal whether they were created before
             // or after the boot-writer fix.
-            assert!(body.reset_skills,          "sweep must flip reset_skills");
+            assert!(body.reset_skills, "sweep must flip reset_skills");
         }
         // Verify the token-store reverse lookup returns each token —
         // the sweep depends on this and a regression here would make
@@ -4034,17 +4234,23 @@ mod tests {
         let (svc, _cube, _tokens, _instances, recorder) = build_with_recorder().await;
         // Rebuild the service with image-gen disabled.  The same
         // recorder + stores are reused, so prior creates still count.
-        let pool_svc = std::sync::Arc::try_unwrap(svc).ok().unwrap()
+        let pool_svc = std::sync::Arc::try_unwrap(svc)
+            .ok()
+            .unwrap()
             .with_image_gen_defaults(None);
         let svc = std::sync::Arc::new(pool_svc);
-        svc.create("legacy", CreateRequest {
-            template_id: "tpl".into(),
-            name: None, task: None,
-            env: env_with_model(),
-            ttl_seconds: None,
-            network_policy: NetworkPolicy::default(),
-            mcp_servers: Vec::new(),
-        })
+        svc.create(
+            "legacy",
+            CreateRequest {
+                template_id: "tpl".into(),
+                name: None,
+                task: None,
+                env: env_with_model(),
+                ttl_seconds: None,
+                network_policy: NetworkPolicy::default(),
+                mcp_servers: Vec::new(),
+            },
+        )
         .await
         .unwrap();
         wait_for_pushes(&recorder, 1).await;
@@ -4053,8 +4259,10 @@ mod tests {
         let (visited, succeeded) = svc.rewire_image_generation_all().await.unwrap();
         assert_eq!(visited, 0, "disabled defaults must short-circuit the sweep");
         assert_eq!(succeeded, 0);
-        assert!(recorder.pushed.lock().unwrap().is_empty(),
-            "no pushes should fire when image_gen_defaults is None");
+        assert!(
+            recorder.pushed.lock().unwrap().is_empty(),
+            "no pushes should fire when image_gen_defaults is None"
+        );
     }
 
     // ---- Binary-rotation sweep tests ------------------------------
@@ -4089,20 +4297,19 @@ mod tests {
         let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(pool.clone()));
         let secrets: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
         let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(pool.clone()));
-        let snaps: Arc<dyn SnapshotStore> =
-            Arc::new(SqliteSnapshotStore::new(pool.clone()));
+        let snaps: Arc<dyn SnapshotStore> = Arc::new(SqliteSnapshotStore::new(pool.clone()));
         let recorder = Arc::new(RecordingReconfigurer::default());
         let keys_tmp = tempfile::tempdir().unwrap();
-        let cipher_dir: Arc<dyn crate::envelope::CipherDirectory> = Arc::new(
-            crate::envelope::AgeCipherDirectory::new(keys_tmp.path()).unwrap(),
-        );
+        let cipher_dir: Arc<dyn crate::envelope::CipherDirectory> =
+            Arc::new(crate::envelope::AgeCipherDirectory::new(keys_tmp.path()).unwrap());
         // Leak the tempdir so its lifetime exceeds the test (the
         // CipherDirectory's filesystem reads happen lazily as users
         // are minted, so dropping the dir mid-test would fail those).
         std::mem::forget(keys_tmp);
-        let users: Arc<dyn UserStore> = Arc::new(
-            crate::db::users::SqlxUserStore::new(pool.clone(), cipher_dir),
-        );
+        let users: Arc<dyn UserStore> = Arc::new(crate::db::users::SqlxUserStore::new(
+            pool.clone(),
+            cipher_dir,
+        ));
         let isvc = Arc::new(
             InstanceService::new(
                 cube.clone(),
@@ -4156,14 +4363,9 @@ mod tests {
             &self,
             host: &str,
         ) -> Result<Vec<String>, crate::network_policy::PolicyError> {
-            self.map
-                .lock()
-                .unwrap()
-                .get(host)
-                .cloned()
-                .ok_or_else(|| {
-                    crate::network_policy::PolicyError::HostUnresolvable(host.to_owned())
-                })
+            self.map.lock().unwrap().get(host).cloned().ok_or_else(|| {
+                crate::network_policy::PolicyError::HostUnresolvable(host.to_owned())
+            })
         }
     }
 
@@ -4189,13 +4391,13 @@ mod tests {
         let snaps: Arc<dyn SnapshotStore> = Arc::new(SqliteSnapshotStore::new(pool.clone()));
         let recorder = Arc::new(RecordingReconfigurer::default());
         let keys_tmp = tempfile::tempdir().unwrap();
-        let cipher_dir: Arc<dyn crate::envelope::CipherDirectory> = Arc::new(
-            crate::envelope::AgeCipherDirectory::new(keys_tmp.path()).unwrap(),
-        );
+        let cipher_dir: Arc<dyn crate::envelope::CipherDirectory> =
+            Arc::new(crate::envelope::AgeCipherDirectory::new(keys_tmp.path()).unwrap());
         std::mem::forget(keys_tmp);
-        let users: Arc<dyn UserStore> = Arc::new(
-            crate::db::users::SqlxUserStore::new(pool.clone(), cipher_dir),
-        );
+        let users: Arc<dyn UserStore> = Arc::new(crate::db::users::SqlxUserStore::new(
+            pool.clone(),
+            cipher_dir,
+        ));
         let isvc = Arc::new(
             InstanceService::new(
                 cube.clone(),
@@ -4247,14 +4449,18 @@ mod tests {
         // sweep has nothing to do.  No snapshots, no destroys, no
         // failures: visited=0, rotated=0, failed empty.
         let (isvc, ssvc, cube, _instances, _users, recorder) = build_with_snapshot().await;
-        isvc.create("legacy", CreateRequest {
-            template_id: "tpl-current".into(),
-            name: None, task: None,
-            env: env_with_model(),
-            ttl_seconds: None,
-            network_policy: NetworkPolicy::default(),
-            mcp_servers: Vec::new(),
-        })
+        isvc.create(
+            "legacy",
+            CreateRequest {
+                template_id: "tpl-current".into(),
+                name: None,
+                task: None,
+                env: env_with_model(),
+                ttl_seconds: None,
+                network_policy: NetworkPolicy::default(),
+                mcp_servers: Vec::new(),
+            },
+        )
         .await
         .unwrap();
         wait_for_pushes(&recorder, 1).await;
@@ -4284,27 +4490,33 @@ mod tests {
         //   * Identity (name, task, owner) carries through.
         let (isvc, ssvc, cube, instances, _users, recorder) = build_with_snapshot().await;
         let a = isvc
-            .create("legacy", CreateRequest {
-                template_id: "tpl-old".into(),
-                name: Some("alpha".into()),
-                task: Some("alpha task".into()),
-                env: env_with_model(),
-                ttl_seconds: None,
-                network_policy: NetworkPolicy::default(),
-                mcp_servers: Vec::new(),
-            })
+            .create(
+                "legacy",
+                CreateRequest {
+                    template_id: "tpl-old".into(),
+                    name: Some("alpha".into()),
+                    task: Some("alpha task".into()),
+                    env: env_with_model(),
+                    ttl_seconds: None,
+                    network_policy: NetworkPolicy::default(),
+                    mcp_servers: Vec::new(),
+                },
+            )
             .await
             .unwrap();
         let b = isvc
-            .create("legacy", CreateRequest {
-                template_id: "tpl-old".into(),
-                name: Some("beta".into()),
-                task: Some("beta task".into()),
-                env: env_with_model(),
-                ttl_seconds: None,
-                network_policy: NetworkPolicy::default(),
-                mcp_servers: Vec::new(),
-            })
+            .create(
+                "legacy",
+                CreateRequest {
+                    template_id: "tpl-old".into(),
+                    name: Some("beta".into()),
+                    task: Some("beta task".into()),
+                    env: env_with_model(),
+                    ttl_seconds: None,
+                    network_policy: NetworkPolicy::default(),
+                    mcp_servers: Vec::new(),
+                },
+            )
             .await
             .unwrap();
         wait_for_pushes(&recorder, 2).await;
@@ -4334,8 +4546,11 @@ mod tests {
         assert_eq!(post_b.status, InstanceStatus::Live);
         assert_eq!(post_a.template_id, "tpl-new");
         assert_eq!(post_b.template_id, "tpl-new");
-        assert_ne!(post_a.cube_sandbox_id, Some(old_cube_a),
-            "rotation must spin up a fresh cube; the old sandbox is destroyed");
+        assert_ne!(
+            post_a.cube_sandbox_id,
+            Some(old_cube_a),
+            "rotation must spin up a fresh cube; the old sandbox is destroyed"
+        );
         assert_ne!(post_b.cube_sandbox_id, Some(old_cube_b));
         // Identity carried through.
         assert_eq!(post_a.name, "alpha");
@@ -4355,15 +4570,18 @@ mod tests {
         let (isvc, ssvc, _cube, instances, users, recorder) = build_with_snapshot().await;
         seed_user(&users, "alice").await;
         let src = isvc
-            .create("alice", CreateRequest {
-                template_id: "tpl-old".into(),
-                name: Some("alice's reviewer".into()),
-                task: None,
-                env: env_with_model(),
-                ttl_seconds: None,
-                network_policy: NetworkPolicy::default(),
-                mcp_servers: Vec::new(),
-            })
+            .create(
+                "alice",
+                CreateRequest {
+                    template_id: "tpl-old".into(),
+                    name: Some("alice's reviewer".into()),
+                    task: None,
+                    env: env_with_model(),
+                    ttl_seconds: None,
+                    network_policy: NetworkPolicy::default(),
+                    mcp_servers: Vec::new(),
+                },
+            )
             .await
             .unwrap();
         wait_for_pushes(&recorder, 1).await;
@@ -4408,17 +4626,20 @@ mod tests {
             created_at: 0,
             destroyed_at: None,
             rotated_to: None,
-                network_policy: crate::network_policy::NetworkPolicy::Open,
-                network_policy_cidrs: Vec::new(),
-                models: Vec::new(),
-                tools: Vec::new(),
+            network_policy: crate::network_policy::NetworkPolicy::Open,
+            network_policy_cidrs: Vec::new(),
+            models: Vec::new(),
+            tools: Vec::new(),
         };
         instances.create(row).await.unwrap();
 
         let report = isvc.rotate_binary_all(&ssvc, "tpl-new").await.unwrap();
         assert_eq!(report.visited, 0, "no-cube-sandbox rows are not visited");
         assert_eq!(report.rotated, 0);
-        assert!(report.failed.is_empty(), "pre-Stage-8 skip must not surface as failure");
+        assert!(
+            report.failed.is_empty(),
+            "pre-Stage-8 skip must not surface as failure"
+        );
         assert!(cube.snapshotted.lock().unwrap().is_empty());
         // The row is untouched.
         let still = instances.get("ancient").await.unwrap().unwrap();
@@ -4433,15 +4654,18 @@ mod tests {
         // RotateReport.failed so an operator can pick it up.
         let (isvc, ssvc, cube, instances, _users, recorder) = build_with_snapshot().await;
         let src = isvc
-            .create("legacy", CreateRequest {
-                template_id: "tpl-old".into(),
-                name: None,
-                task: None,
-                env: env_with_model(),
-                ttl_seconds: None,
-                network_policy: NetworkPolicy::default(),
-                mcp_servers: Vec::new(),
-            })
+            .create(
+                "legacy",
+                CreateRequest {
+                    template_id: "tpl-old".into(),
+                    name: None,
+                    task: None,
+                    env: env_with_model(),
+                    ttl_seconds: None,
+                    network_policy: NetworkPolicy::default(),
+                    mcp_servers: Vec::new(),
+                },
+            )
             .await
             .unwrap();
         wait_for_pushes(&recorder, 1).await;
@@ -4472,14 +4696,18 @@ mod tests {
         // proves the flag short-circuits the sweep — the cube mock
         // sees zero snapshot calls because the sweep never fires.
         let (isvc, ssvc, cube, _instances, _users, recorder) = build_with_snapshot().await;
-        isvc.create("legacy", CreateRequest {
-            template_id: "tpl-old".into(),
-            name: None, task: None,
-            env: env_with_model(),
-            ttl_seconds: None,
-            network_policy: NetworkPolicy::default(),
-            mcp_servers: Vec::new(),
-        })
+        isvc.create(
+            "legacy",
+            CreateRequest {
+                template_id: "tpl-old".into(),
+                name: None,
+                task: None,
+                env: env_with_model(),
+                ttl_seconds: None,
+                network_policy: NetworkPolicy::default(),
+                mcp_servers: Vec::new(),
+            },
+        )
         .await
         .unwrap();
         wait_for_pushes(&recorder, 1).await;
@@ -4514,17 +4742,23 @@ mod tests {
         // pre-feature hardcoded body — we don't want a "harmless
         // refactor" to silently change the cube's egress posture for
         // every new instance on every existing deploy.
-        let (isvc, _ssvc, cube, _instances, _users, _recorder) =
-            build_with_snapshot_and_policy(Some("192.168.0.1/32"), Arc::new(PolicyMockResolver::default())).await;
-        isvc.create("legacy", CreateRequest {
-            template_id: "tpl".into(),
-            name: None,
-            task: None,
-            env: env_with_model(),
-            ttl_seconds: None,
-            network_policy: NetworkPolicy::Open,
-            mcp_servers: Vec::new(),
-        })
+        let (isvc, _ssvc, cube, _instances, _users, _recorder) = build_with_snapshot_and_policy(
+            Some("192.168.0.1/32"),
+            Arc::new(PolicyMockResolver::default()),
+        )
+        .await;
+        isvc.create(
+            "legacy",
+            CreateRequest {
+                template_id: "tpl".into(),
+                name: None,
+                task: None,
+                env: env_with_model(),
+                ttl_seconds: None,
+                network_policy: NetworkPolicy::Open,
+                mcp_servers: Vec::new(),
+            },
+        )
         .await
         .unwrap();
         let captured = cube.last_create();
@@ -4548,17 +4782,23 @@ mod tests {
 
     #[tokio::test]
     async fn create_passes_airgap_policy_to_cube() {
-        let (isvc, _ssvc, cube, _instances, _users, _recorder) =
-            build_with_snapshot_and_policy(Some("10.20.30.40/32"), Arc::new(PolicyMockResolver::default())).await;
-        isvc.create("legacy", CreateRequest {
-            template_id: "tpl".into(),
-            name: None,
-            task: None,
-            env: env_with_model(),
-            ttl_seconds: None,
-            network_policy: NetworkPolicy::Airgap,
-            mcp_servers: Vec::new(),
-        })
+        let (isvc, _ssvc, cube, _instances, _users, _recorder) = build_with_snapshot_and_policy(
+            Some("10.20.30.40/32"),
+            Arc::new(PolicyMockResolver::default()),
+        )
+        .await;
+        isvc.create(
+            "legacy",
+            CreateRequest {
+                template_id: "tpl".into(),
+                name: None,
+                task: None,
+                env: env_with_model(),
+                ttl_seconds: None,
+                network_policy: NetworkPolicy::Airgap,
+                mcp_servers: Vec::new(),
+            },
+        )
         .await
         .unwrap();
         let captured = cube.last_create();
@@ -4571,24 +4811,42 @@ mod tests {
         let resolver = PolicyMockResolver::with(&[("github.com", &["140.82.121.4"])]);
         let (isvc, _ssvc, cube, _instances, _users, _recorder) =
             build_with_snapshot_and_policy(Some("10.0.0.1/32"), resolver).await;
-        isvc.create("legacy", CreateRequest {
-            template_id: "tpl".into(),
-            name: None,
-            task: None,
-            env: env_with_model(),
-            ttl_seconds: None,
-            network_policy: NetworkPolicy::Allowlist {
-                entries: vec!["github.com".into(), "8.8.8.8/32".into()],
+        isvc.create(
+            "legacy",
+            CreateRequest {
+                template_id: "tpl".into(),
+                name: None,
+                task: None,
+                env: env_with_model(),
+                ttl_seconds: None,
+                network_policy: NetworkPolicy::Allowlist {
+                    entries: vec!["github.com".into(), "8.8.8.8/32".into()],
+                },
+                mcp_servers: Vec::new(),
             },
-            mcp_servers: Vec::new(),
-        })
+        )
         .await
         .unwrap();
         let captured = cube.last_create();
         assert!(!captured.resolved_policy.allow_internet_access);
-        assert!(captured.resolved_policy.allow_out.contains(&"10.0.0.1/32".to_owned()));
-        assert!(captured.resolved_policy.allow_out.contains(&"140.82.121.4/32".to_owned()));
-        assert!(captured.resolved_policy.allow_out.contains(&"8.8.8.8/32".to_owned()));
+        assert!(
+            captured
+                .resolved_policy
+                .allow_out
+                .contains(&"10.0.0.1/32".to_owned())
+        );
+        assert!(
+            captured
+                .resolved_policy
+                .allow_out
+                .contains(&"140.82.121.4/32".to_owned())
+        );
+        assert!(
+            captured
+                .resolved_policy
+                .allow_out
+                .contains(&"8.8.8.8/32".to_owned())
+        );
     }
 
     #[tokio::test]
@@ -4596,42 +4854,69 @@ mod tests {
         let resolver = PolicyMockResolver::with(&[("evil.example", &["1.2.3.4"])]);
         let (isvc, _ssvc, cube, _instances, _users, _recorder) =
             build_with_snapshot_and_policy(Some("10.0.0.1/32"), resolver).await;
-        isvc.create("legacy", CreateRequest {
-            template_id: "tpl".into(),
-            name: None,
-            task: None,
-            env: env_with_model(),
-            ttl_seconds: None,
-            network_policy: NetworkPolicy::Denylist {
-                entries: vec!["evil.example".into(), "5.6.7.0/24".into()],
-            },
-            mcp_servers: Vec::new(),
-        })
-        .await
-        .unwrap();
-        let captured = cube.last_create();
-        assert!(captured.resolved_policy.allow_internet_access);
-        // Default deny still present.
-        assert!(captured.resolved_policy.deny_out.iter().any(|c| c == "10.0.0.0/8"));
-        // User entries (post-DNS) appended.
-        assert!(captured.resolved_policy.deny_out.iter().any(|c| c == "1.2.3.4/32"));
-        assert!(captured.resolved_policy.deny_out.iter().any(|c| c == "5.6.7.0/24"));
-    }
-
-    #[tokio::test]
-    async fn create_persists_network_policy_on_row() {
-        let (isvc, _ssvc, _cube, instances, _users, _recorder) =
-            build_with_snapshot_and_policy(Some("192.168.0.1/32"), Arc::new(PolicyMockResolver::default())).await;
-        let created = isvc
-            .create("legacy", CreateRequest {
+        isvc.create(
+            "legacy",
+            CreateRequest {
                 template_id: "tpl".into(),
                 name: None,
                 task: None,
                 env: env_with_model(),
                 ttl_seconds: None,
-                network_policy: NetworkPolicy::Airgap,
+                network_policy: NetworkPolicy::Denylist {
+                    entries: vec!["evil.example".into(), "5.6.7.0/24".into()],
+                },
                 mcp_servers: Vec::new(),
-            })
+            },
+        )
+        .await
+        .unwrap();
+        let captured = cube.last_create();
+        assert!(captured.resolved_policy.allow_internet_access);
+        // Default deny still present.
+        assert!(
+            captured
+                .resolved_policy
+                .deny_out
+                .iter()
+                .any(|c| c == "10.0.0.0/8")
+        );
+        // User entries (post-DNS) appended.
+        assert!(
+            captured
+                .resolved_policy
+                .deny_out
+                .iter()
+                .any(|c| c == "1.2.3.4/32")
+        );
+        assert!(
+            captured
+                .resolved_policy
+                .deny_out
+                .iter()
+                .any(|c| c == "5.6.7.0/24")
+        );
+    }
+
+    #[tokio::test]
+    async fn create_persists_network_policy_on_row() {
+        let (isvc, _ssvc, _cube, instances, _users, _recorder) = build_with_snapshot_and_policy(
+            Some("192.168.0.1/32"),
+            Arc::new(PolicyMockResolver::default()),
+        )
+        .await;
+        let created = isvc
+            .create(
+                "legacy",
+                CreateRequest {
+                    template_id: "tpl".into(),
+                    name: None,
+                    task: None,
+                    env: env_with_model(),
+                    ttl_seconds: None,
+                    network_policy: NetworkPolicy::Airgap,
+                    mcp_servers: Vec::new(),
+                },
+            )
             .await
             .unwrap();
         let row = instances.get(&created.id).await.unwrap().unwrap();
@@ -4647,15 +4932,18 @@ mod tests {
         let (isvc, _ssvc, _cube, _instances, _users, _recorder) =
             build_with_snapshot_and_policy(None, Arc::new(PolicyMockResolver::default())).await;
         let err = isvc
-            .create("legacy", CreateRequest {
-                template_id: "tpl".into(),
-                name: None,
-                task: None,
-                env: env_with_model(),
-                ttl_seconds: None,
-                network_policy: NetworkPolicy::Airgap,
-                mcp_servers: Vec::new(),
-            })
+            .create(
+                "legacy",
+                CreateRequest {
+                    template_id: "tpl".into(),
+                    name: None,
+                    task: None,
+                    env: env_with_model(),
+                    ttl_seconds: None,
+                    network_policy: NetworkPolicy::Airgap,
+                    mcp_servers: Vec::new(),
+                },
+            )
             .await
             .unwrap_err();
         assert!(matches!(err, SwarmError::BadRequest(_)));
@@ -4663,20 +4951,26 @@ mod tests {
 
     #[tokio::test]
     async fn create_with_invalid_cidr_returns_bad_request() {
-        let (isvc, _ssvc, _cube, _instances, _users, _recorder) =
-            build_with_snapshot_and_policy(Some("10.0.0.1/32"), Arc::new(PolicyMockResolver::default())).await;
+        let (isvc, _ssvc, _cube, _instances, _users, _recorder) = build_with_snapshot_and_policy(
+            Some("10.0.0.1/32"),
+            Arc::new(PolicyMockResolver::default()),
+        )
+        .await;
         let err = isvc
-            .create("legacy", CreateRequest {
-                template_id: "tpl".into(),
-                name: None,
-                task: None,
-                env: env_with_model(),
-                ttl_seconds: None,
-                network_policy: NetworkPolicy::Allowlist {
-                    entries: vec!["1.2.3.4/99".into()],
+            .create(
+                "legacy",
+                CreateRequest {
+                    template_id: "tpl".into(),
+                    name: None,
+                    task: None,
+                    env: env_with_model(),
+                    ttl_seconds: None,
+                    network_policy: NetworkPolicy::Allowlist {
+                        entries: vec!["1.2.3.4/99".into()],
+                    },
+                    mcp_servers: Vec::new(),
                 },
-                mcp_servers: Vec::new(),
-            })
+            )
             .await
             .unwrap_err();
         assert!(matches!(err, SwarmError::BadRequest(_)));
@@ -4688,18 +4982,24 @@ mod tests {
         // SnapshotService.  The new row + the cube call must inherit
         // the source's policy verbatim — silently widening egress
         // through restore would defeat the whole feature.
-        let (isvc, ssvc, cube, instances, _users, _recorder) =
-            build_with_snapshot_and_policy(Some("10.0.0.1/32"), Arc::new(PolicyMockResolver::default())).await;
+        let (isvc, ssvc, cube, instances, _users, _recorder) = build_with_snapshot_and_policy(
+            Some("10.0.0.1/32"),
+            Arc::new(PolicyMockResolver::default()),
+        )
+        .await;
         let src = isvc
-            .create("legacy", CreateRequest {
-                template_id: "tpl".into(),
-                name: None,
-                task: None,
-                env: env_with_model(),
-                ttl_seconds: None,
-                network_policy: NetworkPolicy::Airgap,
-                mcp_servers: Vec::new(),
-            })
+            .create(
+                "legacy",
+                CreateRequest {
+                    template_id: "tpl".into(),
+                    name: None,
+                    task: None,
+                    env: env_with_model(),
+                    ttl_seconds: None,
+                    network_policy: NetworkPolicy::Airgap,
+                    mcp_servers: Vec::new(),
+                },
+            )
             .await
             .unwrap();
         let snap = ssvc.snapshot("legacy", &src.id).await.unwrap();
@@ -4725,17 +5025,20 @@ mod tests {
         let (isvc, ssvc, cube, instances, _users, _recorder) =
             build_with_snapshot_and_policy(Some("10.0.0.1/32"), resolver).await;
         let src = isvc
-            .create("legacy", CreateRequest {
-                template_id: "tpl-old".into(),
-                name: Some("alpha".into()),
-                task: None,
-                env: env_with_model(),
-                ttl_seconds: None,
-                network_policy: NetworkPolicy::Allowlist {
-                    entries: vec!["example.com".into()],
+            .create(
+                "legacy",
+                CreateRequest {
+                    template_id: "tpl-old".into(),
+                    name: Some("alpha".into()),
+                    task: None,
+                    env: env_with_model(),
+                    ttl_seconds: None,
+                    network_policy: NetworkPolicy::Allowlist {
+                        entries: vec!["example.com".into()],
+                    },
+                    mcp_servers: Vec::new(),
                 },
-                mcp_servers: Vec::new(),
-            })
+            )
             .await
             .unwrap();
 
@@ -4754,7 +5057,12 @@ mod tests {
         // fresh sandbox.  The rotation's resolved policy still
         // carries the LLM CIDR + the hostname's resolved CIDR.
         let captured = cube.last_create();
-        assert!(captured.resolved_policy.allow_out.contains(&"93.184.216.34/32".to_owned()));
+        assert!(
+            captured
+                .resolved_policy
+                .allow_out
+                .contains(&"93.184.216.34/32".to_owned())
+        );
     }
 
     #[tokio::test]
@@ -4767,18 +5075,24 @@ mod tests {
         //   * the row's cube_sandbox_id is fresh (old destroyed).
         //   * the cube saw a second create call carrying the Airgap
         //     resolved policy (single LLM CIDR, no internet).
-        let (isvc, ssvc, cube, instances, _users, _recorder) =
-            build_with_snapshot_and_policy(Some("10.0.0.1/32"), Arc::new(PolicyMockResolver::default())).await;
+        let (isvc, ssvc, cube, instances, _users, _recorder) = build_with_snapshot_and_policy(
+            Some("10.0.0.1/32"),
+            Arc::new(PolicyMockResolver::default()),
+        )
+        .await;
         let src = isvc
-            .create("legacy", CreateRequest {
-                template_id: "tpl".into(),
-                name: Some("alpha".into()),
-                task: None,
-                env: env_with_model(),
-                ttl_seconds: None,
-                network_policy: NetworkPolicy::Open,
-                mcp_servers: Vec::new(),
-            })
+            .create(
+                "legacy",
+                CreateRequest {
+                    template_id: "tpl".into(),
+                    name: Some("alpha".into()),
+                    task: None,
+                    env: env_with_model(),
+                    ttl_seconds: None,
+                    network_policy: NetworkPolicy::Open,
+                    mcp_servers: Vec::new(),
+                },
+            )
             .await
             .unwrap();
         let pre = instances.get(&src.id).await.unwrap().unwrap();
@@ -4809,19 +5123,25 @@ mod tests {
     async fn change_network_preserves_owner_and_identity() {
         // Owner_id, name, task all carried through.  A change-network
         // that re-tenanted the dyson would be a serious bug.
-        let (isvc, ssvc, _cube, instances, users, _recorder) =
-            build_with_snapshot_and_policy(Some("10.0.0.1/32"), Arc::new(PolicyMockResolver::default())).await;
+        let (isvc, ssvc, _cube, instances, users, _recorder) = build_with_snapshot_and_policy(
+            Some("10.0.0.1/32"),
+            Arc::new(PolicyMockResolver::default()),
+        )
+        .await;
         seed_user(&users, "alice").await;
         let src = isvc
-            .create("alice", CreateRequest {
-                template_id: "tpl".into(),
-                name: Some("alice's reviewer".into()),
-                task: Some("review prs".into()),
-                env: env_with_model(),
-                ttl_seconds: None,
-                network_policy: NetworkPolicy::Open,
-                mcp_servers: Vec::new(),
-            })
+            .create(
+                "alice",
+                CreateRequest {
+                    template_id: "tpl".into(),
+                    name: Some("alice's reviewer".into()),
+                    task: Some("review prs".into()),
+                    env: env_with_model(),
+                    ttl_seconds: None,
+                    network_policy: NetworkPolicy::Open,
+                    mcp_servers: Vec::new(),
+                },
+            )
             .await
             .unwrap();
         let new_inst = isvc
@@ -4836,20 +5156,26 @@ mod tests {
 
     #[tokio::test]
     async fn change_network_owner_scoped_returns_not_found_for_wrong_tenant() {
-        let (isvc, ssvc, _cube, _instances, users, _recorder) =
-            build_with_snapshot_and_policy(Some("10.0.0.1/32"), Arc::new(PolicyMockResolver::default())).await;
+        let (isvc, ssvc, _cube, _instances, users, _recorder) = build_with_snapshot_and_policy(
+            Some("10.0.0.1/32"),
+            Arc::new(PolicyMockResolver::default()),
+        )
+        .await;
         seed_user(&users, "alice").await;
         seed_user(&users, "mallory").await;
         let alice_inst = isvc
-            .create("alice", CreateRequest {
-                template_id: "tpl".into(),
-                name: None,
-                task: None,
-                env: env_with_model(),
-                ttl_seconds: None,
-                network_policy: NetworkPolicy::Open,
-                mcp_servers: Vec::new(),
-            })
+            .create(
+                "alice",
+                CreateRequest {
+                    template_id: "tpl".into(),
+                    name: None,
+                    task: None,
+                    env: env_with_model(),
+                    ttl_seconds: None,
+                    network_policy: NetworkPolicy::Open,
+                    mcp_servers: Vec::new(),
+                },
+            )
             .await
             .unwrap();
         let err = isvc
@@ -4864,19 +5190,25 @@ mod tests {
         // SYSTEM_OWNER ("*") is the admin bypass — same precedent as
         // the rotation sweep and the TTL loop.  Lets an admin change
         // a tenant's policy without impersonating them.
-        let (isvc, ssvc, _cube, instances, users, _recorder) =
-            build_with_snapshot_and_policy(Some("10.0.0.1/32"), Arc::new(PolicyMockResolver::default())).await;
+        let (isvc, ssvc, _cube, instances, users, _recorder) = build_with_snapshot_and_policy(
+            Some("10.0.0.1/32"),
+            Arc::new(PolicyMockResolver::default()),
+        )
+        .await;
         seed_user(&users, "alice").await;
         let alice_inst = isvc
-            .create("alice", CreateRequest {
-                template_id: "tpl".into(),
-                name: None,
-                task: None,
-                env: env_with_model(),
-                ttl_seconds: None,
-                network_policy: NetworkPolicy::Open,
-                mcp_servers: Vec::new(),
-            })
+            .create(
+                "alice",
+                CreateRequest {
+                    template_id: "tpl".into(),
+                    name: None,
+                    task: None,
+                    env: env_with_model(),
+                    ttl_seconds: None,
+                    network_policy: NetworkPolicy::Open,
+                    mcp_servers: Vec::new(),
+                },
+            )
             .await
             .unwrap();
         let new_inst = isvc
@@ -4894,18 +5226,24 @@ mod tests {
         // Bad input MUST fail before snapshot + restore + destroy.  A
         // mid-pipeline failure that destroyed the source would lose
         // workspace state.
-        let (isvc, ssvc, cube, instances, _users, _recorder) =
-            build_with_snapshot_and_policy(Some("10.0.0.1/32"), Arc::new(PolicyMockResolver::default())).await;
+        let (isvc, ssvc, cube, instances, _users, _recorder) = build_with_snapshot_and_policy(
+            Some("10.0.0.1/32"),
+            Arc::new(PolicyMockResolver::default()),
+        )
+        .await;
         let src = isvc
-            .create("legacy", CreateRequest {
-                template_id: "tpl".into(),
-                name: None,
-                task: None,
-                env: env_with_model(),
-                ttl_seconds: None,
-                network_policy: NetworkPolicy::Open,
-                mcp_servers: Vec::new(),
-            })
+            .create(
+                "legacy",
+                CreateRequest {
+                    template_id: "tpl".into(),
+                    name: None,
+                    task: None,
+                    env: env_with_model(),
+                    ttl_seconds: None,
+                    network_policy: NetworkPolicy::Open,
+                    mcp_servers: Vec::new(),
+                },
+            )
             .await
             .unwrap();
         let snapshots_before = cube.snapshotted.lock().unwrap().len();
@@ -4935,18 +5273,24 @@ mod tests {
         // Caller asked for the same policy that's already on the
         // row.  Refuse — the SPA should never churn a sandbox for
         // nothing.
-        let (isvc, ssvc, cube, _instances, _users, _recorder) =
-            build_with_snapshot_and_policy(Some("10.0.0.1/32"), Arc::new(PolicyMockResolver::default())).await;
+        let (isvc, ssvc, cube, _instances, _users, _recorder) = build_with_snapshot_and_policy(
+            Some("10.0.0.1/32"),
+            Arc::new(PolicyMockResolver::default()),
+        )
+        .await;
         let src = isvc
-            .create("legacy", CreateRequest {
-                template_id: "tpl".into(),
-                name: None,
-                task: None,
-                env: env_with_model(),
-                ttl_seconds: None,
-                network_policy: NetworkPolicy::Open,
-                mcp_servers: Vec::new(),
-            })
+            .create(
+                "legacy",
+                CreateRequest {
+                    template_id: "tpl".into(),
+                    name: None,
+                    task: None,
+                    env: env_with_model(),
+                    ttl_seconds: None,
+                    network_policy: NetworkPolicy::Open,
+                    mcp_servers: Vec::new(),
+                },
+            )
             .await
             .unwrap();
         let snapshots_before = cube.snapshotted.lock().unwrap().len();
@@ -5017,7 +5361,16 @@ mod tests {
             backup,
             isvc.clone(),
         ));
-        (isvc, ssvc, cube, instances, secrets_store, user_secrets, recorder, owner)
+        (
+            isvc,
+            ssvc,
+            cube,
+            instances,
+            secrets_store,
+            user_secrets,
+            recorder,
+            owner,
+        )
     }
 
     #[tokio::test]
@@ -5030,26 +5383,29 @@ mod tests {
             build_with_snapshot_and_mcp().await;
 
         let src = isvc
-            .create(&owner, CreateRequest {
-                template_id: "tpl-v1".into(),
-                name: Some("axelrod".into()),
-                task: Some("game-theory triage".into()),
-                env: {
-                    let mut m = env_with_model();
-                    m.insert("EXTRA".into(), "x".into());
-                    m
-                },
-                ttl_seconds: None,
-                network_policy: NetworkPolicy::Open,
-                mcp_servers: vec![crate::mcp_servers::McpServerSpec {
-                    name: "linear".into(),
-                    url: "https://api.linear.app/mcp".into(),
-                    auth: crate::mcp_servers::McpAuthSpec::Bearer {
-                        token: "lin_secret".into(),
+            .create(
+                &owner,
+                CreateRequest {
+                    template_id: "tpl-v1".into(),
+                    name: Some("axelrod".into()),
+                    task: Some("game-theory triage".into()),
+                    env: {
+                        let mut m = env_with_model();
+                        m.insert("EXTRA".into(), "x".into());
+                        m
                     },
-                    enabled_tools: None,
-                }],
-            })
+                    ttl_seconds: None,
+                    network_policy: NetworkPolicy::Open,
+                    mcp_servers: vec![crate::mcp_servers::McpServerSpec {
+                        name: "linear".into(),
+                        url: "https://api.linear.app/mcp".into(),
+                        auth: crate::mcp_servers::McpAuthSpec::Bearer {
+                            token: "lin_secret".into(),
+                        },
+                        enabled_tools: None,
+                    }],
+                },
+            )
             .await
             .unwrap();
 
@@ -5057,10 +5413,7 @@ mod tests {
         // The store API takes opaque ciphertext as &str — for this test
         // we don't need real envelope sealing; the carry-over loop just
         // copies whatever bytes are at rest.
-        secrets_store
-            .put(&src.id, "FOO", "bar")
-            .await
-            .unwrap();
+        secrets_store.put(&src.id, "FOO", "bar").await.unwrap();
 
         // Stamp an oauth_tokens blob into the MCP entry so we can
         // prove the active OAuth session survives the clone.
@@ -5155,15 +5508,18 @@ mod tests {
         let (isvc, ssvc, _cube, instances, _secrets, _user_secrets, _recorder, owner) =
             build_with_snapshot_and_mcp().await;
         let src = isvc
-            .create(&owner, CreateRequest {
-                template_id: "tpl".into(),
-                name: None,
-                task: None,
-                env: env_with_model(),
-                ttl_seconds: None,
-                network_policy: NetworkPolicy::default(),
-                mcp_servers: Vec::new(),
-            })
+            .create(
+                &owner,
+                CreateRequest {
+                    template_id: "tpl".into(),
+                    name: None,
+                    task: None,
+                    env: env_with_model(),
+                    ttl_seconds: None,
+                    network_policy: NetworkPolicy::default(),
+                    mcp_servers: Vec::new(),
+                },
+            )
             .await
             .unwrap();
         instances
@@ -5182,15 +5538,18 @@ mod tests {
         let (isvc, ssvc, _cube, _instances, _secrets, _user_secrets, _recorder, owner) =
             build_with_snapshot_and_mcp().await;
         let src = isvc
-            .create(&owner, CreateRequest {
-                template_id: "tpl".into(),
-                name: None,
-                task: None,
-                env: env_with_model(),
-                ttl_seconds: None,
-                network_policy: NetworkPolicy::default(),
-                mcp_servers: Vec::new(),
-            })
+            .create(
+                &owner,
+                CreateRequest {
+                    template_id: "tpl".into(),
+                    name: None,
+                    task: None,
+                    env: env_with_model(),
+                    ttl_seconds: None,
+                    network_policy: NetworkPolicy::default(),
+                    mcp_servers: Vec::new(),
+                },
+            )
             .await
             .unwrap();
         let err = isvc
@@ -5208,28 +5567,28 @@ mod tests {
             build_with_snapshot_and_mcp().await;
 
         let src = isvc
-            .create(&owner, CreateRequest {
-                template_id: "tpl-v1".into(),
-                name: Some("axelrod".into()),
-                task: Some("game-theory triage".into()),
-                env: env_with_model(),
-                ttl_seconds: None,
-                network_policy: NetworkPolicy::Open,
-                mcp_servers: vec![crate::mcp_servers::McpServerSpec {
-                    name: "linear".into(),
-                    url: "https://api.linear.app/mcp".into(),
-                    auth: crate::mcp_servers::McpAuthSpec::Bearer {
-                        token: "lin_secret".into(),
-                    },
-                    enabled_tools: None,
-                }],
-            })
+            .create(
+                &owner,
+                CreateRequest {
+                    template_id: "tpl-v1".into(),
+                    name: Some("axelrod".into()),
+                    task: Some("game-theory triage".into()),
+                    env: env_with_model(),
+                    ttl_seconds: None,
+                    network_policy: NetworkPolicy::Open,
+                    mcp_servers: vec![crate::mcp_servers::McpServerSpec {
+                        name: "linear".into(),
+                        url: "https://api.linear.app/mcp".into(),
+                        auth: crate::mcp_servers::McpAuthSpec::Bearer {
+                            token: "lin_secret".into(),
+                        },
+                        enabled_tools: None,
+                    }],
+                },
+            )
             .await
             .unwrap();
-        secrets_store
-            .put(&src.id, "FOO", "bar")
-            .await
-            .unwrap();
+        secrets_store.put(&src.id, "FOO", "bar").await.unwrap();
         let mcp_entry = crate::mcp_servers::McpServerEntry {
             url: "https://api.linear.app/mcp".into(),
             auth: crate::mcp_servers::McpAuthSpec::Bearer {
@@ -5297,7 +5656,10 @@ mod tests {
             .expect("clone must have a linear MCP entry");
         assert_eq!(cloned_entry.url, "https://api.linear.app/mcp");
         assert_eq!(
-            cloned_entry.oauth_tokens.as_ref().map(|t| t.access_token.as_str()),
+            cloned_entry
+                .oauth_tokens
+                .as_ref()
+                .map(|t| t.access_token.as_str()),
             Some("atk")
         );
 
@@ -5316,7 +5678,11 @@ mod tests {
             .iter()
             .find(|(target_id, _, body)| target_id == &cloned.id && body.mcp_servers.is_some())
             .expect("clone-empty must follow up the create-time push with a configure that includes mcp_servers");
-        let block = mcp_push.2.mcp_servers.as_ref().expect("body must carry mcp_servers");
+        let block = mcp_push
+            .2
+            .mcp_servers
+            .as_ref()
+            .expect("body must carry mcp_servers");
         assert!(
             block.contains_key("linear"),
             "rendered mcp_servers block must include the cloned `linear` server, got keys {:?}",
@@ -5347,15 +5713,18 @@ mod tests {
             build_with_mcp_secrets().await;
 
         let created = svc
-            .create(&owner, CreateRequest {
-                template_id: "tpl".into(),
-                name: Some("axelrod".into()),
-                task: Some("triage".into()),
-                env: env_with_model(),
-                ttl_seconds: None,
-                network_policy: NetworkPolicy::default(),
-                mcp_servers: Vec::new(),
-            })
+            .create(
+                &owner,
+                CreateRequest {
+                    template_id: "tpl".into(),
+                    name: Some("axelrod".into()),
+                    task: Some("triage".into()),
+                    env: env_with_model(),
+                    ttl_seconds: None,
+                    network_policy: NetworkPolicy::default(),
+                    mcp_servers: Vec::new(),
+                },
+            )
             .await
             .unwrap();
         wait_for_pushes(&recorder, 1).await;
@@ -5385,8 +5754,10 @@ mod tests {
         let (target_id, _, body) = pushed.last().unwrap();
         assert_eq!(target_id, &created.id);
         assert_eq!(body.tools.as_deref(), Some(trimmed.as_slice()));
-        assert!(body.name.is_none() && body.task.is_none() && body.models.is_empty(),
-            "tools-only push must not carry identity or models");
+        assert!(
+            body.name.is_none() && body.task.is_none() && body.models.is_empty(),
+            "tools-only push must not carry identity or models"
+        );
 
         // 2. The row's `tools` column reflects the new list, so
         //    GET /v1/instances/:id surfaces the trimmed allowlist
@@ -5408,15 +5779,18 @@ mod tests {
             build_with_mcp_secrets().await;
 
         let created = svc
-            .create(&owner, CreateRequest {
-                template_id: "tpl".into(),
-                name: Some("tars".into()),
-                task: Some("triage".into()),
-                env: env_with_model(),
-                ttl_seconds: None,
-                network_policy: NetworkPolicy::default(),
-                mcp_servers: Vec::new(),
-            })
+            .create(
+                &owner,
+                CreateRequest {
+                    template_id: "tpl".into(),
+                    name: Some("tars".into()),
+                    task: Some("triage".into()),
+                    env: env_with_model(),
+                    ttl_seconds: None,
+                    network_policy: NetworkPolicy::default(),
+                    mcp_servers: Vec::new(),
+                },
+            )
             .await
             .unwrap();
         wait_for_pushes(&recorder, 1).await;

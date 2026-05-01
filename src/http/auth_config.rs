@@ -22,7 +22,7 @@
 //! deployment is functionally equivalent to "no auth path for the UI"
 //! (= `none`).  CLI / curl flows are unaffected.
 
-use axum::{extract::State, routing::get, Json, Router};
+use axum::{Json, Router, extract::State, routing::get};
 use serde::Serialize;
 
 use super::AppState;
@@ -105,7 +105,12 @@ impl AuthConfig {
             },
             None => AuthMode::None,
         };
-        Self { mode, default_template_id, default_models, cube_profiles }
+        Self {
+            mode,
+            default_template_id,
+            default_models,
+            cube_profiles,
+        }
     }
 
     /// Convenience for tests / fallback paths that just need a "no auth"
@@ -121,7 +126,9 @@ impl AuthConfig {
 }
 
 pub fn router(state: AppState) -> Router {
-    Router::new().route("/auth/config", get(handler)).with_state(state)
+    Router::new()
+        .route("/auth/config", get(handler))
+        .with_state(state)
 }
 
 async fn handler(State(state): State<AppState>) -> Json<AuthConfig> {
@@ -167,12 +174,22 @@ mod tests {
         };
         let cfg = AuthConfig::from_toml(Some(&oidc), None, vec![], vec![]);
         match cfg.mode {
-            AuthMode::Oidc { issuer, audience, client_id, required_scopes, admin_claim, admin_role } => {
+            AuthMode::Oidc {
+                issuer,
+                audience,
+                client_id,
+                required_scopes,
+                admin_claim,
+                admin_role,
+            } => {
                 assert_eq!(issuer, "https://idp.example");
                 assert_eq!(audience, "swarm");
                 assert_eq!(client_id, "swarm-spa");
                 assert_eq!(required_scopes, vec!["profile", "email"]);
-                assert!(admin_claim.is_none(), "no [oidc.roles] → no admin claim surfaced");
+                assert!(
+                    admin_claim.is_none(),
+                    "no [oidc.roles] → no admin claim surfaced"
+                );
                 assert!(admin_role.is_none());
             }
             AuthMode::None => panic!("expected oidc mode"),
@@ -195,7 +212,11 @@ mod tests {
         };
         let cfg = AuthConfig::from_toml(Some(&oidc), None, vec![], vec![]);
         match cfg.mode {
-            AuthMode::Oidc { admin_claim, admin_role, .. } => {
+            AuthMode::Oidc {
+                admin_claim,
+                admin_role,
+                ..
+            } => {
                 assert_eq!(admin_claim.as_deref(), Some("permissions"));
                 assert_eq!(admin_role.as_deref(), Some("admin"));
             }
@@ -291,7 +312,9 @@ mod tests {
             ],
         );
         let json = serde_json::to_value(cfg).unwrap();
-        let arr = json["cube_profiles"].as_array().expect("cube_profiles must be an array");
+        let arr = json["cube_profiles"]
+            .as_array()
+            .expect("cube_profiles must be an array");
         assert_eq!(arr.len(), 2);
         assert_eq!(arr[0]["name"], "default");
         assert_eq!(arr[0]["template_id"], "tpl-default");

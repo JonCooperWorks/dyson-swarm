@@ -15,11 +15,11 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use axum::Router;
 use axum::body::Body;
 use axum::extract::{Path, Request, State};
 use axum::http::{HeaderMap, HeaderName, Response, StatusCode, Uri};
 use axum::routing::any;
-use axum::Router;
 use futures::TryStreamExt;
 use serde::Serialize;
 
@@ -27,12 +27,12 @@ use crate::auth::extract_bearer;
 use crate::config::ProviderConfig;
 use crate::now_secs;
 use crate::policy::PolicyDenial;
+use crate::proxy::ProxyService;
 use crate::proxy::adapters::anthropic as anthropic_adapter;
 use crate::proxy::byok::{self, KeySource};
-use crate::proxy::policy_check::{enforce, EnforceContext};
+use crate::proxy::policy_check::{EnforceContext, enforce};
 use crate::proxy::recording_body::RecordingBody;
-use crate::proxy::upstream_policy::{validate_byo_upstream, ByoUpstreamError};
-use crate::proxy::ProxyService;
+use crate::proxy::upstream_policy::{ByoUpstreamError, validate_byo_upstream};
 use crate::traits::{AuditEntry, TokenRecord};
 
 /// Wallclock duration → audit-row millis.  `Duration::as_millis()` returns
@@ -75,9 +75,7 @@ async fn handle(
     let instance_row = match state.instances.get(&record.instance_id).await {
         Ok(Some(r)) => r,
         Ok(None) => return error_response(StatusCode::UNAUTHORIZED, "instance gone"),
-        Err(_) => {
-            return error_response(StatusCode::INTERNAL_SERVER_ERROR, "instance store error")
-        }
+        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "instance store error"),
     };
     let owner_id = instance_row.owner_id;
 
@@ -174,10 +172,7 @@ async fn handle(
                 provider = %provider,
                 "key resolution failed; failing closed",
             );
-            return error_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "no provider key available",
-            );
+            return error_response(StatusCode::SERVICE_UNAVAILABLE, "no provider key available");
         }
     };
     let real_key = resolved.key.clone();
@@ -208,11 +203,7 @@ async fn handle(
         Some(q) => format!("/{rest}?{q}"),
         None => format!("/{rest}"),
     };
-    let upstream_url = format!(
-        "{}{}",
-        upstream_base.trim_end_matches('/'),
-        rest_with_query
-    );
+    let upstream_url = format!("{}{}", upstream_base.trim_end_matches('/'), rest_with_query);
     let mut upstream_uri: Uri = match upstream_url.parse() {
         Ok(u) => u,
         Err(_) => return error_response(StatusCode::BAD_GATEWAY, "bad upstream url"),
@@ -276,7 +267,10 @@ async fn handle(
                     owner_id: owner_id.clone(),
                     instance_id: record.instance_id.clone(),
                     provider: provider.clone(),
-                    model: body_json.get("model").and_then(|v| v.as_str()).map(str::to_owned),
+                    model: body_json
+                        .get("model")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_owned),
                     prompt_tokens: prompt_tokens_in,
                     output_tokens: None,
                     status_code: 502,
@@ -321,7 +315,10 @@ async fn handle(
             owner_id: owner_id.clone(),
             instance_id: record.instance_id.clone(),
             provider: provider.clone(),
-            model: body_json.get("model").and_then(|v| v.as_str()).map(str::to_owned),
+            model: body_json
+                .get("model")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned),
             prompt_tokens: prompt_tokens_in,
             output_tokens: None,
             status_code: i64::from(upstream_status),
@@ -509,11 +506,11 @@ fn estimate_prompt_tokens(body: &serde_json::Value) -> Option<i64> {
 mod tests {
     use super::*;
 
+    use axum::Router as AxRouter;
     use axum::body::Bytes;
     use axum::extract::Path as AxPath;
     use axum::http::HeaderMap as AxHeaderMap;
     use axum::routing::post;
-    use axum::Router as AxRouter;
     use futures::stream;
     use sqlx::SqlitePool;
 
@@ -555,8 +552,8 @@ mod tests {
             .create(InstanceRow {
                 id: id.clone(),
                 owner_id: owner.into(),
-            name: String::new(),
-            task: String::new(),
+                name: String::new(),
+                task: String::new(),
                 cube_sandbox_id: Some("sb-1".into()),
                 template_id: "t".into(),
                 status: InstanceStatus::Live,
@@ -604,7 +601,9 @@ mod tests {
         headers: AxHeaderMap,
         _body: Bytes,
     ) -> Response<Body> {
-        state.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        state
+            .calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         *state.captured_headers.lock().unwrap() = Some(headers);
         let chunks_owned: Vec<Vec<u8>> = state.chunks.iter().cloned().collect();
         let body_stream = stream::iter(
@@ -659,7 +658,11 @@ mod tests {
     /// Build a `ProxyService` whose only configured provider points at
     /// `upstream_url`, with `policy` as the per-instance policy and a stub
     /// API key.
-    fn build_service(pool: SqlitePool, upstream_url: String, policy: InstancePolicy) -> Arc<ProxyService> {
+    fn build_service(
+        pool: SqlitePool,
+        upstream_url: String,
+        policy: InstancePolicy,
+    ) -> Arc<ProxyService> {
         build_service_for(pool, "openai", upstream_url, "sk-real-server", policy)
     }
 
@@ -710,13 +713,8 @@ mod tests {
         policy: InstancePolicy,
     ) -> (Arc<ProxyService>, String, tempfile::TempDir) {
         let (_id, token) = seed_instance_with_token_for(&pool, TEST_OWNER).await;
-        let (svc, user_secrets, keys) = build_service_with_byok(
-            pool,
-            provider,
-            upstream_url,
-            None,
-            policy,
-        );
+        let (svc, user_secrets, keys) =
+            build_service_with_byok(pool, provider, upstream_url, None, policy);
         user_secrets
             .put(TEST_OWNER, &format!("byok_{provider}"), byok_key.as_bytes())
             .await
@@ -811,7 +809,8 @@ mod tests {
             upstream_url,
             "sk-byok-test",
             permissive_policy(),
-        ).await;
+        )
+        .await;
         let proxy_base = spawn_proxy(svc).await;
 
         let client = reqwest::Client::new();
@@ -887,11 +886,10 @@ mod tests {
         assert_eq!(body["code"], "model_not_allowed");
 
         // Audit row written even on denial.
-        let row =
-            sqlx::query("SELECT status_code FROM llm_audit ORDER BY id DESC LIMIT 1")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
+        let row = sqlx::query("SELECT status_code FROM llm_audit ORDER BY id DESC LIMIT 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         let status: i64 = sqlx::Row::try_get(&row, "status_code").unwrap();
         assert_eq!(status, 403);
     }
@@ -923,7 +921,8 @@ mod tests {
             upstream_url,
             "sk-byok-audit",
             permissive_policy(),
-        ).await;
+        )
+        .await;
         // build_byok_seeded uses a fixed instance id (`i-test`) under
         // TEST_OWNER; recover it for the assertion below.
         let id = "i-test".to_string();
@@ -956,8 +955,15 @@ mod tests {
     async fn registry_has_all_adapters() {
         let r = adapters::registry();
         for name in [
-            "openrouter", "openai", "anthropic", "gemini", "ollama",
-            "groq", "deepseek", "xai", "byo",
+            "openrouter",
+            "openai",
+            "anthropic",
+            "gemini",
+            "ollama",
+            "groq",
+            "deepseek",
+            "xai",
+            "byo",
         ] {
             assert!(r.contains_key(name), "missing adapter `{name}`");
         }
@@ -1031,11 +1037,14 @@ mod tests {
             upstream_url.clone(),
             real_key,
             permissive_policy(),
-        ).await;
+        )
+        .await;
         let proxy_base = spawn_proxy(svc).await;
 
         let resp = reqwest::Client::new()
-            .post(format!("{proxy_base}/llm/gemini/v1beta/models/gemini-pro:generateContent"))
+            .post(format!(
+                "{proxy_base}/llm/gemini/v1beta/models/gemini-pro:generateContent"
+            ))
             .bearer_auth(&token)
             .json(&serde_json::json!({"model": "gemini-pro"}))
             .send()
@@ -1061,9 +1070,7 @@ mod tests {
     /// upstream-spy state.  Panics if no request was captured.
     fn captured_auth(captured: &std::sync::Mutex<Option<AxHeaderMap>>) -> String {
         let guard = captured.lock().unwrap();
-        let h = guard
-            .as_ref()
-            .expect("upstream never received a request");
+        let h = guard.as_ref().expect("upstream never received a request");
         h.get(axum::http::header::AUTHORIZATION)
             .map(|v| v.to_str().unwrap().to_owned())
             .unwrap_or_default()
@@ -1213,10 +1220,8 @@ mod tests {
     async fn byo_uses_user_supplied_upstream_and_key() {
         // Two upstreams: A (platform openai) gets nothing; B (byo
         // target) gets the request.
-        let (upstream_a, _capa, calls_a) =
-            spawn_streaming_upstream_full(vec![b"a".to_vec()]).await;
-        let (upstream_b, capb, calls_b) =
-            spawn_streaming_upstream_full(vec![b"b".to_vec()]).await;
+        let (upstream_a, _capa, calls_a) = spawn_streaming_upstream_full(vec![b"a".to_vec()]).await;
+        let (upstream_b, capb, calls_b) = spawn_streaming_upstream_full(vec![b"b".to_vec()]).await;
         let pool = open_in_memory().await.unwrap();
         let (_id, token) = seed_instance_with_token_for(&pool, TEST_OWNER).await;
         // We declare openai's platform stanza pointing at A; byo has
@@ -1254,8 +1259,7 @@ mod tests {
     /// `byo` without a per-user blob → 503; no upstream is contacted.
     #[tokio::test]
     async fn byo_without_blob_returns_503() {
-        let (upstream, _captured, calls) =
-            spawn_streaming_upstream_full(vec![b"x".to_vec()]).await;
+        let (upstream, _captured, calls) = spawn_streaming_upstream_full(vec![b"x".to_vec()]).await;
         let pool = open_in_memory().await.unwrap();
         let (_id, token) = seed_instance_with_token(&pool).await;
         let (svc, _user_secrets, _keys) = build_service_with_byok(
@@ -1338,10 +1342,7 @@ mod tests {
         h.insert("accept-encoding", HeaderValue::from_static("gzip"));
         h.insert("user-agent", HeaderValue::from_static("ua/1"));
         // Stripped — every one of these is a known leak vector.
-        h.insert(
-            "openai-organization",
-            HeaderValue::from_static("org-evil"),
-        );
+        h.insert("openai-organization", HeaderValue::from_static("org-evil"));
         h.insert("cookie", HeaderValue::from_static("sess=abc"));
         h.insert("x-api-key", HeaderValue::from_static("sk-leaked"));
         h.insert(
@@ -1382,10 +1383,7 @@ mod tests {
     fn sanitize_allows_anthropic_version_only_for_anthropic() {
         use axum::http::HeaderValue;
         let mut h = HeaderMap::new();
-        h.insert(
-            "anthropic-version",
-            HeaderValue::from_static("2024-09-01"),
-        );
+        h.insert("anthropic-version", HeaderValue::from_static("2024-09-01"));
         let mut h2 = h.clone();
 
         sanitize_request_headers(&mut h, "anthropic");
@@ -1434,8 +1432,7 @@ mod tests {
     /// adapters.
     #[tokio::test]
     async fn new_provider_groq_round_trips_with_bearer_rewrite() {
-        let (upstream_url, captured, _) =
-            spawn_streaming_upstream_full(vec![b"ok".to_vec()]).await;
+        let (upstream_url, captured, _) = spawn_streaming_upstream_full(vec![b"ok".to_vec()]).await;
         let pool = open_in_memory().await.unwrap();
         let (svc, token, _keys) = build_byok_seeded(
             pool,
@@ -1443,7 +1440,8 @@ mod tests {
             upstream_url,
             "gsk-byok-test",
             permissive_policy(),
-        ).await;
+        )
+        .await;
         let proxy_base = spawn_proxy(svc).await;
         let resp = reqwest::Client::new()
             .post(format!("{proxy_base}/llm/groq/openai/v1/chat/completions"))

@@ -29,7 +29,7 @@ use async_trait::async_trait;
 use axum::http::HeaderMap;
 use serde_json::Value as JsonValue;
 
-pub use admin::{caller_has_role, require_admin_role, AuthState};
+pub use admin::{AuthState, caller_has_role, require_admin_role};
 
 /// Identity returned by an [`Authenticator`]. The `subject` is the IdP-stable
 /// id (OIDC `sub` for JWTs, the api_key's `user_id` for bearers).
@@ -76,7 +76,7 @@ pub trait Authenticator: Send + Sync {
     async fn authenticate(&self, headers: &HeaderMap) -> Result<UserIdentity, AuthError>;
 }
 
-pub use user::{resolve_active_user, user_middleware, CallerIdentity, UserAuthState};
+pub use user::{CallerIdentity, UserAuthState, resolve_active_user, user_middleware};
 
 /// Pull the resolved caller out of an `axum::http::Extensions` map. Routes
 /// receive this via the `Extension(CallerIdentity)` extractor, but we keep
@@ -90,7 +90,10 @@ pub fn caller_from_extensions(ext: &axum::http::Extensions) -> Option<&CallerIde
 /// and by the proxy's per-instance gate, so it lives once at the auth-module
 /// root.
 pub fn extract_bearer(headers: &HeaderMap) -> Option<String> {
-    let h = headers.get(axum::http::header::AUTHORIZATION)?.to_str().ok()?;
+    let h = headers
+        .get(axum::http::header::AUTHORIZATION)?
+        .to_str()
+        .ok()?;
     h.strip_prefix("Bearer ")
         .or_else(|| h.strip_prefix("bearer "))
         .map(str::to_owned)

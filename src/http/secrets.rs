@@ -53,7 +53,10 @@ async fn list_secrets(
     // round-trip via the CLI.
     match state.secrets.list_names(&id).await {
         Ok(names) => Ok(Json(
-            names.into_iter().map(|name| SecretNameView { name }).collect(),
+            names
+                .into_iter()
+                .map(|name| SecretNameView { name })
+                .collect(),
         )),
         Err(e) => Err(secrets_err_to_status(e)),
     }
@@ -68,7 +71,11 @@ async fn put_secret(
     if let Err(s) = ensure_owns_instance(&state, &caller.user_id, &id).await {
         return s;
     }
-    match state.secrets.put(&caller.user_id, &id, &name, &body.value).await {
+    match state
+        .secrets
+        .put(&caller.user_id, &id, &name, &body.value)
+        .await
+    {
         Ok(()) => StatusCode::NO_CONTENT,
         Err(e) => secrets_err_to_status(e),
     }
@@ -113,7 +120,7 @@ pub(crate) fn store_err_to_status(e: StoreError) -> StatusCode {
 /// SecretsError → HTTP status.  Envelope failures (corrupt ciphertext,
 /// unreachable key file) are 500 — the user can't act on them.
 pub(crate) fn secrets_err_to_status(e: crate::secrets::SecretsError) -> StatusCode {
-    use crate::secrets::SecretsError::{Store, Envelope};
+    use crate::secrets::SecretsError::{Envelope, Store};
     match e {
         Store(s) => store_err_to_status(s),
         Envelope(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -177,8 +184,8 @@ mod tests {
             .create(InstanceRow {
                 id: id.into(),
                 owner_id: owner.into(),
-            name: String::new(),
-            task: String::new(),
+                name: String::new(),
+                task: String::new(),
                 cube_sandbox_id: None,
                 template_id: "t".into(),
                 status: InstanceStatus::Live,
@@ -203,10 +210,7 @@ mod tests {
     /// Spin up the full router (user middleware + tenant routes) with a
     /// fixed-identity authenticator so the secrets routes get a real
     /// CallerIdentity stamped on extensions.
-    async fn spawn_full(
-        state: AppState,
-        user_auth: crate::auth::UserAuthState,
-    ) -> String {
+    async fn spawn_full(state: AppState, user_auth: crate::auth::UserAuthState) -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let app = crate::http::router(
@@ -346,7 +350,10 @@ mod tests {
         // Assert against the decrypted service view rather than `raw`,
         // which now returns ciphertexts (the store is dumb sqlite).
         let listed = svc.list(&user_id, "i1").await.unwrap();
-        assert_eq!(listed, vec![("GITHUB_TOKEN".to_string(), "ghp_xxx".to_string())]);
+        assert_eq!(
+            listed,
+            vec![("GITHUB_TOKEN".to_string(), "ghp_xxx".to_string())]
+        );
 
         let r = client
             .delete(format!("{base}/v1/instances/i1/secrets/GITHUB_TOKEN"))
@@ -418,10 +425,10 @@ mod tests {
             created_at: 0,
             destroyed_at: None,
             rotated_to: None,
-                network_policy: crate::network_policy::NetworkPolicy::Open,
-                network_policy_cidrs: Vec::new(),
-                models: Vec::new(),
-                tools: Vec::new(),
+            network_policy: crate::network_policy::NetworkPolicy::Open,
+            network_policy_cidrs: Vec::new(),
+            models: Vec::new(),
+            tools: Vec::new(),
         };
         // Use the raw secrets store route to target this instance via SQL.
         // We need access to a fresh instances store here — easier to seed

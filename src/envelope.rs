@@ -232,7 +232,8 @@ impl AgeCipher {
                 .mode(0o400)
                 .open(path)
                 .map_err(EnvelopeError::Io)?;
-            f.write_all(expose(&pem).as_bytes()).map_err(EnvelopeError::Io)?;
+            f.write_all(expose(&pem).as_bytes())
+                .map_err(EnvelopeError::Io)?;
             f.sync_all().map_err(EnvelopeError::Io)?;
         }
         #[cfg(not(unix))]
@@ -456,7 +457,9 @@ mod tests {
         let path = tmp.path().join("k.age");
         AgeCipher::generate_if_missing(&path).unwrap();
         let c = AgeCipher::from_key_file(&path).unwrap();
-        let plain: Vec<u8> = (0u32..16_384).map(|i| u8::try_from(i % 251).unwrap()).collect();
+        let plain: Vec<u8> = (0u32..16_384)
+            .map(|i| u8::try_from(i % 251).unwrap())
+            .collect();
         let cipher = c.seal(&plain).unwrap();
         assert_eq!(c.open(&cipher).unwrap(), plain);
     }

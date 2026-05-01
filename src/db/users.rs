@@ -127,11 +127,7 @@ fn row_to_user(
     })
 }
 
-fn open_email_ciphertext(
-    ciphers: &dyn CipherDirectory,
-    user_id: &str,
-    ct: &str,
-) -> Option<String> {
+fn open_email_ciphertext(ciphers: &dyn CipherDirectory, user_id: &str, ct: &str) -> Option<String> {
     let cipher = ciphers.for_user(user_id).ok()?;
     let bytes = cipher.open(ct.as_bytes()).ok()?;
     String::from_utf8(bytes).ok()
@@ -148,8 +144,7 @@ fn seal_email_plaintext(
     let ct = cipher
         .seal(plain.as_bytes())
         .map_err(|e| StoreError::Io(format!("envelope seal: {e}")))?;
-    String::from_utf8(ct)
-        .map_err(|_| StoreError::Malformed("email ciphertext not ASCII".into()))
+    String::from_utf8(ct).map_err(|_| StoreError::Malformed("email ciphertext not ASCII".into()))
 }
 
 #[derive(Clone)]
@@ -343,7 +338,9 @@ impl UserStore for SqlxUserStore {
             .fetch_all(&self.pool)
             .await
             .map_err(map_sqlx)?;
-        rows.iter().map(|r| row_to_user(r, &*self.ciphers)).collect()
+        rows.iter()
+            .map(|r| row_to_user(r, &*self.ciphers))
+            .collect()
     }
 
     async fn set_status(&self, id: &str, status: UserStatus) -> Result<(), StoreError> {
@@ -383,14 +380,10 @@ impl UserStore for SqlxUserStore {
         Ok(())
     }
 
-    async fn mint_api_key(
-        &self,
-        user_id: &str,
-        label: Option<&str>,
-    ) -> Result<String, StoreError> {
+    async fn mint_api_key(&self, user_id: &str, label: Option<&str>) -> Result<String, StoreError> {
         let token = generate_token();
-        let prefix = lookup_prefix(&token)
-            .expect("generate_token always produces a well-formed token");
+        let prefix =
+            lookup_prefix(&token).expect("generate_token always produces a well-formed token");
         let cipher = self
             .ciphers
             .for_user(user_id)
@@ -531,11 +524,7 @@ impl UserStore for SqlxUserStore {
         Ok(())
     }
 
-    async fn set_openrouter_limit(
-        &self,
-        user_id: &str,
-        limit_usd: f64,
-    ) -> Result<(), StoreError> {
+    async fn set_openrouter_limit(&self, user_id: &str, limit_usd: f64) -> Result<(), StoreError> {
         let r = sqlx::query("UPDATE users SET openrouter_key_limit_usd = ? WHERE id = ?")
             .bind(limit_usd)
             .bind(user_id)
@@ -636,10 +625,7 @@ mod tests {
         let alice_loser = fixed_id(0xa2);
 
         // Winner lands first.
-        store
-            .create(sample(&alice_winner, "alice"))
-            .await
-            .unwrap();
+        store.create(sample(&alice_winner, "alice")).await.unwrap();
         // Loser tries to provision the same subject with a different id.
         // Old behaviour: UNIQUE constraint violation → StoreError::Constraint.
         // New behaviour: silent no-op.
@@ -661,10 +647,7 @@ mod tests {
         let (_tmp, store) = build_store()(pool);
         let alice = fixed_id(0xa1);
         store.create(sample(&alice, "alice")).await.unwrap();
-        store
-            .set_status(&alice, UserStatus::Active)
-            .await
-            .unwrap();
+        store.set_status(&alice, UserStatus::Active).await.unwrap();
         let got = store.get(&alice).await.unwrap().unwrap();
         assert_eq!(got.status, UserStatus::Active);
         assert!(got.activated_at.is_some());
@@ -701,11 +684,7 @@ mod tests {
         // decrypt still runs for timing parity, but the result is
         // discarded.
         assert!(store.resolve_api_key("not-ours").await.unwrap().is_none());
-        assert!(store
-            .resolve_api_key("dy_short")
-            .await
-            .unwrap()
-            .is_none());
+        assert!(store.resolve_api_key("dy_short").await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -798,6 +777,8 @@ mod tests {
         // sentinel plaintext is length-distinct, and ct_eq returns
         // false on any length mismatch).
         assert!(!dummy_decrypt_against_sentinel("dy_anything_at_all"));
-        assert!(!dummy_decrypt_against_sentinel("dy_deadbeefcafef00d11223344556677"));
+        assert!(!dummy_decrypt_against_sentinel(
+            "dy_deadbeefcafef00d11223344556677"
+        ));
     }
 }

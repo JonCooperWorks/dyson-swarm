@@ -89,12 +89,12 @@ impl ArtefactCacheService {
     /// created on first ingest (lazy) — failing fast at startup would
     /// prevent the swarm from booting on a host where the cache dir
     /// is on a still-mounting volume, which we'd rather not.
-    pub fn new(
-        pool: SqlitePool,
-        root: PathBuf,
-        ciphers: Arc<dyn CipherDirectory>,
-    ) -> Self {
-        Self { pool, root, ciphers }
+    pub fn new(pool: SqlitePool, root: PathBuf, ciphers: Arc<dyn CipherDirectory>) -> Self {
+        Self {
+            pool,
+            root,
+            ciphers,
+        }
     }
 
     pub fn root(&self) -> &Path {
@@ -132,10 +132,7 @@ impl ArtefactCacheService {
     /// returns `Ok(None)` plus a warn log — same posture as
     /// `WebhookService::open_audit_body` — so the read path falls
     /// through to the live cube instead of returning ciphertext.
-    pub async fn read_body(
-        &self,
-        row: &CachedArtefact,
-    ) -> Result<Option<Vec<u8>>, CacheError> {
+    pub async fn read_body(&self, row: &CachedArtefact) -> Result<Option<Vec<u8>>, CacheError> {
         let path = self.body_path_for(row);
         let bytes = match fs::read(&path).await {
             Ok(bytes) => bytes,
@@ -271,14 +268,7 @@ impl ArtefactCacheService {
                     .map_err(|e| CacheError::Io(format!("seal: {e}")))?
             };
             self.write_body(&target_rel, &on_disk).await?;
-            store::update_body(
-                &self.pool,
-                id,
-                &target_rel,
-                plain_len,
-                meta.mime,
-            )
-            .await?;
+            store::update_body(&self.pool, id, &target_rel, plain_len, meta.mime).await?;
         }
         let row = store::find(&self.pool, meta.instance_id, meta.chat_id, meta.artefact_id)
             .await?
@@ -349,12 +339,7 @@ mod tests {
     const ALICE: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const BOB: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
-    fn meta<'a>(
-        instance: &'a str,
-        owner: &'a str,
-        chat: &'a str,
-        art: &'a str,
-    ) -> IngestMeta<'a> {
+    fn meta<'a>(instance: &'a str, owner: &'a str, chat: &'a str, art: &'a str) -> IngestMeta<'a> {
         IngestMeta {
             instance_id: instance,
             owner_id: owner,
@@ -464,7 +449,9 @@ mod tests {
             std::str::from_utf8(&on_disk[..on_disk.len().min(40)]).unwrap_or("<binary>"),
         );
         assert!(
-            !on_disk.windows(b"top-secret findings".len()).any(|w| w == b"top-secret findings"),
+            !on_disk
+                .windows(b"top-secret findings".len())
+                .any(|w| w == b"top-secret findings"),
             "plaintext must not appear in the on-disk ciphertext",
         );
     }
@@ -520,7 +507,10 @@ mod tests {
         ct[mid] ^= 0x40;
         std::fs::write(svc.body_path_for(&row), ct).unwrap();
         let got = svc.read_body(&row).await.unwrap();
-        assert!(got.is_none(), "tampered ciphertext must surface as a miss, not ciphertext bytes");
+        assert!(
+            got.is_none(),
+            "tampered ciphertext must surface as a miss, not ciphertext bytes"
+        );
     }
 
     #[tokio::test]
@@ -574,9 +564,15 @@ mod tests {
             .await
             .unwrap();
         let on_disk = std::fs::read(svc.body_path_for(&row)).unwrap();
-        assert!(on_disk.is_empty(), "empty body should write zero-length file");
+        assert!(
+            on_disk.is_empty(),
+            "empty body should write zero-length file"
+        );
         let got = svc.read_body(&row).await.unwrap().unwrap();
-        assert!(got.is_empty(), "empty body should round-trip as empty bytes");
+        assert!(
+            got.is_empty(),
+            "empty body should round-trip as empty bytes"
+        );
         assert_eq!(row.bytes, 0);
     }
 
@@ -597,6 +593,9 @@ mod tests {
             ..alice_row.clone()
         };
         let got = svc.read_body(&forged).await.unwrap();
-        assert!(got.is_none(), "wrong-owner read must surface as a miss, not plaintext");
+        assert!(
+            got.is_none(),
+            "wrong-owner read must surface as a miss, not plaintext"
+        );
     }
 }

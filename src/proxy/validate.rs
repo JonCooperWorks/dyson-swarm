@@ -130,7 +130,9 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_provider_errors() {
-        let err = validate_key("nope", "k", "http://x", None).await.unwrap_err();
+        let err = validate_key("nope", "k", "http://x", None)
+            .await
+            .unwrap_err();
         assert!(matches!(err, ValidateError::UnknownProvider(_)));
     }
 }

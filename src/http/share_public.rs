@@ -17,15 +17,15 @@
 
 use axum::body::Body;
 use axum::extract::{Request, State};
-use axum::http::{header, HeaderValue, Response, StatusCode};
+use axum::http::{HeaderValue, Response, StatusCode, header};
 use axum::middleware::Next;
 use futures::TryStreamExt;
 
 use crate::http::AppState;
-use crate::shares::render::{
-    render_download_page, render_image_page, render_markdown_page, RenderKind,
-};
 use crate::shares::V1_PATH_PREFIX;
+use crate::shares::render::{
+    RenderKind, render_download_page, render_image_page, render_markdown_page,
+};
 
 /// 1 MiB cap on the JSON metadata we'll buffer when looking up the
 /// artefact's title and kind from dyson's
@@ -37,11 +37,7 @@ const META_BODY_LIMIT: usize = 1024 * 1024;
 /// Outer middleware wired in `http::mod::router` for the share host.
 /// Matches the same shape as `dyson_proxy::dispatch` so the two share
 /// hosts behave consistently.
-pub async fn dispatch(
-    State(state): State<AppState>,
-    req: Request,
-    next: Next,
-) -> Response<Body> {
+pub async fn dispatch(State(state): State<AppState>, req: Request, next: Next) -> Response<Body> {
     let Some(apex) = state.shares.apex() else {
         return next.run(req).await;
     };
@@ -144,23 +140,21 @@ async fn serve_token(
     // double-hop through the instance to fetch the actual bytes when
     // the cache only knows about the pointer.
     let response = match mode {
-        ServeMode::Raw => {
-            match resolve_raw_bytes(&state, &verified, &resolved).await {
-                Some(r) => r,
-                None => {
-                    state
-                        .shares
-                        .record_access(
-                            &verified.row.jti,
-                            remote_addr.as_deref(),
-                            user_agent.as_deref(),
-                            502,
-                        )
-                        .await;
-                    return not_found();
-                }
+        ServeMode::Raw => match resolve_raw_bytes(&state, &verified, &resolved).await {
+            Some(r) => r,
+            None => {
+                state
+                    .shares
+                    .record_access(
+                        &verified.row.jti,
+                        remote_addr.as_deref(),
+                        user_agent.as_deref(),
+                        502,
+                    )
+                    .await;
+                return not_found();
             }
-        }
+        },
         ServeMode::Html => {
             let mime = upstream_ct.as_deref();
             let title = resolved.title.clone();

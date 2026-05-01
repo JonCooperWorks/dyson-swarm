@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::auth::CallerIdentity;
 use crate::error::SwarmError;
-use crate::http::{secrets::store_err_to_status, AppState};
+use crate::http::{AppState, secrets::store_err_to_status};
 use crate::instance::{CreateRequest, CreatedInstance};
 use crate::network_policy::NetworkPolicy;
 use crate::traits::{InstanceRow, InstanceStatus, ListFilter, ProbeResult};
@@ -25,26 +25,16 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/instances", post(create_instance).get(list_instances))
         .route(
             "/v1/instances/:id",
-            get(get_instance).delete(destroy_instance).patch(update_instance),
+            get(get_instance)
+                .delete(destroy_instance)
+                .patch(update_instance),
         )
         .route("/v1/instances/:id/url", get(instance_url))
         .route("/v1/instances/:id/probe", post(probe_instance))
-        .route(
-            "/v1/instances/:id/change-network",
-            post(change_network),
-        )
-        .route(
-            "/v1/instances/:id/rotate-template",
-            post(rotate_template),
-        )
-        .route(
-            "/v1/instances/:id/recreate",
-            post(recreate_instance),
-        )
-        .route(
-            "/v1/instances/:id/reset",
-            post(reset_instance),
-        )
+        .route("/v1/instances/:id/change-network", post(change_network))
+        .route("/v1/instances/:id/rotate-template", post(rotate_template))
+        .route("/v1/instances/:id/recreate", post(recreate_instance))
+        .route("/v1/instances/:id/reset", post(reset_instance))
         .with_state(state)
 }
 
@@ -60,10 +50,7 @@ pub fn router(state: AppState) -> Router {
 /// and respects ownership.
 pub fn admin_router(state: AppState) -> Router {
     Router::new()
-        .route(
-            "/v1/instances/:id/clone",
-            post(clone_instance),
-        )
+        .route("/v1/instances/:id/clone", post(clone_instance))
         .with_state(state)
 }
 
@@ -110,7 +97,8 @@ async fn tls_allowlist(State(state): State<AppState>, uri: Uri) -> StatusCode {
         // The swarm's own apex — Caddy needs a cert for the SPA itself.
         return StatusCode::OK;
     }
-    let Some(instance_id) = crate::http::dyson_proxy::extract_instance_subdomain(host_no_port, base)
+    let Some(instance_id) =
+        crate::http::dyson_proxy::extract_instance_subdomain(host_no_port, base)
     else {
         return StatusCode::NOT_FOUND;
     };
@@ -442,7 +430,11 @@ async fn list_instances(
         include_destroyed,
     };
     match state.instances.list(&caller.user_id, filter).await {
-        Ok(rows) => Ok(Json(rows.into_iter().map(|r| InstanceView::from_row(r, state.hostname.as_deref())).collect())),
+        Ok(rows) => Ok(Json(
+            rows.into_iter()
+                .map(|r| InstanceView::from_row(r, state.hostname.as_deref()))
+                .collect(),
+        )),
         Err(e) => Err(swarm_err_to_status(e)),
     }
 }
@@ -622,9 +614,9 @@ pub(crate) fn swarm_err_to_status(e: SwarmError) -> StatusCode {
         // SnapshotCorrupt: content-hash mismatch on restore points at
         // the backup sink, not user input.  Both surface as bad-gateway
         // because retry/operator-action will resolve them.
-        SwarmError::Cube(_)
-        | SwarmError::Internal(_)
-        | SwarmError::SnapshotCorrupt(_) => StatusCode::BAD_GATEWAY,
+        SwarmError::Cube(_) | SwarmError::Internal(_) | SwarmError::SnapshotCorrupt(_) => {
+            StatusCode::BAD_GATEWAY
+        }
         SwarmError::Store(s) => store_err_to_status(s),
         SwarmError::Backup(_) | SwarmError::Config(_) => StatusCode::INTERNAL_SERVER_ERROR,
         // SnapshotQuotaExceeded: 507 Insufficient Storage — semantically

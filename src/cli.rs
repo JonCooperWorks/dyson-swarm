@@ -238,7 +238,9 @@ fn parse_kv(s: &str) -> Result<(String, String), String> {
 ///   - stdin read failure (rare; usually a closed pipe).
 fn resolve_stdin_secret(action: &mut SecretsAction) -> Result<(), String> {
     match action {
-        SecretsAction::Set { value, stdin, name, .. }
+        SecretsAction::Set {
+            value, stdin, name, ..
+        }
         | SecretsAction::SystemSet { value, stdin, name } => resolve_one(value, *stdin, name),
         SecretsAction::Clear { .. }
         | SecretsAction::SystemClear { .. }
@@ -351,10 +353,10 @@ mod tests {
         // string, ensure nothing weird sneaks past the allowlist.
         for name in [
             "",
-            "cloudflare.api_token ",        // trailing space
-            " cloudflare.api_token",        // leading space
-            "CLOUDFLARE.API_TOKEN",         // case variant
-            "cloudflare.api_token\n",       // newline injection
+            "cloudflare.api_token ",  // trailing space
+            " cloudflare.api_token",  // leading space
+            "CLOUDFLARE.API_TOKEN",   // case variant
+            "cloudflare.api_token\n", // newline injection
             "../../../etc/passwd",
         ] {
             assert!(!system_get_allowed(name), "must reject: {name:?}");

@@ -7,8 +7,8 @@
 //! that materialise the context, then this function decides yes/no.
 
 use crate::policy::{
-    model_allowed, provider_allowed, within_daily_token_budget, within_monthly_usd_budget,
-    within_rps, PolicyDenial,
+    PolicyDenial, model_allowed, provider_allowed, within_daily_token_budget,
+    within_monthly_usd_budget, within_rps,
 };
 use crate::traits::TokenRecord;
 
@@ -217,8 +217,8 @@ mod tests {
             usage: &cold_usage(),
             provider: "openai",
         };
-        let err = enforce(&ctx, &token(), &serde_json::json!({"messages": []}))
-            .expect_err("denied");
+        let err =
+            enforce(&ctx, &token(), &serde_json::json!({"messages": []})).expect_err("denied");
         assert_eq!(err, PolicyDenial::ModelNotAllowed);
     }
 }

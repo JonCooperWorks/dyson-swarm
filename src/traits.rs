@@ -91,19 +91,11 @@ pub trait UserStore: Send + Sync {
     /// Update the per-user USD cap on the OR key.  The caller is
     /// responsible for mirroring the change upstream via the
     /// Provisioning API; this method only persists the local view.
-    async fn set_openrouter_limit(
-        &self,
-        user_id: &str,
-        limit_usd: f64,
-    ) -> Result<(), StoreError>;
+    async fn set_openrouter_limit(&self, user_id: &str, limit_usd: f64) -> Result<(), StoreError>;
 
     /// Mint an opaque bearer for `user_id`. Used by CI/admin paths that
     /// can't do an OIDC flow.
-    async fn mint_api_key(
-        &self,
-        user_id: &str,
-        label: Option<&str>,
-    ) -> Result<String, StoreError>;
+    async fn mint_api_key(&self, user_id: &str, label: Option<&str>) -> Result<String, StoreError>;
     async fn resolve_api_key(&self, token: &str) -> Result<Option<UserApiKey>, StoreError>;
     async fn revoke_api_key(&self, token: &str) -> Result<(), StoreError>;
 }
@@ -395,11 +387,7 @@ pub trait InstanceStore: Send + Sync {
     /// tools.  Mirrors `set_models`: same JSON-as-TEXT shape,
     /// called from the edit endpoint and the create-time row
     /// writer.  Empty vec means "use dyson defaults".
-    async fn set_tools(
-        &self,
-        id: &str,
-        tools: &[String],
-    ) -> Result<(), StoreError>;
+    async fn set_tools(&self, id: &str, tools: &[String]) -> Result<(), StoreError>;
 }
 
 /// Per-instance secrets — opaque ciphertexts stored against an instance row.
@@ -410,12 +398,7 @@ pub trait InstanceStore: Send + Sync {
 /// is fine because age's armored output is ASCII, mapped to a TEXT column.
 #[async_trait]
 pub trait SecretStore: Send + Sync {
-    async fn put(
-        &self,
-        instance_id: &str,
-        name: &str,
-        ciphertext: &str,
-    ) -> Result<(), StoreError>;
+    async fn put(&self, instance_id: &str, name: &str, ciphertext: &str) -> Result<(), StoreError>;
     async fn delete(&self, instance_id: &str, name: &str) -> Result<(), StoreError>;
     /// Returns `(name, ciphertext)` pairs ordered by name.  The service
     /// layer decrypts.
@@ -428,17 +411,8 @@ pub trait SecretStore: Send + Sync {
 /// the raw column yield only undecryptable bytes.
 #[async_trait]
 pub trait UserSecretStore: Send + Sync {
-    async fn put(
-        &self,
-        user_id: &str,
-        name: &str,
-        ciphertext: &str,
-    ) -> Result<(), StoreError>;
-    async fn get(
-        &self,
-        user_id: &str,
-        name: &str,
-    ) -> Result<Option<String>, StoreError>;
+    async fn put(&self, user_id: &str, name: &str, ciphertext: &str) -> Result<(), StoreError>;
+    async fn get(&self, user_id: &str, name: &str) -> Result<Option<String>, StoreError>;
     async fn delete(&self, user_id: &str, name: &str) -> Result<(), StoreError>;
     /// Returns `(name, ciphertext)` pairs ordered by name.
     async fn list(&self, user_id: &str) -> Result<Vec<(String, String)>, StoreError>;
@@ -483,8 +457,7 @@ pub trait TokenStore: Send + Sync {
     /// provider entry authenticates against swarm's `/llm` proxy.
     /// Returns `None` for instances created before Stage 8 (no
     /// proxy_token row exists) so callers can skip them quietly.
-    async fn lookup_by_instance(&self, instance_id: &str)
-        -> Result<Option<String>, StoreError>;
+    async fn lookup_by_instance(&self, instance_id: &str) -> Result<Option<String>, StoreError>;
 
     /// Same as `lookup_by_instance` but narrowed to a specific
     /// `provider`.  Required because the ingest token (`provider =
@@ -627,15 +600,8 @@ impl WebhookAuthScheme {
 #[async_trait]
 pub trait WebhookStore: Send + Sync {
     async fn put(&self, row: &WebhookRow) -> Result<(), StoreError>;
-    async fn get(
-        &self,
-        instance_id: &str,
-        name: &str,
-    ) -> Result<Option<WebhookRow>, StoreError>;
-    async fn list_for_instance(
-        &self,
-        instance_id: &str,
-    ) -> Result<Vec<WebhookRow>, StoreError>;
+    async fn get(&self, instance_id: &str, name: &str) -> Result<Option<WebhookRow>, StoreError>;
+    async fn list_for_instance(&self, instance_id: &str) -> Result<Vec<WebhookRow>, StoreError>;
     async fn delete(&self, instance_id: &str, name: &str) -> Result<(), StoreError>;
     async fn set_enabled(
         &self,

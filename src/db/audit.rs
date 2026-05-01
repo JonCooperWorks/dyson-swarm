@@ -102,14 +102,12 @@ impl AuditStore for SqliteAuditStore {
         // the row is keyed on its primary id and there's no harm in
         // overwriting with a more accurate token count if the proxy
         // happens to call us twice.
-        sqlx::query(
-            "UPDATE llm_audit SET output_tokens = ?, completed = 1 WHERE id = ?",
-        )
-        .bind(output_tokens)
-        .bind(audit_id)
-        .execute(&self.pool)
-        .await
-        .map_err(map_sqlx)?;
+        sqlx::query("UPDATE llm_audit SET output_tokens = ?, completed = 1 WHERE id = ?")
+            .bind(output_tokens)
+            .bind(audit_id)
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
         Ok(())
     }
 }
@@ -141,12 +139,24 @@ mod tests {
         let store = SqliteAuditStore::new(pool);
         let now = 1_000_000;
         // Owner u1, two different instances — both should count.
-        store.insert(&r("u1", "i-a", now - 100, 100, 50)).await.unwrap();
-        store.insert(&r("u1", "i-b", now - 1000, 200, 100)).await.unwrap();
+        store
+            .insert(&r("u1", "i-a", now - 100, 100, 50))
+            .await
+            .unwrap();
+        store
+            .insert(&r("u1", "i-b", now - 1000, 200, 100))
+            .await
+            .unwrap();
         // Outside window.
-        store.insert(&r("u1", "i-a", now - 86_500, 999, 999)).await.unwrap();
+        store
+            .insert(&r("u1", "i-a", now - 86_500, 999, 999))
+            .await
+            .unwrap();
         // Different owner — not counted.
-        store.insert(&r("u2", "i-c", now - 100, 9999, 9999)).await.unwrap();
+        store
+            .insert(&r("u2", "i-c", now - 100, 9999, 9999))
+            .await
+            .unwrap();
 
         let total = store.daily_tokens("u1", now).await.unwrap();
         assert_eq!(total, 100 + 50 + 200 + 100);

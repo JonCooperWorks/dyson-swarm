@@ -34,7 +34,7 @@ use futures::stream;
 use serde_json::json;
 
 use dyson_swarm::{
-    auth::{chain::ChainAuthenticator, Authenticator, AuthState, UserAuthState},
+    auth::{AuthState, Authenticator, UserAuthState, chain::ChainAuthenticator},
     backup::local::LocalDiskBackupSink,
     config::{ProviderConfig, Providers},
     cube_client::HttpCubeClient,
@@ -44,7 +44,7 @@ use dyson_swarm::{
     http,
     instance::InstanceService,
     openrouter::{MintedKey, OpenRouterError, Provisioning, UserOrKeyResolver},
-    proxy::{self, policy_check::InstancePolicy, ProxyService},
+    proxy::{self, ProxyService, policy_check::InstancePolicy},
     secrets::{SecretsService, SystemSecretsService, UserSecretsService},
     snapshot::SnapshotService,
     traits::{
@@ -225,14 +225,20 @@ async fn build_stack(subject_for_no_bearer: &str) -> Stack {
     let keys_tmp = Box::leak(Box::new(tempfile::tempdir().unwrap()));
     let cipher_dir: Arc<dyn CipherDirectory> =
         Arc::new(AgeCipherDirectory::new(keys_tmp.path()).unwrap());
-    let user_secrets_store: Arc<dyn UserSecretStore> =
-        Arc::new(dyson_swarm::db::secrets::SqlxUserSecretStore::new(pool.clone()));
+    let user_secrets_store: Arc<dyn UserSecretStore> = Arc::new(
+        dyson_swarm::db::secrets::SqlxUserSecretStore::new(pool.clone()),
+    );
     let system_secrets_store: Arc<dyn SystemSecretStore> = Arc::new(
         dyson_swarm::db::secrets::SqlxSystemSecretStore::new(pool.clone()),
     );
-    let user_secrets_svc = Arc::new(UserSecretsService::new(user_secrets_store, cipher_dir.clone()));
-    let system_secrets_svc =
-        Arc::new(SystemSecretsService::new(system_secrets_store, cipher_dir.clone()));
+    let user_secrets_svc = Arc::new(UserSecretsService::new(
+        user_secrets_store,
+        cipher_dir.clone(),
+    ));
+    let system_secrets_svc = Arc::new(SystemSecretsService::new(
+        system_secrets_store,
+        cipher_dir.clone(),
+    ));
     let instance_svc = Arc::new(InstanceService::new(
         cube.clone(),
         instances_store.clone(),
@@ -292,9 +298,10 @@ async fn build_stack(subject_for_no_bearer: &str) -> Stack {
         },
     );
 
-    let users_store: Arc<dyn UserStore> = Arc::new(
-        dyson_swarm::db::users::SqlxUserStore::new(pool.clone(), cipher_dir.clone()),
-    );
+    let users_store: Arc<dyn UserStore> = Arc::new(dyson_swarm::db::users::SqlxUserStore::new(
+        pool.clone(),
+        cipher_dir.clone(),
+    ));
 
     let or_prov = Arc::new(RecordingProvisioning::default());
     let user_or_keys = Arc::new(UserOrKeyResolver::new(
@@ -323,16 +330,19 @@ async fn build_stack(subject_for_no_bearer: &str) -> Stack {
     // real DB resolve so the api-key tests exercise the production
     // path; the fallback covers cookie-less endpoints (admin pages
     // hitting the bearer check).
-    let bearer_link: Arc<dyn Authenticator> =
-        Arc::new(dyson_swarm::auth::bearer::BearerAuthenticator::new(users_store.clone()));
+    let bearer_link: Arc<dyn Authenticator> = Arc::new(
+        dyson_swarm::auth::bearer::BearerAuthenticator::new(users_store.clone()),
+    );
     let (fixed_auth, _fixed_id) = dyson_swarm::auth::user::fixed_user_auth_with_roles(
         users_store.clone(),
         subject_for_no_bearer,
         Some(("https://test/roles", &["rol_admin"])),
     )
     .await;
-    let chain: Arc<dyn Authenticator> =
-        Arc::new(ChainAuthenticator::new(vec![bearer_link, fixed_auth.authenticator.clone()]));
+    let chain: Arc<dyn Authenticator> = Arc::new(ChainAuthenticator::new(vec![
+        bearer_link,
+        fixed_auth.authenticator.clone(),
+    ]));
     let user_auth = UserAuthState::new(chain, users_store.clone());
 
     let webhook_store: Arc<dyn dyson_swarm::traits::WebhookStore> = Arc::new(
@@ -451,7 +461,10 @@ async fn tenancy_isolation_blocks_cross_user_access() {
         .unwrap();
     assert_eq!(r.status(), 200);
     let bob_list: Vec<serde_json::Value> = r.json().await.unwrap();
-    assert!(bob_list.is_empty(), "bob should see no instances; got {bob_list:?}");
+    assert!(
+        bob_list.is_empty(),
+        "bob should see no instances; got {bob_list:?}"
+    );
 
     // Bob trying to GET alice's instance gets 404 — same observable
     // outcome as a non-existent id.  No oracle.
@@ -623,10 +636,7 @@ async fn openrouter_proxy_lazy_mints_then_reuses() {
         .await
         .unwrap();
     assert_eq!(r.status(), 201);
-    let proxy_token = r
-        .json::<serde_json::Value>()
-        .await
-        .unwrap()["proxy_token"]
+    let proxy_token = r.json::<serde_json::Value>().await.unwrap()["proxy_token"]
         .as_str()
         .unwrap()
         .to_string();
@@ -641,7 +651,13 @@ async fn openrouter_proxy_lazy_mints_then_reuses() {
         .unwrap();
     assert_eq!(r.status(), 200);
     // Upstream saw the minted plaintext, NOT the global fallback.
-    let auth_seen = stack.llm.last_auth.lock().unwrap().clone().unwrap_or_default();
+    let auth_seen = stack
+        .llm
+        .last_auth
+        .lock()
+        .unwrap()
+        .clone()
+        .unwrap_or_default();
     assert_eq!(
         auth_seen, "Bearer sk-or-mock-1",
         "first call must substitute the lazy-minted user key (not the global fallback)"
@@ -657,7 +673,13 @@ async fn openrouter_proxy_lazy_mints_then_reuses() {
         .await
         .unwrap();
     assert_eq!(r.status(), 200);
-    let auth_seen = stack.llm.last_auth.lock().unwrap().clone().unwrap_or_default();
+    let auth_seen = stack
+        .llm
+        .last_auth
+        .lock()
+        .unwrap()
+        .clone()
+        .unwrap_or_default();
     assert_eq!(
         auth_seen, "Bearer sk-or-mock-1",
         "second call must reuse the sealed plaintext (no second mint)"
@@ -686,10 +708,7 @@ async fn llm_proxy_forwards_path_with_single_v1() {
         .send()
         .await
         .unwrap();
-    let proxy_token = r
-        .json::<serde_json::Value>()
-        .await
-        .unwrap()["proxy_token"]
+    let proxy_token = r.json::<serde_json::Value>().await.unwrap()["proxy_token"]
         .as_str()
         .unwrap()
         .to_string();
@@ -704,7 +723,13 @@ async fn llm_proxy_forwards_path_with_single_v1() {
         .await
         .unwrap();
     assert_eq!(r.status(), 200);
-    let path = stack.llm.last_path.lock().unwrap().clone().unwrap_or_default();
+    let path = stack
+        .llm
+        .last_path
+        .lock()
+        .unwrap()
+        .clone()
+        .unwrap_or_default();
     assert_eq!(
         path, "/v1/chat/completions",
         "swarm must strip the /llm/<provider> prefix, leaving the upstream path with exactly one /v1"
@@ -715,7 +740,12 @@ async fn llm_proxy_forwards_path_with_single_v1() {
 // Helpers
 // ---------------------------------------------------------------------
 
-async fn create_user(client: &reqwest::Client, base: &str, subject: &str, activate: bool) -> String {
+async fn create_user(
+    client: &reqwest::Client,
+    base: &str,
+    subject: &str,
+    activate: bool,
+) -> String {
     let r = client
         .post(format!("{base}/v1/admin/users"))
         .json(&json!({"subject": subject, "activate": activate}))

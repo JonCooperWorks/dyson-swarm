@@ -72,7 +72,9 @@ pub async fn resolve_active_user(
     users: &dyn UserStore,
     headers: &axum::http::HeaderMap,
 ) -> Result<String, Response> {
-    resolve_caller(authenticator, users, headers).await.map(|c| c.user_id)
+    resolve_caller(authenticator, users, headers)
+        .await
+        .map(|c| c.user_id)
 }
 
 async fn resolve_caller(
@@ -165,10 +167,7 @@ async fn resolve_or_provision(
 ///
 /// Test/integration helper. Production builds should use the OIDC + bearer
 /// chain assembled in `main.rs`.
-pub async fn fixed_user_auth(
-    users: Arc<dyn UserStore>,
-    subject: &str,
-) -> (UserAuthState, String) {
+pub async fn fixed_user_auth(users: Arc<dyn UserStore>, subject: &str) -> (UserAuthState, String) {
     fixed_user_auth_with_roles(users, subject, None).await
 }
 
@@ -238,7 +237,7 @@ mod tests {
     use super::*;
     use axum::http::HeaderMap;
     use axum::routing::get;
-    use axum::{middleware, Router};
+    use axum::{Router, middleware};
 
     use crate::auth::AuthSource;
     use crate::db::open_in_memory;
@@ -253,8 +252,7 @@ mod tests {
     /// lifetime, which is bounded by the test runner.
     fn test_user_store(pool: sqlx::SqlitePool) -> Arc<dyn UserStore> {
         let tmp = Box::leak(Box::new(tempfile::tempdir().unwrap()));
-        let dir: Arc<dyn CipherDirectory> =
-            Arc::new(AgeCipherDirectory::new(tmp.path()).unwrap());
+        let dir: Arc<dyn CipherDirectory> = Arc::new(AgeCipherDirectory::new(tmp.path()).unwrap());
         Arc::new(SqlxUserStore::new(pool, dir))
     }
 

@@ -90,7 +90,9 @@ mod tests {
     fn preserves_other_query_params() {
         let a = GeminiAdapter;
         let mut headers = HeaderMap::new();
-        let mut url: Uri = "/v1beta/models/gemini-pro:generateContent?alt=sse".parse().unwrap();
+        let mut url: Uri = "/v1beta/models/gemini-pro:generateContent?alt=sse"
+            .parse()
+            .unwrap();
         a.rewrite_auth(&mut headers, &mut url, "AIza-real");
         assert_eq!(url.query(), Some("alt=sse"));
         assert_eq!(headers.get(&GOOG_API_KEY).unwrap(), "AIza-real");

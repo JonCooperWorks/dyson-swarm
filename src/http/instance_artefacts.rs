@@ -21,7 +21,7 @@
 
 use axum::body::Body;
 use axum::extract::{Extension, Path, State};
-use axum::http::{header, Response, StatusCode, Uri};
+use axum::http::{Response, StatusCode, Uri, header};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
@@ -42,14 +42,8 @@ fn parse_query(s: &str) -> std::collections::HashMap<String, String> {
 
 pub fn router(state: AppState) -> Router {
     Router::new()
-        .route(
-            "/v1/instances/:id/artefacts",
-            get(list_for_instance),
-        )
-        .route(
-            "/v1/instances/:id/artefacts/sweep",
-            post(sweep_instance),
-        )
+        .route("/v1/instances/:id/artefacts", get(list_for_instance))
+        .route("/v1/instances/:id/artefacts/sweep", post(sweep_instance))
         .route(
             "/v1/instances/:id/artefacts/:art_id",
             get(get_artefact_meta).delete(delete_artefact),
@@ -233,7 +227,10 @@ async fn get_artefact_raw(
                     owner_id: &caller.user_id,
                     chat_id: &chat_id,
                     artefact_id: &art_id,
-                    kind: cached_row.as_ref().map(|r| r.kind.as_str()).unwrap_or("other"),
+                    kind: cached_row
+                        .as_ref()
+                        .map(|r| r.kind.as_str())
+                        .unwrap_or("other"),
                     title: &title,
                     mime: mime.as_deref(),
                     created_at: crate::now_secs(),
@@ -281,8 +278,8 @@ async fn sweep_instance(
         return Err(StatusCode::BAD_GATEWAY);
     }
     let raw = resp.bytes().await.map_err(|_| StatusCode::BAD_GATEWAY)?;
-    let arr: serde_json::Value = serde_json::from_slice(&raw)
-        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+    let arr: serde_json::Value =
+        serde_json::from_slice(&raw).map_err(|_| StatusCode::BAD_GATEWAY)?;
     let items = arr.as_array().cloned().unwrap_or_default();
     for item in &items {
         let id = item.get("id").and_then(|v| v.as_str()).unwrap_or("");
@@ -290,7 +287,10 @@ async fn sweep_instance(
             continue;
         }
         let kind = item.get("kind").and_then(|v| v.as_str()).unwrap_or("other");
-        let title = item.get("title").and_then(|v| v.as_str()).unwrap_or("Artefact");
+        let title = item
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Artefact");
         let created_at = item.get("created_at").and_then(|v| v.as_i64()).unwrap_or(0);
         let metadata_json = item.get("metadata").map(|v| v.to_string());
         let _ = state
@@ -351,7 +351,12 @@ async fn delete_artefact(
     };
     let _ = state
         .artefact_cache
-        .delete(&caller.user_id, &row.instance_id, &row.chat_id, &row.artefact_id)
+        .delete(
+            &caller.user_id,
+            &row.instance_id,
+            &row.chat_id,
+            &row.artefact_id,
+        )
         .await;
     Ok(StatusCode::NO_CONTENT)
 }

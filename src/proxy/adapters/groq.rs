@@ -20,8 +20,7 @@ impl ProviderAdapter for GroqAdapter {
     }
 
     fn rewrite_auth(&self, headers: &mut HeaderMap, _url: &mut Uri, real_key: &str) {
-        let value =
-            HeaderValue::from_str(&format!("Bearer {real_key}")).expect("bearer header");
+        let value = HeaderValue::from_str(&format!("Bearer {real_key}")).expect("bearer header");
         headers.insert(axum::http::header::AUTHORIZATION, value);
     }
 }

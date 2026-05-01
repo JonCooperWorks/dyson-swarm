@@ -51,7 +51,11 @@ impl SecretsService {
         instances: Arc<dyn InstanceStore>,
         ciphers: Arc<dyn CipherDirectory>,
     ) -> Self {
-        Self { store, instances, ciphers }
+        Self {
+            store,
+            instances,
+            ciphers,
+        }
     }
 
     /// Encrypt `value` with the owner's cipher and persist.
@@ -97,13 +101,21 @@ impl SecretsService {
         let rows = self.store.list(instance_id).await?;
         let mut out = Vec::with_capacity(rows.len());
         for (name, ct) in rows {
-            if let Ok(plain) = cipher.open(ct.as_bytes()) { if let Ok(s) = String::from_utf8(plain) { out.push((name, s)) } else { tracing::warn!(
-                instance = %instance_id, name = %name,
-                "instance_secret decrypted to non-utf8 — skipping"
-            ); } } else { tracing::warn!(
-                instance = %instance_id, name = %name,
-                "instance_secret failed to decrypt with owner key — skipping"
-            ); }
+            if let Ok(plain) = cipher.open(ct.as_bytes()) {
+                if let Ok(s) = String::from_utf8(plain) {
+                    out.push((name, s))
+                } else {
+                    tracing::warn!(
+                        instance = %instance_id, name = %name,
+                        "instance_secret decrypted to non-utf8 — skipping"
+                    );
+                }
+            } else {
+                tracing::warn!(
+                    instance = %instance_id, name = %name,
+                    "instance_secret failed to decrypt with owner key — skipping"
+                );
+            }
         }
         Ok(out)
     }
@@ -111,10 +123,7 @@ impl SecretsService {
     /// Names only — used by the SPA to render the secrets panel
     /// without round-tripping plaintext.  Cheap because we don't
     /// decrypt.
-    pub async fn list_names(
-        &self,
-        instance_id: &str,
-    ) -> Result<Vec<String>, SecretsError> {
+    pub async fn list_names(&self, instance_id: &str) -> Result<Vec<String>, SecretsError> {
         let rows = self.store.list(instance_id).await?;
         Ok(rows.into_iter().map(|(n, _)| n).collect())
     }
@@ -135,12 +144,7 @@ impl UserSecretsService {
         Self { store, ciphers }
     }
 
-    pub async fn put(
-        &self,
-        user_id: &str,
-        name: &str,
-        value: &[u8],
-    ) -> Result<(), SecretsError> {
+    pub async fn put(&self, user_id: &str, name: &str, value: &[u8]) -> Result<(), SecretsError> {
         let cipher = self.ciphers.for_user(user_id)?;
         let ct = cipher.seal(value)?;
         let ct_str = String::from_utf8(ct)
@@ -149,11 +153,7 @@ impl UserSecretsService {
         Ok(())
     }
 
-    pub async fn get(
-        &self,
-        user_id: &str,
-        name: &str,
-    ) -> Result<Option<Vec<u8>>, SecretsError> {
+    pub async fn get(&self, user_id: &str, name: &str) -> Result<Option<Vec<u8>>, SecretsError> {
         let Some(ct) = self.store.get(user_id, name).await? else {
             return Ok(None);
         };
@@ -261,7 +261,10 @@ mod tests {
     use super::*;
 
     fn m<const N: usize>(pairs: [(&str, &str); N]) -> BTreeMap<String, String> {
-        pairs.into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+        pairs
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
     }
 
     #[test]
@@ -305,7 +308,10 @@ mod tests {
             Ok(())
         }
         async fn delete(&self, instance_id: &str, name: &str) -> Result<(), StoreError> {
-            self.0.lock().unwrap().retain(|(i, n, _)| !(i == instance_id && n == name));
+            self.0
+                .lock()
+                .unwrap()
+                .retain(|(i, n, _)| !(i == instance_id && n == name));
             Ok(())
         }
         async fn list(&self, instance_id: &str) -> Result<Vec<(String, String)>, StoreError> {
@@ -339,7 +345,10 @@ mod tests {
                 .map(|(_, _, c)| c.clone()))
         }
         async fn delete(&self, user_id: &str, name: &str) -> Result<(), StoreError> {
-            self.0.lock().unwrap().retain(|(u, n, _)| !(u == user_id && n == name));
+            self.0
+                .lock()
+                .unwrap()
+                .retain(|(u, n, _)| !(u == user_id && n == name));
             Ok(())
         }
         async fn list(&self, user_id: &str) -> Result<Vec<(String, String)>, StoreError> {
@@ -364,14 +373,26 @@ mod tests {
             Ok(())
         }
         async fn get(&self, name: &str) -> Result<Option<String>, StoreError> {
-            Ok(self.0.lock().unwrap().iter().find(|(n, _)| n == name).map(|(_, c)| c.clone()))
+            Ok(self
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, c)| c.clone()))
         }
         async fn delete(&self, name: &str) -> Result<(), StoreError> {
             self.0.lock().unwrap().retain(|(n, _)| n != name);
             Ok(())
         }
         async fn list_names(&self) -> Result<Vec<String>, StoreError> {
-            Ok(self.0.lock().unwrap().iter().map(|(n, _)| n.clone()).collect())
+            Ok(self
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(n, _)| n.clone())
+                .collect())
         }
     }
 
@@ -441,7 +462,9 @@ mod tests {
             instance_store().await,
             dir.clone(),
         );
-        svc.put(&owner, "inst-1", "GITHUB_TOKEN", "ghp_secret").await.unwrap();
+        svc.put(&owner, "inst-1", "GITHUB_TOKEN", "ghp_secret")
+            .await
+            .unwrap();
 
         let got = svc.list(&owner, "inst-1").await.unwrap();
         assert_eq!(got, vec![("GITHUB_TOKEN".into(), "ghp_secret".into())]);
@@ -477,7 +500,9 @@ mod tests {
             dir.clone(),
         );
         let u = user_id(0x42);
-        svc.put(&u, "openrouter_key", b"sk-or-v1-...").await.unwrap();
+        svc.put(&u, "openrouter_key", b"sk-or-v1-...")
+            .await
+            .unwrap();
 
         let got = svc.get(&u, "openrouter_key").await.unwrap();
         assert_eq!(got.as_deref(), Some(b"sk-or-v1-..." as &[u8]));
@@ -494,7 +519,9 @@ mod tests {
             Arc::new(MemSystemSecretStore(Mutex::new(Vec::new()))),
             dir.clone(),
         );
-        svc.put("openrouter_provisioning", b"sk-or-prov-...").await.unwrap();
+        svc.put("openrouter_provisioning", b"sk-or-prov-...")
+            .await
+            .unwrap();
         let got = svc.get_str("openrouter_provisioning").await.unwrap();
         assert_eq!(got.as_deref(), Some("sk-or-prov-..."));
         let names = svc.list_names().await.unwrap();

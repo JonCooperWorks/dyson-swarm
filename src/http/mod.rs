@@ -32,9 +32,9 @@ pub mod webhooks;
 
 use std::sync::Arc;
 
-use axum::{middleware, Router};
+use axum::{Router, middleware};
 
-use crate::auth::{require_admin_role, user_middleware, AuthState, UserAuthState};
+use crate::auth::{AuthState, UserAuthState, require_admin_role, user_middleware};
 use crate::instance::InstanceService;
 use crate::secrets::SecretsService;
 use crate::snapshot::SnapshotService;
@@ -154,12 +154,20 @@ pub fn router(
         .merge(crate::http::admin_users::router(state.clone()))
         .merge(instances::admin_router(state.clone()));
     let admin = if auth.dangerous_no_auth {
-        admin_handlers
-            .layer(middleware::from_fn_with_state(auth.clone(), require_admin_role))
+        admin_handlers.layer(middleware::from_fn_with_state(
+            auth.clone(),
+            require_admin_role,
+        ))
     } else {
         admin_handlers
-            .layer(middleware::from_fn_with_state(auth.clone(), require_admin_role))
-            .layer(middleware::from_fn_with_state(user_auth.clone(), user_middleware))
+            .layer(middleware::from_fn_with_state(
+                auth.clone(),
+                require_admin_role,
+            ))
+            .layer(middleware::from_fn_with_state(
+                user_auth.clone(),
+                user_middleware,
+            ))
     };
 
     // Tenant routes — every request resolves to a CallerIdentity.
@@ -173,7 +181,10 @@ pub fn router(
         .merge(shares::router(state.clone()))
         .merge(instance_artefacts::router(state.clone()))
         .merge(mcp_user_router)
-        .layer(middleware::from_fn_with_state(user_auth.clone(), user_middleware));
+        .layer(middleware::from_fn_with_state(
+            user_auth.clone(),
+            user_middleware,
+        ));
 
     // Static assets (SPA bundle) are merged last so the API routes win
     // every match.  The static router owns the fallback, which serves
@@ -408,7 +419,10 @@ mod tests {
         let (state, users) = build_state().await;
         let base = spawn(
             state,
-            AuthState::enforced(crate::config::OidcRoles { claim: "https://test/roles".into(), admin: "rol_admin".into() }),
+            AuthState::enforced(crate::config::OidcRoles {
+                claim: "https://test/roles".into(),
+                admin: "rol_admin".into(),
+            }),
             deny_user_auth(users),
         )
         .await;
@@ -422,7 +436,10 @@ mod tests {
         let (state, users) = build_state().await;
         let base = spawn(
             state,
-            AuthState::enforced(crate::config::OidcRoles { claim: "https://test/roles".into(), admin: "rol_admin".into() }),
+            AuthState::enforced(crate::config::OidcRoles {
+                claim: "https://test/roles".into(),
+                admin: "rol_admin".into(),
+            }),
             deny_user_auth(users),
         )
         .await;
@@ -433,7 +450,15 @@ mod tests {
     #[tokio::test]
     async fn tenant_route_with_active_user_is_200() {
         let (state, user_auth, _user_id) = build_with_user("alice").await;
-        let base = spawn(state, AuthState::enforced(crate::config::OidcRoles { claim: "https://test/roles".into(), admin: "rol_admin".into() }), user_auth).await;
+        let base = spawn(
+            state,
+            AuthState::enforced(crate::config::OidcRoles {
+                claim: "https://test/roles".into(),
+                admin: "rol_admin".into(),
+            }),
+            user_auth,
+        )
+        .await;
         let r = reqwest::get(format!("{base}/v1/instances")).await.unwrap();
         assert_eq!(r.status(), 200);
     }
@@ -443,11 +468,16 @@ mod tests {
         let (state, users) = build_state().await;
         let base = spawn(
             state,
-            AuthState::enforced(crate::config::OidcRoles { claim: "https://test/roles".into(), admin: "rol_admin".into() }),
+            AuthState::enforced(crate::config::OidcRoles {
+                claim: "https://test/roles".into(),
+                admin: "rol_admin".into(),
+            }),
             deny_user_auth(users),
         )
         .await;
-        let r = reqwest::get(format!("{base}/v1/admin/users")).await.unwrap();
+        let r = reqwest::get(format!("{base}/v1/admin/users"))
+            .await
+            .unwrap();
         assert_eq!(r.status(), 401);
     }
 
@@ -521,7 +551,15 @@ mod tests {
         // and we get the regular 401 from user_middleware.
         let (mut state, users) = build_state().await;
         state.hostname = Some("swarm.test".into());
-        let base = spawn(state, AuthState::enforced(crate::config::OidcRoles { claim: "https://test/roles".into(), admin: "rol_admin".into() }), deny_user_auth(users)).await;
+        let base = spawn(
+            state,
+            AuthState::enforced(crate::config::OidcRoles {
+                claim: "https://test/roles".into(),
+                admin: "rol_admin".into(),
+            }),
+            deny_user_auth(users),
+        )
+        .await;
         let r = reqwest::Client::new()
             .get(format!("{base}/v1/instances"))
             .header("host", "swarm.test")
@@ -542,9 +580,16 @@ mod tests {
         let (mut state, _) = build_state().await;
         state.hostname = Some("swarm.test".into());
         let users = state.users.clone();
-        let (alice_auth, _alice_id) =
-            crate::auth::user::fixed_user_auth(users, "alice").await;
-        let base = spawn(state, AuthState::enforced(crate::config::OidcRoles { claim: "https://test/roles".into(), admin: "rol_admin".into() }), alice_auth).await;
+        let (alice_auth, _alice_id) = crate::auth::user::fixed_user_auth(users, "alice").await;
+        let base = spawn(
+            state,
+            AuthState::enforced(crate::config::OidcRoles {
+                claim: "https://test/roles".into(),
+                admin: "rol_admin".into(),
+            }),
+            alice_auth,
+        )
+        .await;
         let r = reqwest::Client::new()
             .post(format!("{base}/anything"))
             .header("host", "abc.swarm.test")
@@ -571,7 +616,10 @@ mod tests {
         state.hostname = Some("swarm.test".into());
         let base = spawn(
             state,
-            AuthState::enforced(crate::config::OidcRoles { claim: "https://test/roles".into(), admin: "rol_admin".into() }),
+            AuthState::enforced(crate::config::OidcRoles {
+                claim: "https://test/roles".into(),
+                admin: "rol_admin".into(),
+            }),
             deny_user_auth(users),
         )
         .await;
@@ -585,7 +633,11 @@ mod tests {
             .unwrap();
         // Not 403 (cross-origin).  401 from the auth layer is the
         // expected next-step rejection.
-        assert_ne!(r.status(), 403, "request was incorrectly cross-origin-rejected");
+        assert_ne!(
+            r.status(),
+            403,
+            "request was incorrectly cross-origin-rejected"
+        );
         assert_eq!(r.status(), 401);
     }
 
@@ -668,9 +720,16 @@ mod tests {
         let (mut state, _) = build_state().await;
         state.hostname = Some("swarm.test".into());
         let users = state.users.clone();
-        let (alice_auth, _alice_id) =
-            crate::auth::user::fixed_user_auth(users, "alice").await;
-        let base = spawn(state, AuthState::enforced(crate::config::OidcRoles { claim: "https://test/roles".into(), admin: "rol_admin".into() }), alice_auth).await;
+        let (alice_auth, _alice_id) = crate::auth::user::fixed_user_auth(users, "alice").await;
+        let base = spawn(
+            state,
+            AuthState::enforced(crate::config::OidcRoles {
+                claim: "https://test/roles".into(),
+                admin: "rol_admin".into(),
+            }),
+            alice_auth,
+        )
+        .await;
         let r = reqwest::Client::new()
             .get(format!("{base}/anything"))
             .header("host", "no-such-id.swarm.test")
@@ -684,10 +743,14 @@ mod tests {
     async fn dangerous_no_auth_marker_header_on_admin_routes() {
         let (state, users) = build_state().await;
         let base = spawn(state, AuthState::dangerous_no_auth(), deny_user_auth(users)).await;
-        let r = reqwest::get(format!("{base}/v1/admin/users")).await.unwrap();
+        let r = reqwest::get(format!("{base}/v1/admin/users"))
+            .await
+            .unwrap();
         assert_eq!(r.status(), 200);
         assert_eq!(
-            r.headers().get("x-swarm-insecure").map(|v| v.to_str().unwrap()),
+            r.headers()
+                .get("x-swarm-insecure")
+                .map(|v| v.to_str().unwrap()),
             Some("1")
         );
     }
@@ -697,7 +760,10 @@ mod tests {
         let (state, users) = build_state().await;
         let base = spawn(
             state,
-            AuthState::enforced(crate::config::OidcRoles { claim: "https://test/roles".into(), admin: "rol_admin".into() }),
+            AuthState::enforced(crate::config::OidcRoles {
+                claim: "https://test/roles".into(),
+                admin: "rol_admin".into(),
+            }),
             deny_user_auth(users),
         )
         .await;
@@ -713,7 +779,10 @@ mod tests {
         let (state, users) = build_state().await;
         let base = spawn(
             state,
-            AuthState::enforced(crate::config::OidcRoles { claim: "https://test/roles".into(), admin: "rol_admin".into() }),
+            AuthState::enforced(crate::config::OidcRoles {
+                claim: "https://test/roles".into(),
+                admin: "rol_admin".into(),
+            }),
             deny_user_auth(users),
         )
         .await;
@@ -738,7 +807,10 @@ mod tests {
         let (state, users) = build_state().await;
         let base = spawn(
             state,
-            AuthState::enforced(crate::config::OidcRoles { claim: "https://test/roles".into(), admin: "rol_admin".into() }),
+            AuthState::enforced(crate::config::OidcRoles {
+                claim: "https://test/roles".into(),
+                admin: "rol_admin".into(),
+            }),
             deny_user_auth(users),
         )
         .await;

@@ -21,5 +21,4 @@
 //! the sqlite migrations).
 
 #[cfg(feature = "postgres")]
-pub static MIGRATOR: sqlx::migrate::Migrator =
-    sqlx::migrate!("./migrations/postgres");
+pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations/postgres");

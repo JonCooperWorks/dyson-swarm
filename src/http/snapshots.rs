@@ -19,8 +19,8 @@ use axum::{Json, Router};
 use serde::Deserialize;
 
 use crate::auth::CallerIdentity;
-use crate::http::instances::swarm_err_to_status;
 use crate::http::AppState;
+use crate::http::instances::swarm_err_to_status;
 use crate::instance::CreatedInstance;
 use crate::snapshot::SnapshotView;
 
@@ -33,10 +33,7 @@ pub const MAX_SNAPSHOTS_PER_INSTANCE: u64 = 50;
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/v1/instances/:id/snapshot", post(snapshot))
-        .route(
-            "/v1/instances/:id/snapshots",
-            get(list_for_instance),
-        )
+        .route("/v1/instances/:id/snapshots", get(list_for_instance))
         .route("/v1/instances/:id/backup", post(backup))
         .route("/v1/instances/:id/restore", post(restore))
         .route("/v1/snapshots/:id/pull", post(pull))
@@ -49,7 +46,11 @@ async fn list_for_instance(
     Extension(caller): Extension<CallerIdentity>,
     Path(id): Path<String>,
 ) -> Result<Json<Vec<SnapshotView>>, StatusCode> {
-    match state.snapshots.list_for_instance(&caller.user_id, &id).await {
+    match state
+        .snapshots
+        .list_for_instance(&caller.user_id, &id)
+        .await
+    {
         Ok(rows) => Ok(Json(rows.into_iter().map(SnapshotView::from).collect())),
         Err(e) => Err(swarm_err_to_status(e)),
     }
@@ -97,11 +98,7 @@ async fn backup(
 /// circuit; `Ok(())` otherwise (including the "store-error" case,
 /// which is logged and ignored — fail-open on quota check is safer
 /// than blocking legitimate snapshots when the count query glitches).
-async fn check_quota(
-    state: &AppState,
-    owner_id: &str,
-    instance_id: &str,
-) -> Result<(), Response> {
+async fn check_quota(state: &AppState, owner_id: &str, instance_id: &str) -> Result<(), Response> {
     // Agent 1's `count_for_instance` returns count of *live* (non-
     // deleted) snapshot rows owned by `owner_id` for `instance_id`.
     // Anything else (NotFound, store error) we log and let through;
@@ -161,7 +158,12 @@ async fn restore(
 ) -> Result<(StatusCode, Json<CreatedInstance>), StatusCode> {
     match state
         .snapshots
-        .restore(&caller.user_id, &body.snapshot_id, body.ttl_seconds, body.env)
+        .restore(
+            &caller.user_id,
+            &body.snapshot_id,
+            body.ttl_seconds,
+            body.env,
+        )
         .await
     {
         Ok(c) => Ok((StatusCode::CREATED, Json(c))),

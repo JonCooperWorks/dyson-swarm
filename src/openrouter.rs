@@ -113,7 +113,10 @@ impl OpenRouterProvisioning {
     /// Build a client.  `upstream` is e.g. `"https://openrouter.ai/api"`
     /// (no trailing slash; matches the `[providers.openrouter]` value
     /// in swarm config).
-    pub fn new(upstream: impl Into<String>, provisioning_key: impl Into<String>) -> Result<Self, reqwest::Error> {
+    pub fn new(
+        upstream: impl Into<String>,
+        provisioning_key: impl Into<String>,
+    ) -> Result<Self, reqwest::Error> {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(20))
             .build()?;
@@ -146,7 +149,10 @@ impl OpenRouterProvisioning {
             Some(l) if !l.is_empty() => format!("{l} · {name}"),
             _ => name.to_string(),
         };
-        let body = CreateKeyBody { name: &combined, limit: limit_usd };
+        let body = CreateKeyBody {
+            name: &combined,
+            limit: limit_usd,
+        };
         let resp = self
             .http
             .post(self.url(""))
@@ -177,7 +183,10 @@ impl OpenRouterProvisioning {
     /// Update the USD limit on an existing key.  No-op upstream if
     /// the new limit equals the current one — OR is idempotent here.
     pub async fn update_limit(&self, id: &str, limit_usd: f64) -> Result<(), OpenRouterError> {
-        let body = UpdateKeyBody { limit: Some(limit_usd), disabled: None };
+        let body = UpdateKeyBody {
+            limit: Some(limit_usd),
+            disabled: None,
+        };
         let resp = self
             .http
             .patch(self.url(&format!("/{id}")))
@@ -270,9 +279,8 @@ pub struct UserOrKeyResolver {
     /// against the operator's spend cap.  We dedupe with a per-user
     /// async mutex so the second call double-checks and reuses the
     /// first one's freshly-sealed plaintext.
-    mint_locks: std::sync::Mutex<
-        std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>,
-    >,
+    mint_locks:
+        std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -322,10 +330,7 @@ impl UserOrKeyResolver {
         // requests don't both mint.  Drop the registry guard before
         // awaiting on the per-user mutex.
         let lock = {
-            let mut map = self
-                .mint_locks
-                .lock()
-                .expect("mint_locks poisoned");
+            let mut map = self.mint_locks.lock().expect("mint_locks poisoned");
             map.entry(user_id.to_string())
                 .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
                 .clone()
@@ -452,7 +457,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let cipher_dir: Arc<dyn crate::envelope::CipherDirectory> =
             Arc::new(AgeCipherDirectory::new(tmp.path()).unwrap());
-        let users: Arc<dyn UserStore> = Arc::new(SqlxUserStore::new(pool.clone(), cipher_dir.clone()));
+        let users: Arc<dyn UserStore> =
+            Arc::new(SqlxUserStore::new(pool.clone(), cipher_dir.clone()));
         let user_secret_store: Arc<dyn UserSecretStore> =
             Arc::new(SqlxUserSecretStore::new(pool.clone()));
         let user_secrets = Arc::new(UserSecretsService::new(user_secret_store, cipher_dir));
@@ -494,7 +500,11 @@ mod tests {
         for h in handles {
             keys.push(h.await.unwrap().unwrap());
         }
-        assert_eq!(prov.mints.load(Ordering::SeqCst), 1, "mint must fire exactly once");
+        assert_eq!(
+            prov.mints.load(Ordering::SeqCst),
+            1,
+            "mint must fire exactly once"
+        );
         // Every caller observes the same plaintext.
         let first = keys[0].clone();
         for k in &keys {

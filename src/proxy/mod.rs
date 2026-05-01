@@ -100,10 +100,7 @@ impl ProxyService {
     /// Builder-style setter for the per-user secrets backing BYOK.
     /// Same shape as `with_user_or_keys` so main.rs wires both at once
     /// and tests opt in only when they need BYOK behaviour.
-    pub fn with_user_secrets(
-        mut self,
-        secrets: Arc<crate::secrets::UserSecretsService>,
-    ) -> Self {
+    pub fn with_user_secrets(mut self, secrets: Arc<crate::secrets::UserSecretsService>) -> Self {
         self.user_secrets = Some(secrets);
         self
     }

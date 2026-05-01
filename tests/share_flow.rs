@@ -35,10 +35,9 @@ use dyson_swarm::{
     secrets::{SecretsService, SystemSecretsService, UserSecretsService},
     snapshot::SnapshotService,
     traits::{
-        BackupSink, CreateSandboxArgs, CubeClient, HealthProber, InstanceRow,
-        InstanceStatus, InstanceStore, ProbeResult, SandboxInfo, SecretStore,
-        SnapshotInfo, SnapshotStore, SystemSecretStore, TokenStore, UserSecretStore,
-        UserStore,
+        BackupSink, CreateSandboxArgs, CubeClient, HealthProber, InstanceRow, InstanceStatus,
+        InstanceStore, ProbeResult, SandboxInfo, SecretStore, SnapshotInfo, SnapshotStore,
+        SystemSecretStore, TokenStore, UserSecretStore, UserStore,
     },
 };
 use serde_json::json;
@@ -48,22 +47,33 @@ use serde_json::json;
 struct StubProber;
 #[async_trait::async_trait]
 impl HealthProber for StubProber {
-    async fn probe(&self, _: &InstanceRow) -> ProbeResult { ProbeResult::Healthy }
+    async fn probe(&self, _: &InstanceRow) -> ProbeResult {
+        ProbeResult::Healthy
+    }
 }
 
 struct StubCube;
 #[async_trait::async_trait]
 impl CubeClient for StubCube {
     async fn create_sandbox(
-        &self, _: CreateSandboxArgs,
-    ) -> Result<SandboxInfo, dyson_swarm::error::CubeError> { unreachable!() }
+        &self,
+        _: CreateSandboxArgs,
+    ) -> Result<SandboxInfo, dyson_swarm::error::CubeError> {
+        unreachable!()
+    }
     async fn destroy_sandbox(&self, _: &str) -> Result<(), dyson_swarm::error::CubeError> {
         unreachable!()
     }
-    async fn snapshot_sandbox(&self, _: &str, _: &str)
-        -> Result<SnapshotInfo, dyson_swarm::error::CubeError> { unreachable!() }
-    async fn delete_snapshot(&self, _: &str, _: &str)
-        -> Result<(), dyson_swarm::error::CubeError> { unreachable!() }
+    async fn snapshot_sandbox(
+        &self,
+        _: &str,
+        _: &str,
+    ) -> Result<SnapshotInfo, dyson_swarm::error::CubeError> {
+        unreachable!()
+    }
+    async fn delete_snapshot(&self, _: &str, _: &str) -> Result<(), dyson_swarm::error::CubeError> {
+        unreachable!()
+    }
 }
 
 // ── mock dyson upstream ──────────────────────────────────────────────
@@ -74,10 +84,7 @@ struct DysonMock {
     list_calls: Arc<AtomicU64>,
 }
 
-async fn dyson_get_artefact(
-    State(s): State<DysonMock>,
-    Path(_id): Path<String>,
-) -> Response<Body> {
+async fn dyson_get_artefact(State(s): State<DysonMock>, Path(_id): Path<String>) -> Response<Body> {
     s.artefact_calls.fetch_add(1, Ordering::SeqCst);
     Response::builder()
         .status(200)
@@ -102,11 +109,16 @@ async fn spawn_dyson_mock() -> (String, DysonMock) {
     let state = DysonMock::default();
     let app = Router::new()
         .route("/api/artefacts/:id", get(dyson_get_artefact))
-        .route("/api/conversations/:chat/artefacts", get(dyson_list_artefacts))
+        .route(
+            "/api/conversations/:chat/artefacts",
+            get(dyson_list_artefacts),
+        )
         .with_state(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
     (format!("http://{addr}"), state)
 }
 
@@ -124,18 +136,17 @@ async fn build() -> Fixture {
     let (dyson_url, dyson_state) = spawn_dyson_mock().await;
     // The share renderer talks to dyson at `https://<port>-<sandbox>.<sandbox_domain>`.
     // Override the port via env so tests can target the mock's port.
-    let dyson_addr: std::net::SocketAddr = dyson_url
-        .strip_prefix("http://")
-        .unwrap()
-        .parse()
-        .unwrap();
+    let dyson_addr: std::net::SocketAddr =
+        dyson_url.strip_prefix("http://").unwrap().parse().unwrap();
     // SAFETY: tests run with --test-threads=1 in the integration harness;
     // this env knob is read by `instance_client::cube_port` to build the
     // upstream URL.  Mutating env from a test is unsafe in 2024 edition
     // because another thread could be reading at the same time, but the
     // share_flow tests don't share env with anything else and Cargo's
     // default integration-test layout serializes this binary.
-    unsafe { std::env::set_var("SWARM_CUBE_INTERNAL_PORT", dyson_addr.port().to_string()); }
+    unsafe {
+        std::env::set_var("SWARM_CUBE_INTERNAL_PORT", dyson_addr.port().to_string());
+    }
 
     let pool = db::open_in_memory().await.unwrap();
     let cube: Arc<dyn CubeClient> = Arc::new(StubCube);
@@ -151,20 +162,27 @@ async fn build() -> Fixture {
     let system_secrets_store: Arc<dyn SystemSecretStore> = Arc::new(
         dyson_swarm::db::secrets::SqlxSystemSecretStore::new(pool.clone()),
     );
-    let user_secrets_svc = Arc::new(UserSecretsService::new(user_secrets_store, cipher_dir.clone()));
-    let system_secrets_svc =
-        Arc::new(SystemSecretsService::new(system_secrets_store, cipher_dir.clone()));
+    let user_secrets_svc = Arc::new(UserSecretsService::new(
+        user_secrets_store,
+        cipher_dir.clone(),
+    ));
+    let system_secrets_svc = Arc::new(SystemSecretsService::new(
+        system_secrets_store,
+        cipher_dir.clone(),
+    ));
     let secrets_svc = Arc::new(SecretsService::new(
         secrets_store.clone(),
         instances_store.clone(),
         cipher_dir.clone(),
     ));
     let backup: Arc<dyn BackupSink> = Arc::new(LocalDiskBackupSink::new(cube.clone()));
-    let snapshots_store: Arc<dyn SnapshotStore> =
-        Arc::new(dyson_swarm::db::snapshots::SqliteSnapshotStore::new(pool.clone()));
-    let users_store: Arc<dyn UserStore> = Arc::new(
-        dyson_swarm::db::users::SqlxUserStore::new(pool.clone(), cipher_dir.clone()),
+    let snapshots_store: Arc<dyn SnapshotStore> = Arc::new(
+        dyson_swarm::db::snapshots::SqliteSnapshotStore::new(pool.clone()),
     );
+    let users_store: Arc<dyn UserStore> = Arc::new(dyson_swarm::db::users::SqlxUserStore::new(
+        pool.clone(),
+        cipher_dir.clone(),
+    ));
     let instance_svc = Arc::new(InstanceService::new(
         cube.clone(),
         instances_store.clone(),
@@ -278,7 +296,9 @@ async fn build() -> Fixture {
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
     Fixture {
         base: format!("http://{addr}"),
         user_id,
@@ -350,7 +370,10 @@ async fn share_admin_lifecycle_round_trips() {
     );
 
     let listed = client
-        .get(format!("{}/v1/instances/{}/shares", fx.base, fx.instance_id))
+        .get(format!(
+            "{}/v1/instances/{}/shares",
+            fx.base, fx.instance_id
+        ))
         .header("Origin", fx.base.clone())
         .send()
         .await
@@ -372,7 +395,10 @@ async fn share_admin_lifecycle_round_trips() {
     assert_eq!(revoke.status(), 204);
 
     let after = client
-        .get(format!("{}/v1/instances/{}/shares", fx.base, fx.instance_id))
+        .get(format!(
+            "{}/v1/instances/{}/shares",
+            fx.base, fx.instance_id
+        ))
         .header("Origin", fx.base.clone())
         .send()
         .await
@@ -510,7 +536,10 @@ async fn reissue_revokes_old_and_lists_new() {
     assert_ne!(old_jti, new_jti);
 
     let listed = client
-        .get(format!("{}/v1/instances/{}/shares", fx.base, fx.instance_id))
+        .get(format!(
+            "{}/v1/instances/{}/shares",
+            fx.base, fx.instance_id
+        ))
         .header("Origin", fx.base.clone())
         .send()
         .await

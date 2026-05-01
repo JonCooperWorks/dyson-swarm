@@ -5,9 +5,7 @@ use crate::db::map_sqlx;
 use crate::error::StoreError;
 use crate::network_policy::NetworkPolicy;
 use crate::now_secs;
-use crate::traits::{
-    InstanceRow, InstanceStatus, InstanceStore, ListFilter, ProbeResult,
-};
+use crate::traits::{InstanceRow, InstanceStatus, InstanceStore, ListFilter, ProbeResult};
 
 /// Decode the three on-disk policy columns into the in-memory
 /// `NetworkPolicy` enum + the resolved CIDR vec.  Forward-compat:
@@ -35,7 +33,10 @@ fn csv_to_vec(s: &str) -> Vec<String> {
     if s.is_empty() {
         return Vec::new();
     }
-    s.split(',').map(|p| p.trim().to_owned()).filter(|p| !p.is_empty()).collect()
+    s.split(',')
+        .map(|p| p.trim().to_owned())
+        .filter(|p| !p.is_empty())
+        .collect()
 }
 
 fn vec_to_csv(v: &[String]) -> String {
@@ -168,14 +169,13 @@ impl InstanceStore for SqlxInstanceStore {
     ) -> Result<Option<InstanceRow>, StoreError> {
         // owner_id == "*" is the system-internal bypass used by TTL sweep
         // and the proxy. User-facing routes never pass it.
-        let row = sqlx::query(
-            "SELECT * FROM instances WHERE id = ?1 AND (?2 = '*' OR owner_id = ?2)",
-        )
-        .bind(id)
-        .bind(owner_id)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(map_sqlx)?;
+        let row =
+            sqlx::query("SELECT * FROM instances WHERE id = ?1 AND (?2 = '*' OR owner_id = ?2)")
+                .bind(id)
+                .bind(owner_id)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(map_sqlx)?;
         match row {
             Some(r) => Ok(Some(row_to_instance(&r)?)),
             None => Ok(None),
@@ -286,15 +286,13 @@ impl InstanceStore for SqlxInstanceStore {
         } else {
             ttl.map(|t| now_secs() + t)
         };
-        let result = sqlx::query(
-            "UPDATE instances SET pinned = ?1, expires_at = ?2 WHERE id = ?3",
-        )
-        .bind(pinned as i64)
-        .bind(expires_at)
-        .bind(id)
-        .execute(&self.pool)
-        .await
-        .map_err(map_sqlx)?;
+        let result = sqlx::query("UPDATE instances SET pinned = ?1, expires_at = ?2 WHERE id = ?3")
+            .bind(pinned as i64)
+            .bind(expires_at)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
         if result.rows_affected() == 0 {
             return Err(StoreError::NotFound);
         }
@@ -346,11 +344,7 @@ impl InstanceStore for SqlxInstanceStore {
         Ok(())
     }
 
-    async fn set_tools(
-        &self,
-        id: &str,
-        tools: &[String],
-    ) -> Result<(), StoreError> {
+    async fn set_tools(&self, id: &str, tools: &[String]) -> Result<(), StoreError> {
         let json = serde_json::to_string(tools)
             .map_err(|e| StoreError::Io(format!("tools encode: {e}")))?;
         let result = sqlx::query("UPDATE instances SET tools = ? WHERE id = ?")
@@ -446,10 +440,10 @@ mod tests {
             created_at: 50,
             destroyed_at: None,
             rotated_to: None,
-                network_policy: crate::network_policy::NetworkPolicy::Open,
-                network_policy_cidrs: Vec::new(),
-                models: Vec::new(),
-                tools: Vec::new(),
+            network_policy: crate::network_policy::NetworkPolicy::Open,
+            network_policy_cidrs: Vec::new(),
+            models: Vec::new(),
+            tools: Vec::new(),
         }
     }
 
@@ -577,13 +571,19 @@ mod tests {
         let store = SqlxInstanceStore::new(pool);
         store.create(sample("a")).await.unwrap();
 
-        store.update_identity("legacy", "a", "PR reviewer", "Watch for PRs").await.unwrap();
+        store
+            .update_identity("legacy", "a", "PR reviewer", "Watch for PRs")
+            .await
+            .unwrap();
         let row = store.get("a").await.unwrap().unwrap();
         assert_eq!(row.name, "PR reviewer");
         assert_eq!(row.task, "Watch for PRs");
 
         // Wrong owner → NotFound (no oracle).
-        let err = store.update_identity("someone-else", "a", "x", "y").await.unwrap_err();
+        let err = store
+            .update_identity("someone-else", "a", "x", "y")
+            .await
+            .unwrap_err();
         assert!(matches!(err, StoreError::NotFound));
 
         // Unchanged from the failed update.

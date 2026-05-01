@@ -11,9 +11,7 @@ use sqlx::{Row, SqlitePool};
 
 use crate::db::map_sqlx;
 use crate::error::StoreError;
-use crate::traits::{
-    DeliveryRow, DeliveryStore, WebhookAuthScheme, WebhookRow, WebhookStore,
-};
+use crate::traits::{DeliveryRow, DeliveryStore, WebhookAuthScheme, WebhookRow, WebhookStore};
 
 #[derive(Debug, Clone)]
 pub struct SqlxWebhookStore {
@@ -82,11 +80,7 @@ impl WebhookStore for SqlxWebhookStore {
         Ok(())
     }
 
-    async fn get(
-        &self,
-        instance_id: &str,
-        name: &str,
-    ) -> Result<Option<WebhookRow>, StoreError> {
+    async fn get(&self, instance_id: &str, name: &str) -> Result<Option<WebhookRow>, StoreError> {
         let row = sqlx::query(
             "SELECT instance_id, name, description, auth_scheme, secret_name, \
                     enabled, created_at, updated_at \
@@ -104,10 +98,7 @@ impl WebhookStore for SqlxWebhookStore {
         }
     }
 
-    async fn list_for_instance(
-        &self,
-        instance_id: &str,
-    ) -> Result<Vec<WebhookRow>, StoreError> {
+    async fn list_for_instance(&self, instance_id: &str) -> Result<Vec<WebhookRow>, StoreError> {
         let rows = sqlx::query(
             "SELECT instance_id, name, description, auth_scheme, secret_name, \
                     enabled, created_at, updated_at \
@@ -123,14 +114,12 @@ impl WebhookStore for SqlxWebhookStore {
     }
 
     async fn delete(&self, instance_id: &str, name: &str) -> Result<(), StoreError> {
-        sqlx::query(
-            "DELETE FROM instance_webhooks WHERE instance_id = ? AND name = ?",
-        )
-        .bind(instance_id)
-        .bind(name)
-        .execute(&self.pool)
-        .await
-        .map_err(map_sqlx)?;
+        sqlx::query("DELETE FROM instance_webhooks WHERE instance_id = ? AND name = ?")
+            .bind(instance_id)
+            .bind(name)
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
         Ok(())
     }
 
@@ -330,15 +319,10 @@ impl DeliveryStore for SqlxDeliveryStore {
                 instance_id: r.try_get("instance_id").map_err(map_sqlx)?,
                 webhook_name: r.try_get("webhook_name").map_err(map_sqlx)?,
                 fired_at: r.try_get("fired_at").map_err(map_sqlx)?,
-                status_code: r
-                    .try_get::<i64, _>("status_code")
-                    .map_err(map_sqlx)? as i32,
+                status_code: r.try_get::<i64, _>("status_code").map_err(map_sqlx)? as i32,
                 latency_ms: r.try_get("latency_ms").map_err(map_sqlx)?,
                 request_id: r.try_get("request_id").map_err(map_sqlx)?,
-                signature_ok: r
-                    .try_get::<i64, _>("signature_ok")
-                    .map_err(map_sqlx)?
-                    != 0,
+                signature_ok: r.try_get::<i64, _>("signature_ok").map_err(map_sqlx)? != 0,
                 error: r.try_get("error").map_err(map_sqlx)?,
                 body: r.try_get::<Option<Vec<u8>>, _>("body").map_err(map_sqlx)?,
                 body_size: r.try_get("body_size").map_err(map_sqlx)?,
@@ -354,15 +338,10 @@ fn metadata_row(r: sqlx::sqlite::SqliteRow) -> Result<DeliveryRow, StoreError> {
         instance_id: r.try_get("instance_id").map_err(map_sqlx)?,
         webhook_name: r.try_get("webhook_name").map_err(map_sqlx)?,
         fired_at: r.try_get("fired_at").map_err(map_sqlx)?,
-        status_code: r
-            .try_get::<i64, _>("status_code")
-            .map_err(map_sqlx)? as i32,
+        status_code: r.try_get::<i64, _>("status_code").map_err(map_sqlx)? as i32,
         latency_ms: r.try_get("latency_ms").map_err(map_sqlx)?,
         request_id: r.try_get("request_id").map_err(map_sqlx)?,
-        signature_ok: r
-            .try_get::<i64, _>("signature_ok")
-            .map_err(map_sqlx)?
-            != 0,
+        signature_ok: r.try_get::<i64, _>("signature_ok").map_err(map_sqlx)? != 0,
         error: r.try_get("error").map_err(map_sqlx)?,
         body: None,
         body_size: r.try_get("body_size").map_err(map_sqlx)?,
@@ -432,8 +411,10 @@ mod tests {
         assert_eq!(got.auth_scheme, WebhookAuthScheme::HmacSha256);
 
         let listed = store.list_for_instance("i1").await.unwrap();
-        assert_eq!(listed.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
-                   vec!["deploy", "ping"]);
+        assert_eq!(
+            listed.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
+            vec!["deploy", "ping"]
+        );
     }
 
     #[tokio::test]
@@ -522,10 +503,7 @@ mod tests {
                 .unwrap();
         }
 
-        let listed = deliveries
-            .list_for_webhook("i1", "ping", 10)
-            .await
-            .unwrap();
+        let listed = deliveries.list_for_webhook("i1", "ping", 10).await.unwrap();
         let timestamps: Vec<_> = listed.iter().map(|r| r.fired_at).collect();
         assert_eq!(timestamps, vec![200, 150, 100]);
     }
@@ -563,10 +541,36 @@ mod tests {
                 content_type: Some("application/json".into()),
             }
         };
-        deliveries.insert(&mk("a", "i1", "ping", 100, b"{\"action\":\"opened\"}", Some("upstream timeout"))).await.unwrap();
-        deliveries.insert(&mk("b", "i1", "deploy", 200, b"{\"ref\":\"main\"}", None)).await.unwrap();
-        deliveries.insert(&mk("c", "i1", "ping", 300, b"{\"action\":\"closed\"}", None)).await.unwrap();
-        deliveries.insert(&mk("d", "i2", "ping", 400, b"other tenant", None)).await.unwrap();
+        deliveries
+            .insert(&mk(
+                "a",
+                "i1",
+                "ping",
+                100,
+                b"{\"action\":\"opened\"}",
+                Some("upstream timeout"),
+            ))
+            .await
+            .unwrap();
+        deliveries
+            .insert(&mk("b", "i1", "deploy", 200, b"{\"ref\":\"main\"}", None))
+            .await
+            .unwrap();
+        deliveries
+            .insert(&mk(
+                "c",
+                "i1",
+                "ping",
+                300,
+                b"{\"action\":\"closed\"}",
+                None,
+            ))
+            .await
+            .unwrap();
+        deliveries
+            .insert(&mk("d", "i2", "ping", 400, b"other tenant", None))
+            .await
+            .unwrap();
 
         let listed = deliveries
             .list_for_instance("i1", None, None, None, 10)
@@ -582,19 +586,28 @@ mod tests {
             .list_for_instance("i1", None, None, None, 2)
             .await
             .unwrap();
-        assert_eq!(page1.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), vec!["c", "b"]);
+        assert_eq!(
+            page1.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            vec!["c", "b"]
+        );
         let cursor = page1.last().unwrap().fired_at;
         let page2 = deliveries
             .list_for_instance("i1", None, None, Some(cursor), 2)
             .await
             .unwrap();
-        assert_eq!(page2.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), vec!["a"]);
+        assert_eq!(
+            page2.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            vec!["a"]
+        );
 
         let pings = deliveries
             .list_for_instance("i1", Some("ping"), None, None, 10)
             .await
             .unwrap();
-        assert_eq!(pings.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), vec!["c", "a"]);
+        assert_eq!(
+            pings.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            vec!["c", "a"]
+        );
 
         // `q` is now an error-text substring search.  Bodies are
         // sealed at the service layer so the store can't grep them.
@@ -602,7 +615,10 @@ mod tests {
             .list_for_instance("i1", None, Some("TIMEOUT"), None, 10)
             .await
             .unwrap();
-        assert_eq!(timeouts.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), vec!["a"]);
+        assert_eq!(
+            timeouts.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            vec!["a"]
+        );
     }
 
     #[tokio::test]
@@ -614,27 +630,39 @@ mod tests {
         webhooks.put(&row("i1", "ping")).await.unwrap();
         let deliveries = SqlxDeliveryStore::new(pool);
 
-        deliveries.insert(&DeliveryRow {
-            id: "d1".into(),
-            instance_id: "i1".into(),
-            webhook_name: "ping".into(),
-            fired_at: 100,
-            status_code: 204,
-            latency_ms: 5,
-            request_id: Some("req-1".into()),
-            signature_ok: true,
-            error: None,
-            body: Some(b"{\"hello\":\"world\"}".to_vec()),
-            body_size: Some(17),
-            content_type: Some("application/json".into()),
-        }).await.unwrap();
+        deliveries
+            .insert(&DeliveryRow {
+                id: "d1".into(),
+                instance_id: "i1".into(),
+                webhook_name: "ping".into(),
+                fired_at: 100,
+                status_code: 204,
+                latency_ms: 5,
+                request_id: Some("req-1".into()),
+                signature_ok: true,
+                error: None,
+                body: Some(b"{\"hello\":\"world\"}".to_vec()),
+                body_size: Some(17),
+                content_type: Some("application/json".into()),
+            })
+            .await
+            .unwrap();
 
         let got = deliveries.get_by_id("i1", "d1").await.unwrap().unwrap();
-        assert_eq!(got.body.as_deref(), Some(b"{\"hello\":\"world\"}".as_slice()));
+        assert_eq!(
+            got.body.as_deref(),
+            Some(b"{\"hello\":\"world\"}".as_slice())
+        );
         assert_eq!(got.content_type.as_deref(), Some("application/json"));
 
         assert!(deliveries.get_by_id("i2", "d1").await.unwrap().is_none());
-        assert!(deliveries.get_by_id("i1", "missing").await.unwrap().is_none());
+        assert!(
+            deliveries
+                .get_by_id("i1", "missing")
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]

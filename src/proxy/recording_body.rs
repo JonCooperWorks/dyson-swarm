@@ -20,8 +20,8 @@
 
 use std::pin::Pin;
 use std::sync::{
-    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc,
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use std::task::{Context, Poll};
 
@@ -138,10 +138,7 @@ where
 {
     type Item = Result<Bytes, E>;
 
-    fn poll_next(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Self::Item>> {
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
         if this.finished {
             return Poll::Ready(None);
@@ -272,9 +269,9 @@ fn find_output_tokens_json(buf: &[u8]) -> Option<i64> {
 fn extract_output_tokens(v: &serde_json::Value) -> Option<i64> {
     let usage = v.get("usage").or_else(|| v.get("usageMetadata"))?;
     for key in &[
-        "output_tokens",            // Anthropic
-        "completion_tokens",        // OpenAI / OR
-        "candidatesTokenCount",     // Gemini
+        "output_tokens",        // Anthropic
+        "completion_tokens",    // OpenAI / OR
+        "candidatesTokenCount", // Gemini
     ] {
         if let Some(n) = usage.get(*key).and_then(serde_json::Value::as_i64) {
             return Some(n);
@@ -312,32 +309,34 @@ mod tests {
             audit_id: i64,
             output_tokens: Option<i64>,
         ) -> Result<(), StoreError> {
-            self.completions.lock().unwrap().push((audit_id, output_tokens));
+            self.completions
+                .lock()
+                .unwrap()
+                .push((audit_id, output_tokens));
             Ok(())
         }
     }
 
     #[test]
     fn extract_openai_completion_tokens() {
-        let v: serde_json::Value = serde_json::from_str(
-            r#"{"usage": {"prompt_tokens": 10, "completion_tokens": 42}}"#,
-        ).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(r#"{"usage": {"prompt_tokens": 10, "completion_tokens": 42}}"#)
+                .unwrap();
         assert_eq!(extract_output_tokens(&v), Some(42));
     }
 
     #[test]
     fn extract_anthropic_output_tokens() {
-        let v: serde_json::Value = serde_json::from_str(
-            r#"{"usage": {"input_tokens": 10, "output_tokens": 17}}"#,
-        ).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(r#"{"usage": {"input_tokens": 10, "output_tokens": 17}}"#)
+                .unwrap();
         assert_eq!(extract_output_tokens(&v), Some(17));
     }
 
     #[test]
     fn extract_gemini_candidates_token_count() {
-        let v: serde_json::Value = serde_json::from_str(
-            r#"{"usageMetadata": {"candidatesTokenCount": 99}}"#,
-        ).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(r#"{"usageMetadata": {"candidatesTokenCount": 99}}"#).unwrap();
         assert_eq!(extract_output_tokens(&v), Some(99));
     }
 
@@ -364,7 +363,9 @@ mod tests {
         let audit: Arc<dyn AuditStore> = stub.clone();
         let chunks = vec![
             Ok::<Bytes, std::io::Error>(Bytes::from_static(b"data: {\"hello\":1}\n\n")),
-            Ok(Bytes::from_static(b"data: {\"usage\":{\"output_tokens\":5}}\n\n")),
+            Ok(Bytes::from_static(
+                b"data: {\"usage\":{\"output_tokens\":5}}\n\n",
+            )),
             Ok(Bytes::from_static(b"data: [DONE]\n\n")),
         ];
         let s = futures::stream::iter(chunks);
@@ -392,7 +393,9 @@ mod tests {
     async fn drop_finalizes_with_none_when_no_usage_seen() {
         let stub = Arc::new(StubAudit::default());
         let audit: Arc<dyn AuditStore> = stub.clone();
-        let chunks = vec![Ok::<Bytes, std::io::Error>(Bytes::from_static(b"random bytes"))];
+        let chunks = vec![Ok::<Bytes, std::io::Error>(Bytes::from_static(
+            b"random bytes",
+        ))];
         let s = futures::stream::iter(chunks);
         let body = RecordingBody::new(s, audit, 7);
         let _: Vec<_> = body.collect().await;
@@ -411,7 +414,10 @@ mod tests {
         let stub = Arc::new(StubAudit::default());
         let audit: Arc<dyn AuditStore> = stub.clone();
         // Two huge chunks past the cap to verify the trimming.
-        let big = Bytes::from(vec![0u8; usize::try_from(MAX_RESPONSE_BYTES).unwrap() + 1024]);
+        let big = Bytes::from(vec![
+            0u8;
+            usize::try_from(MAX_RESPONSE_BYTES).unwrap() + 1024
+        ]);
         let chunks = vec![Ok::<Bytes, std::io::Error>(big)];
         let s = futures::stream::iter(chunks);
         let body = RecordingBody::new(s, audit, 9);

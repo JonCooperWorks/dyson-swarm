@@ -14,8 +14,8 @@
 //! 8. Revoke the proxy token via the admin endpoint and confirm the next
 //!    call returns 401.
 
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use axum::body::{Body, Bytes};
 use axum::extract::{Path, State};
@@ -36,7 +36,7 @@ use dyson_swarm::{
     envelope::{AgeCipherDirectory, CipherDirectory},
     http,
     instance::InstanceService,
-    proxy::{self, policy_check::InstancePolicy, ProxyService},
+    proxy::{self, ProxyService, policy_check::InstancePolicy},
     secrets::{SecretsService, SystemSecretsService, UserSecretsService},
     snapshot::SnapshotService,
     traits::{
@@ -189,8 +189,14 @@ async fn full_walkthrough() {
     let system_secrets_store: Arc<dyn SystemSecretStore> = Arc::new(
         dyson_swarm::db::secrets::SqlxSystemSecretStore::new(pool.clone()),
     );
-    let user_secrets_svc = Arc::new(UserSecretsService::new(user_secrets_store, cipher_dir.clone()));
-    let system_secrets_svc = Arc::new(SystemSecretsService::new(system_secrets_store, cipher_dir.clone()));
+    let user_secrets_svc = Arc::new(UserSecretsService::new(
+        user_secrets_store,
+        cipher_dir.clone(),
+    ));
+    let system_secrets_svc = Arc::new(SystemSecretsService::new(
+        system_secrets_store,
+        cipher_dir.clone(),
+    ));
     let instance_svc = Arc::new(InstanceService::new(
         cube.clone(),
         instances_store.clone(),
@@ -204,10 +210,12 @@ async fn full_walkthrough() {
         cipher_dir.clone(),
     ));
     let backup: Arc<dyn BackupSink> = Arc::new(LocalDiskBackupSink::new(cube.clone()));
-    let snapshots_store: Arc<dyn SnapshotStore> =
-        Arc::new(dyson_swarm::db::snapshots::SqliteSnapshotStore::new(pool.clone()));
-    let policies_store: Arc<dyn PolicyStore> =
-        Arc::new(dyson_swarm::db::policies::SqlitePolicyStore::new(pool.clone()));
+    let snapshots_store: Arc<dyn SnapshotStore> = Arc::new(
+        dyson_swarm::db::snapshots::SqliteSnapshotStore::new(pool.clone()),
+    );
+    let policies_store: Arc<dyn PolicyStore> = Arc::new(
+        dyson_swarm::db::policies::SqlitePolicyStore::new(pool.clone()),
+    );
     let audit_store: Arc<dyn AuditStore> =
         Arc::new(dyson_swarm::db::audit::SqliteAuditStore::new(pool.clone()));
     let snapshot_svc = Arc::new(SnapshotService::new(
@@ -348,7 +356,9 @@ async fn full_walkthrough() {
 
     // Optional: secret put/delete round-trip.
     let r = admin
-        .put(format!("{swarm_url}/v1/instances/{inst_id}/secrets/SECRET_K"))
+        .put(format!(
+            "{swarm_url}/v1/instances/{inst_id}/secrets/SECRET_K"
+        ))
         .bearer_auth("admin-token")
         .json(&json!({"value": "v"}))
         .send()
@@ -367,7 +377,14 @@ async fn full_walkthrough() {
     let snap: serde_json::Value = r.json().await.unwrap();
     let snap_id = snap["id"].as_str().unwrap().to_string();
     assert_eq!(snap["kind"], "manual");
-    assert!(cube_state.snapshots.lock().unwrap().iter().any(|x| x == &snap_id));
+    assert!(
+        cube_state
+            .snapshots
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|x| x == &snap_id)
+    );
 
     // 5. Backup (local sink, kind=backup).
     let r = admin
@@ -415,10 +432,14 @@ async fn full_walkthrough() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let body = resp.bytes().await.unwrap();
-    let expected: &[u8] =
-        b"data: {\"chunk\":1}\n\ndata: {\"chunk\":2}\n\ndata: [DONE]\n\n";
+    let expected: &[u8] = b"data: {\"chunk\":1}\n\ndata: {\"chunk\":2}\n\ndata: [DONE]\n\n";
     assert_eq!(body.as_ref(), expected);
-    let auth_seen = llm_state.last_auth.lock().unwrap().clone().unwrap_or_default();
+    let auth_seen = llm_state
+        .last_auth
+        .lock()
+        .unwrap()
+        .clone()
+        .unwrap_or_default();
     assert_eq!(auth_seen, "Bearer sk-real", "adapter must swap to real key");
     assert_eq!(llm_state.calls.load(Ordering::SeqCst), 1);
 
@@ -469,5 +490,4 @@ async fn full_walkthrough() {
     assert_eq!(r.status(), 200);
     let pr: serde_json::Value = r.json().await.unwrap();
     assert_eq!(pr["status"], "healthy");
-
 }

@@ -103,7 +103,10 @@ mod tests {
         a.rewrite_auth(&mut headers, &mut url, "sk-real");
         assert!(headers.get(axum::http::header::AUTHORIZATION).is_none());
         assert_eq!(headers.get("x-api-key").unwrap(), "sk-real");
-        assert_eq!(headers.get("anthropic-version").unwrap(), DEFAULT_ANTHROPIC_VERSION);
+        assert_eq!(
+            headers.get("anthropic-version").unwrap(),
+            DEFAULT_ANTHROPIC_VERSION
+        );
     }
 
     #[test]
@@ -117,6 +120,9 @@ mod tests {
     fn apply_version_default_when_unset() {
         let mut headers = HeaderMap::new();
         apply_version(&mut headers, &cfg(None));
-        assert_eq!(headers.get("anthropic-version").unwrap(), DEFAULT_ANTHROPIC_VERSION);
+        assert_eq!(
+            headers.get("anthropic-version").unwrap(),
+            DEFAULT_ANTHROPIC_VERSION
+        );
     }
 }

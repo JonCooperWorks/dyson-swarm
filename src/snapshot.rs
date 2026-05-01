@@ -82,7 +82,10 @@ impl SnapshotService {
         owner_id: &str,
         instance_id: &str,
     ) -> Result<u64, SwarmError> {
-        Ok(self.snapshots.count_for_instance(owner_id, instance_id).await?)
+        Ok(self
+            .snapshots
+            .count_for_instance(owner_id, instance_id)
+            .await?)
     }
 
     /// Take a snapshot of the given instance. `kind=manual`.
@@ -143,11 +146,7 @@ impl SnapshotService {
     /// bundle to its local cache, persist the new path on the row, and
     /// return the updated row. Idempotent — a sink whose `pull` is a no-op
     /// (the local sink) will simply return the row unchanged.
-    pub async fn pull(
-        &self,
-        owner_id: &str,
-        snapshot_id: &str,
-    ) -> Result<SnapshotRow, SwarmError> {
+    pub async fn pull(&self, owner_id: &str, snapshot_id: &str) -> Result<SnapshotRow, SwarmError> {
         let mut row = self
             .snapshots
             .get(snapshot_id)
@@ -281,11 +280,7 @@ impl SnapshotService {
     /// sweeps unused snapshot bundles eventually. A warning is
     /// emitted so the operator can clean up on-disk bytes manually
     /// if needed.
-    pub async fn delete(
-        &self,
-        owner_id: &str,
-        snapshot_id: &str,
-    ) -> Result<(), SwarmError> {
+    pub async fn delete(&self, owner_id: &str, snapshot_id: &str) -> Result<(), SwarmError> {
         let Some(row) = self.snapshots.get(snapshot_id).await? else {
             return Ok(());
         };
@@ -504,10 +499,7 @@ mod tests {
 
     #[async_trait]
     impl CubeClient for MockCube {
-        async fn create_sandbox(
-            &self,
-            _: CreateSandboxArgs,
-        ) -> Result<SandboxInfo, CubeError> {
+        async fn create_sandbox(&self, _: CreateSandboxArgs) -> Result<SandboxInfo, CubeError> {
             let mut n = self.next.lock().unwrap();
             *n += 1;
             let sid = format!("sb-{}", *n);
@@ -585,15 +577,18 @@ mod tests {
     async fn snapshot_writes_manual_row_with_cube_id() {
         let (svc, isvc, _cube, _secrets, _instances, snaps) = build().await;
         let created = isvc
-            .create("legacy", CreateRequest {
-                template_id: "t".into(),
-                name: None,
-                task: None,
-                env: env_with_model(),
-                ttl_seconds: None,
-                network_policy: crate::network_policy::NetworkPolicy::default(),
-                mcp_servers: Vec::new(),
-            })
+            .create(
+                "legacy",
+                CreateRequest {
+                    template_id: "t".into(),
+                    name: None,
+                    task: None,
+                    env: env_with_model(),
+                    ttl_seconds: None,
+                    network_policy: crate::network_policy::NetworkPolicy::default(),
+                    mcp_servers: Vec::new(),
+                },
+            )
             .await
             .unwrap();
         let snap = svc.snapshot("legacy", &created.id).await.unwrap();
@@ -609,15 +604,18 @@ mod tests {
     async fn backup_writes_backup_row_local_sink_no_remote_uri() {
         let (svc, isvc, _cube, _secrets, _instances, snaps) = build().await;
         let created = isvc
-            .create("legacy", CreateRequest {
-                template_id: "t".into(),
-                name: None,
-                task: None,
-                env: env_with_model(),
-                ttl_seconds: None,
-                network_policy: crate::network_policy::NetworkPolicy::default(),
-                mcp_servers: Vec::new(),
-            })
+            .create(
+                "legacy",
+                CreateRequest {
+                    template_id: "t".into(),
+                    name: None,
+                    task: None,
+                    env: env_with_model(),
+                    ttl_seconds: None,
+                    network_policy: crate::network_policy::NetworkPolicy::default(),
+                    mcp_servers: Vec::new(),
+                },
+            )
             .await
             .unwrap();
         let snap = svc.backup("legacy", &created.id).await.unwrap();
@@ -638,9 +636,8 @@ mod tests {
         use crate::traits::{UserRow, UserStatus};
         let pool = open_in_memory().await.unwrap();
         let keys_tmp = tempfile::tempdir().unwrap();
-        let cipher_dir: Arc<dyn crate::envelope::CipherDirectory> = Arc::new(
-            crate::envelope::AgeCipherDirectory::new(keys_tmp.path()).unwrap(),
-        );
+        let cipher_dir: Arc<dyn crate::envelope::CipherDirectory> =
+            Arc::new(crate::envelope::AgeCipherDirectory::new(keys_tmp.path()).unwrap());
         let users: Arc<dyn crate::traits::UserStore> = Arc::new(
             crate::db::users::SqlxUserStore::new(pool.clone(), cipher_dir),
         );
@@ -668,31 +665,42 @@ mod tests {
         let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(pool.clone()));
         let snaps_store: Arc<dyn SnapshotStore> = Arc::new(SqliteSnapshotStore::new(pool.clone()));
         let isvc = Arc::new(InstanceService::new(
-            cube.clone(), instances.clone(), secrets, tokens, "http://t/llm",
+            cube.clone(),
+            instances.clone(),
+            secrets,
+            tokens,
+            "http://t/llm",
         ));
         let sink: Arc<dyn BackupSink> = Arc::new(LocalDiskBackupSink::new(cube.clone()));
-        let svc = SnapshotService::new(
-            cube, instances, snaps_store, sink, isvc.clone(),
-        );
+        let svc = SnapshotService::new(cube, instances, snaps_store, sink, isvc.clone());
 
         let alice_inst = isvc
-            .create("alice", CreateRequest {
-                template_id: "t".into(),
-                name: None,
-                task: None,
-                env: env_with_model(),
-                ttl_seconds: None,
-                network_policy: crate::network_policy::NetworkPolicy::default(),
-                mcp_servers: Vec::new(),
-            })
+            .create(
+                "alice",
+                CreateRequest {
+                    template_id: "t".into(),
+                    name: None,
+                    task: None,
+                    env: env_with_model(),
+                    ttl_seconds: None,
+                    network_policy: crate::network_policy::NetworkPolicy::default(),
+                    mcp_servers: Vec::new(),
+                },
+            )
             .await
             .unwrap();
         let _alice_snap = svc.snapshot("alice", &alice_inst.id).await.unwrap();
 
-        let err = svc.list_for_instance("bob", &alice_inst.id).await.unwrap_err();
+        let err = svc
+            .list_for_instance("bob", &alice_inst.id)
+            .await
+            .unwrap_err();
         assert!(matches!(err, SwarmError::NotFound));
 
-        let visible = svc.list_for_instance("alice", &alice_inst.id).await.unwrap();
+        let visible = svc
+            .list_for_instance("alice", &alice_inst.id)
+            .await
+            .unwrap();
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].owner_id, "alice");
     }
@@ -706,18 +714,24 @@ mod tests {
         // call doesn't silently re-open the runaway-snapshot DoS.
         let (svc, isvc, _cube, _secrets, _instances, _snaps) = build().await;
         let created = isvc
-            .create("legacy", CreateRequest {
-                template_id: "t".into(),
-                name: None,
-                task: None,
-                env: env_with_model(),
-                ttl_seconds: None,
-                network_policy: crate::network_policy::NetworkPolicy::default(),
-                mcp_servers: Vec::new(),
-            })
+            .create(
+                "legacy",
+                CreateRequest {
+                    template_id: "t".into(),
+                    name: None,
+                    task: None,
+                    env: env_with_model(),
+                    ttl_seconds: None,
+                    network_policy: crate::network_policy::NetworkPolicy::default(),
+                    mcp_servers: Vec::new(),
+                },
+            )
             .await
             .unwrap();
-        assert_eq!(svc.count_for_instance("legacy", &created.id).await.unwrap(), 0);
+        assert_eq!(
+            svc.count_for_instance("legacy", &created.id).await.unwrap(),
+            0
+        );
         for expected in 1u64..=3 {
             svc.snapshot("legacy", &created.id).await.unwrap();
             assert_eq!(
@@ -734,8 +748,12 @@ mod tests {
         // digest.  This is the property `restore` relies on to
         // detect tampering — A3 in the security review.
         let dir1 = tempfile::tempdir().unwrap();
-        tokio::fs::write(dir1.path().join("a.txt"), b"hello").await.unwrap();
-        tokio::fs::write(dir1.path().join("b.bin"), b"world").await.unwrap();
+        tokio::fs::write(dir1.path().join("a.txt"), b"hello")
+            .await
+            .unwrap();
+        tokio::fs::write(dir1.path().join("b.bin"), b"world")
+            .await
+            .unwrap();
         let h1 = super::hash_bundle(dir1.path()).await.unwrap();
 
         // Re-hash same dir → same digest.
@@ -744,23 +762,35 @@ mod tests {
 
         // Different dir, same content, same paths → same digest.
         let dir2 = tempfile::tempdir().unwrap();
-        tokio::fs::write(dir2.path().join("a.txt"), b"hello").await.unwrap();
-        tokio::fs::write(dir2.path().join("b.bin"), b"world").await.unwrap();
+        tokio::fs::write(dir2.path().join("a.txt"), b"hello")
+            .await
+            .unwrap();
+        tokio::fs::write(dir2.path().join("b.bin"), b"world")
+            .await
+            .unwrap();
         let h2 = super::hash_bundle(dir2.path()).await.unwrap();
         assert_eq!(h1, h2);
 
         // Same content, different path → different digest (path-
         // binding framing).
         let dir3 = tempfile::tempdir().unwrap();
-        tokio::fs::write(dir3.path().join("a.txt"), b"hello").await.unwrap();
-        tokio::fs::write(dir3.path().join("c.bin"), b"world").await.unwrap();
+        tokio::fs::write(dir3.path().join("a.txt"), b"hello")
+            .await
+            .unwrap();
+        tokio::fs::write(dir3.path().join("c.bin"), b"world")
+            .await
+            .unwrap();
         let h3 = super::hash_bundle(dir3.path()).await.unwrap();
         assert_ne!(h1, h3);
 
         // Mutated bytes → different digest.
         let dir4 = tempfile::tempdir().unwrap();
-        tokio::fs::write(dir4.path().join("a.txt"), b"hello").await.unwrap();
-        tokio::fs::write(dir4.path().join("b.bin"), b"WORLD").await.unwrap();
+        tokio::fs::write(dir4.path().join("a.txt"), b"hello")
+            .await
+            .unwrap();
+        tokio::fs::write(dir4.path().join("b.bin"), b"WORLD")
+            .await
+            .unwrap();
         let h4 = super::hash_bundle(dir4.path()).await.unwrap();
         assert_ne!(h1, h4);
     }
@@ -769,15 +799,18 @@ mod tests {
     async fn delete_tombstones_row_and_calls_cube() {
         let (svc, isvc, cube, _secrets, _instances, snaps) = build().await;
         let created = isvc
-            .create("legacy", CreateRequest {
-                template_id: "t".into(),
-                name: None,
-                task: None,
-                env: env_with_model(),
-                ttl_seconds: None,
-                network_policy: crate::network_policy::NetworkPolicy::default(),
-                mcp_servers: Vec::new(),
-            })
+            .create(
+                "legacy",
+                CreateRequest {
+                    template_id: "t".into(),
+                    name: None,
+                    task: None,
+                    env: env_with_model(),
+                    ttl_seconds: None,
+                    network_policy: crate::network_policy::NetworkPolicy::default(),
+                    mcp_servers: Vec::new(),
+                },
+            )
             .await
             .unwrap();
         let snap = svc.snapshot("legacy", &created.id).await.unwrap();
@@ -801,15 +834,18 @@ mod tests {
     async fn delete_is_idempotent_on_already_deleted() {
         let (svc, isvc, cube, _secrets, _instances, _snaps) = build().await;
         let created = isvc
-            .create("legacy", CreateRequest {
-                template_id: "t".into(),
-                name: None,
-                task: None,
-                env: env_with_model(),
-                ttl_seconds: None,
-                network_policy: crate::network_policy::NetworkPolicy::default(),
-                mcp_servers: Vec::new(),
-            })
+            .create(
+                "legacy",
+                CreateRequest {
+                    template_id: "t".into(),
+                    name: None,
+                    task: None,
+                    env: env_with_model(),
+                    ttl_seconds: None,
+                    network_policy: crate::network_policy::NetworkPolicy::default(),
+                    mcp_servers: Vec::new(),
+                },
+            )
             .await
             .unwrap();
         let snap = svc.snapshot("legacy", &created.id).await.unwrap();
@@ -831,15 +867,18 @@ mod tests {
         // on empty host_ip and orphan the row forever).
         let (svc, isvc, cube, _secrets, _instances, snaps) = build().await;
         let created = isvc
-            .create("legacy", CreateRequest {
-                template_id: "t".into(),
-                name: None,
-                task: None,
-                env: env_with_model(),
-                ttl_seconds: None,
-                network_policy: crate::network_policy::NetworkPolicy::default(),
-                mcp_servers: Vec::new(),
-            })
+            .create(
+                "legacy",
+                CreateRequest {
+                    template_id: "t".into(),
+                    name: None,
+                    task: None,
+                    env: env_with_model(),
+                    ttl_seconds: None,
+                    network_policy: crate::network_policy::NetworkPolicy::default(),
+                    mcp_servers: Vec::new(),
+                },
+            )
             .await
             .unwrap();
         // Insert a snapshot row directly with an empty host_ip — the
@@ -879,9 +918,8 @@ mod tests {
         use crate::traits::{UserRow, UserStatus};
         let pool = open_in_memory().await.unwrap();
         let keys_tmp = tempfile::tempdir().unwrap();
-        let cipher_dir: Arc<dyn crate::envelope::CipherDirectory> = Arc::new(
-            crate::envelope::AgeCipherDirectory::new(keys_tmp.path()).unwrap(),
-        );
+        let cipher_dir: Arc<dyn crate::envelope::CipherDirectory> =
+            Arc::new(crate::envelope::AgeCipherDirectory::new(keys_tmp.path()).unwrap());
         let users: Arc<dyn crate::traits::UserStore> = Arc::new(
             crate::db::users::SqlxUserStore::new(pool.clone(), cipher_dir),
         );
@@ -908,23 +946,28 @@ mod tests {
         let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(pool.clone()));
         let snaps_store: Arc<dyn SnapshotStore> = Arc::new(SqliteSnapshotStore::new(pool.clone()));
         let isvc = Arc::new(InstanceService::new(
-            cube.clone(), instances.clone(), secrets, tokens, "http://t/llm",
+            cube.clone(),
+            instances.clone(),
+            secrets,
+            tokens,
+            "http://t/llm",
         ));
         let sink: Arc<dyn BackupSink> = Arc::new(LocalDiskBackupSink::new(cube.clone()));
-        let svc = SnapshotService::new(
-            cube.clone(), instances, snaps_store, sink, isvc.clone(),
-        );
+        let svc = SnapshotService::new(cube.clone(), instances, snaps_store, sink, isvc.clone());
 
         let alice_inst = isvc
-            .create("alice", CreateRequest {
-                template_id: "t".into(),
-                name: None,
-                task: None,
-                env: env_with_model(),
-                ttl_seconds: None,
-                network_policy: crate::network_policy::NetworkPolicy::default(),
-                mcp_servers: Vec::new(),
-            })
+            .create(
+                "alice",
+                CreateRequest {
+                    template_id: "t".into(),
+                    name: None,
+                    task: None,
+                    env: env_with_model(),
+                    ttl_seconds: None,
+                    network_policy: crate::network_policy::NetworkPolicy::default(),
+                    mcp_servers: Vec::new(),
+                },
+            )
             .await
             .unwrap();
         let alice_snap = svc.snapshot("alice", &alice_inst.id).await.unwrap();
@@ -942,15 +985,18 @@ mod tests {
     async fn restore_creates_new_instance_with_carried_secrets() {
         let (svc, isvc, _cube, secrets, _instances, _snaps) = build().await;
         let src = isvc
-            .create("legacy", CreateRequest {
-                template_id: "t".into(),
-                name: None,
-                task: None,
-                env: env_with_model(),
-                ttl_seconds: None,
-                network_policy: crate::network_policy::NetworkPolicy::default(),
-                mcp_servers: Vec::new(),
-            })
+            .create(
+                "legacy",
+                CreateRequest {
+                    template_id: "t".into(),
+                    name: None,
+                    task: None,
+                    env: env_with_model(),
+                    ttl_seconds: None,
+                    network_policy: crate::network_policy::NetworkPolicy::default(),
+                    mcp_servers: Vec::new(),
+                },
+            )
             .await
             .unwrap();
         secrets.put(&src.id, "K", "carry").await.unwrap();
@@ -958,7 +1004,10 @@ mod tests {
         // remote_uri, so the restore proceeds without calling pull.
         let snap = svc.snapshot("legacy", &src.id).await.unwrap();
 
-        let new_inst = svc.restore("legacy", &snap.id, Some(60), BTreeMap::new()).await.unwrap();
+        let new_inst = svc
+            .restore("legacy", &snap.id, Some(60), BTreeMap::new())
+            .await
+            .unwrap();
         assert_ne!(new_inst.id, src.id);
         let copied = secrets.list(&new_inst.id).await.unwrap();
         assert_eq!(copied, vec![("K".into(), "carry".into())]);
@@ -970,9 +1019,8 @@ mod tests {
 
         let pool = open_in_memory().await.unwrap();
         let keys_tmp = tempfile::tempdir().unwrap();
-        let cipher_dir: Arc<dyn crate::envelope::CipherDirectory> = Arc::new(
-            crate::envelope::AgeCipherDirectory::new(keys_tmp.path()).unwrap(),
-        );
+        let cipher_dir: Arc<dyn crate::envelope::CipherDirectory> =
+            Arc::new(crate::envelope::AgeCipherDirectory::new(keys_tmp.path()).unwrap());
         let users: Arc<dyn crate::traits::UserStore> = Arc::new(
             crate::db::users::SqlxUserStore::new(pool.clone(), cipher_dir),
         );
@@ -998,26 +1046,34 @@ mod tests {
         let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(pool.clone()));
         let snaps: Arc<dyn SnapshotStore> = Arc::new(SqliteSnapshotStore::new(pool.clone()));
         let isvc = Arc::new(InstanceService::new(
-            cube.clone(), instances.clone(), secrets.clone(), tokens, "http://t/llm",
+            cube.clone(),
+            instances.clone(),
+            secrets.clone(),
+            tokens,
+            "http://t/llm",
         ));
         let sink: Arc<dyn BackupSink> = Arc::new(LocalDiskBackupSink::new(cube.clone()));
-        let svc = SnapshotService::new(
-            cube, instances, snaps.clone(), sink, isvc.clone(),
-        );
+        let svc = SnapshotService::new(cube, instances, snaps.clone(), sink, isvc.clone());
 
         let victim = isvc
-            .create("victim", CreateRequest {
-                template_id: "victim-template".into(),
-                name: Some("victim-name".into()),
-                task: Some("victim-task".into()),
-                env: env_with_model(),
-                ttl_seconds: None,
-                network_policy: crate::network_policy::NetworkPolicy::default(),
-                mcp_servers: Vec::new(),
-            })
+            .create(
+                "victim",
+                CreateRequest {
+                    template_id: "victim-template".into(),
+                    name: Some("victim-name".into()),
+                    task: Some("victim-task".into()),
+                    env: env_with_model(),
+                    ttl_seconds: None,
+                    network_policy: crate::network_policy::NetworkPolicy::default(),
+                    mcp_servers: Vec::new(),
+                },
+            )
             .await
             .unwrap();
-        secrets.put(&victim.id, "VICTIM_SECRET", "nope").await.unwrap();
+        secrets
+            .put(&victim.id, "VICTIM_SECRET", "nope")
+            .await
+            .unwrap();
 
         let forged = SnapshotRow {
             id: "snap-forged-cross-owner".into(),

@@ -26,8 +26,7 @@ use crate::auth::CallerIdentity;
 use crate::http::AppState;
 use crate::traits::{DeliveryRow, WebhookAuthScheme, WebhookRow};
 use crate::webhooks::{
-    DEFAULT_DELIVERY_LIMIT, MAX_WEBHOOK_BODY, WebhookError, WebhookSpec,
-    validate_webhook_name,
+    DEFAULT_DELIVERY_LIMIT, MAX_WEBHOOK_BODY, WebhookError, WebhookSpec, validate_webhook_name,
 };
 
 pub fn router(state: AppState) -> Router {
@@ -50,7 +49,10 @@ pub fn router(state: AppState) -> Router {
         // /webhooks rather than nested under it because it spans every
         // task on the instance — the URL would otherwise lie about
         // scope.
-        .route("/v1/instances/:id/deliveries", get(list_instance_deliveries))
+        .route(
+            "/v1/instances/:id/deliveries",
+            get(list_instance_deliveries),
+        )
         .route(
             "/v1/instances/:id/deliveries/:delivery_id",
             get(get_delivery),
@@ -215,8 +217,7 @@ impl DeliveryDetailView {
 /// site.  Standard alphabet, padded.  Called once per detail-page
 /// load, so a hot-path version isn't worth the bytes.
 fn base64_encode(input: &[u8]) -> String {
-    const ALPHA: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ALPHA: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
     let mut chunks = input.chunks_exact(3);
     for chunk in &mut chunks {
@@ -330,9 +331,7 @@ async fn create_webhook(
         return Err(StatusCode::BAD_REQUEST);
     }
     let scheme = parse_scheme(&body.auth_scheme)?;
-    if scheme != WebhookAuthScheme::None
-        && body.secret.as_deref().map_or(true, str::is_empty)
-    {
+    if scheme != WebhookAuthScheme::None && body.secret.as_deref().map_or(true, str::is_empty) {
         return Err(StatusCode::BAD_REQUEST);
     }
     // 409 when a row with this name already exists — POST is create-only;
@@ -448,7 +447,10 @@ async fn list_instance_deliveries(
         .and_then(|v| v.parse::<u32>().ok())
         .unwrap_or(DEFAULT_DELIVERY_LIMIT);
     let before = qs.get("before").and_then(|v| v.parse::<i64>().ok());
-    let webhook = qs.get("webhook").map(String::as_str).filter(|s| !s.is_empty());
+    let webhook = qs
+        .get("webhook")
+        .map(String::as_str)
+        .filter(|s| !s.is_empty());
     let q_raw = qs.get("q").map(String::as_str).filter(|s| !s.is_empty());
     // Hard cap on the search needle — past a few hundred chars it's
     // almost certainly a paste of a payload, and SQLite's LIKE on a
@@ -461,7 +463,9 @@ async fn list_instance_deliveries(
         .list_instance_deliveries(&caller.user_id, &id, webhook, q_raw, before, limit)
         .await
         .map_err(|e| err_to_status(&e))?;
-    Ok(Json(rows.into_iter().map(AuditDeliveryView::from_row).collect()))
+    Ok(Json(
+        rows.into_iter().map(AuditDeliveryView::from_row).collect(),
+    ))
 }
 
 async fn get_delivery(
@@ -542,9 +546,7 @@ async fn fire_webhook(
     let sig_header = headers
         .get("x-swarm-signature")
         .and_then(|v| v.to_str().ok());
-    let bearer_header = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok());
+    let bearer_header = headers.get("authorization").and_then(|v| v.to_str().ok());
     let request_id = headers
         .get("x-request-id")
         .and_then(|v| v.to_str().ok())

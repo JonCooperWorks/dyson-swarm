@@ -78,7 +78,12 @@ impl S3BackupSink {
     }
 
     fn remote_uri(&self, snapshot_id: &str) -> String {
-        format!("s3://{}/{}{}/", self.bucket.name(), self.prefix, snapshot_id)
+        format!(
+            "s3://{}/{}{}/",
+            self.bucket.name(),
+            self.prefix,
+            snapshot_id
+        )
     }
 }
 
@@ -177,11 +182,7 @@ impl BackupSink for S3BackupSink {
                 if let Some(parent) = dst_file.parent() {
                     tokio::fs::create_dir_all(parent).await.map_err(map_io)?;
                 }
-                let resp = self
-                    .bucket
-                    .get_object(&obj.key)
-                    .await
-                    .map_err(map_s3)?;
+                let resp = self.bucket.get_object(&obj.key).await.map_err(map_s3)?;
                 if !(200..300).contains(&resp.status_code()) {
                     return Err(BackupError::Sink(format!(
                         "get_object {} returned {}",
@@ -230,4 +231,3 @@ async fn cache_is_populated(p: &std::path::Path) -> Result<bool, BackupError> {
     let mut entries = tokio::fs::read_dir(p).await.map_err(map_io)?;
     Ok(entries.next_entry().await.map_err(map_io)?.is_some())
 }
-

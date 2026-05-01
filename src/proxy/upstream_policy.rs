@@ -124,7 +124,10 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_when_disabled() {
-        let policy = ByoConfig { enabled: false, allow_internal: false };
+        let policy = ByoConfig {
+            enabled: false,
+            allow_internal: false,
+        };
         let err = validate_byo_upstream(&policy, "http://8.8.8.8")
             .await
             .expect_err("disabled");
@@ -146,7 +149,10 @@ mod tests {
 
     #[tokio::test]
     async fn allow_internal_opt_in_accepts_local_targets() {
-        let policy = ByoConfig { enabled: true, allow_internal: true };
+        let policy = ByoConfig {
+            enabled: true,
+            allow_internal: true,
+        };
         validate_byo_upstream(&policy, "http://127.0.0.1:11434")
             .await
             .expect("internal allowed");

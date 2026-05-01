@@ -80,9 +80,7 @@ pub fn validate_webhook_name(name: &str) -> Result<(), &'static str> {
         .chars()
         .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
     {
-        return Err(
-            "webhook name must be lowercase ascii alphanumerics, hyphens or underscores",
-        );
+        return Err("webhook name must be lowercase ascii alphanumerics, hyphens or underscores");
     }
     Ok(())
 }
@@ -196,7 +194,10 @@ impl WebhookDispatcher for HttpWebhookDispatcher {
         headers: &[(String, String)],
         body: &[u8],
     ) -> Result<u16, String> {
-        let Some(sandbox_id) = instance.cube_sandbox_id.as_deref().filter(|s| !s.is_empty())
+        let Some(sandbox_id) = instance
+            .cube_sandbox_id
+            .as_deref()
+            .filter(|s| !s.is_empty())
         else {
             return Err("instance has no cube sandbox id".into());
         };
@@ -305,11 +306,8 @@ fn urlencode(s: &str) -> String {
     // ascii-alnum + - + _).
     let mut out = String::with_capacity(s.len());
     for &b in s.as_bytes() {
-        let unreserved = b.is_ascii_alphanumeric()
-            || b == b'-'
-            || b == b'_'
-            || b == b'.'
-            || b == b'~';
+        let unreserved =
+            b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.' || b == b'~';
         if unreserved {
             out.push(b as char);
         } else {
@@ -378,13 +376,8 @@ impl WebhookService {
     /// secret, `spec.secret_plaintext` must be `Some(...)` on create
     /// or whenever the scheme is being switched.  On update with the
     /// same scheme, `None` leaves the existing secret in place.
-    pub async fn put(
-        &self,
-        owner_id: &str,
-        spec: WebhookSpec,
-    ) -> Result<WebhookRow, WebhookError> {
-        validate_webhook_name(&spec.name)
-            .map_err(|m| WebhookError::BadRequest(m.to_string()))?;
+    pub async fn put(&self, owner_id: &str, spec: WebhookSpec) -> Result<WebhookRow, WebhookError> {
+        validate_webhook_name(&spec.name).map_err(|m| WebhookError::BadRequest(m.to_string()))?;
         self.ensure_owner(owner_id, &spec.instance_id).await?;
 
         let now = crate::now_secs();
@@ -395,7 +388,10 @@ impl WebhookService {
         // plaintext is provided AND the row already had one, or
         // (b) seal the new plaintext under the convention name.
         let secret_name = if spec.auth_scheme.needs_secret() {
-            match (&spec.secret_plaintext, existing.as_ref().and_then(|r| r.secret_name.as_ref())) {
+            match (
+                &spec.secret_plaintext,
+                existing.as_ref().and_then(|r| r.secret_name.as_ref()),
+            ) {
                 (Some(plain), _) => {
                     let target = webhook_secret_name(&spec.name);
                     self.secrets
@@ -446,7 +442,10 @@ impl WebhookService {
         // secrets list because of the `_webhook_` prefix filter).
         if let Ok(Some(row)) = self.webhooks.get(instance_id, name).await
             && let Some(secret_name) = row.secret_name.as_deref()
-            && let Err(e) = self.secrets.delete(owner_id, instance_id, secret_name).await
+            && let Err(e) = self
+                .secrets
+                .delete(owner_id, instance_id, secret_name)
+                .await
         {
             tracing::warn!(
                 instance = %instance_id, webhook = %name, error = %e,
@@ -465,7 +464,9 @@ impl WebhookService {
         enabled: bool,
     ) -> Result<WebhookRow, WebhookError> {
         self.ensure_owner(owner_id, instance_id).await?;
-        self.webhooks.set_enabled(instance_id, name, enabled).await?;
+        self.webhooks
+            .set_enabled(instance_id, name, enabled)
+            .await?;
         self.webhooks
             .get(instance_id, name)
             .await?
@@ -692,9 +693,7 @@ impl WebhookService {
             .ciphers
             .for_user(&owner_id)
             .map_err(|e| format!("cipher: {e}"))?;
-        let ct = cipher
-            .seal(body)
-            .map_err(|e| format!("seal: {e}"))?;
+        let ct = cipher.seal(body).map_err(|e| format!("seal: {e}"))?;
         Ok(Some(ct))
     }
 
@@ -742,12 +741,9 @@ impl WebhookService {
             }
             WebhookAuthScheme::HmacSha256 => {
                 let header = sig_header.ok_or(WebhookError::SignatureMismatch)?;
-                let provided_hex = header
-                    .strip_prefix("sha256=")
-                    .unwrap_or(header)
-                    .trim();
-                let provided = hex::decode(provided_hex)
-                    .map_err(|_| WebhookError::SignatureMismatch)?;
+                let provided_hex = header.strip_prefix("sha256=").unwrap_or(header).trim();
+                let provided =
+                    hex::decode(provided_hex).map_err(|_| WebhookError::SignatureMismatch)?;
                 let key = self.load_secret(&owner_id, &row).await?;
                 let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key.as_bytes())
                     .map_err(|_| WebhookError::SignatureMismatch)?;
@@ -760,17 +756,19 @@ impl WebhookService {
 
         let status = self
             .dispatcher
-            .dispatch(&instance, &row.name, &row.description, forward_headers, body)
+            .dispatch(
+                &instance,
+                &row.name,
+                &row.description,
+                forward_headers,
+                body,
+            )
             .await
             .map_err(WebhookError::Dispatch)?;
         Ok(status)
     }
 
-    async fn load_secret(
-        &self,
-        owner_id: &str,
-        row: &WebhookRow,
-    ) -> Result<String, WebhookError> {
+    async fn load_secret(&self, owner_id: &str, row: &WebhookRow) -> Result<String, WebhookError> {
         let secret_name = row
             .secret_name
             .as_deref()
@@ -783,11 +781,7 @@ impl WebhookService {
             .ok_or(WebhookError::SignatureMismatch)
     }
 
-    async fn ensure_owner(
-        &self,
-        owner_id: &str,
-        instance_id: &str,
-    ) -> Result<(), WebhookError> {
+    async fn ensure_owner(&self, owner_id: &str, instance_id: &str) -> Result<(), WebhookError> {
         match self.instances.get(owner_id, instance_id).await {
             Ok(_) => Ok(()),
             Err(crate::error::SwarmError::NotFound) => Err(WebhookError::NotFound),
@@ -887,7 +881,11 @@ mod tests {
 
     #[test]
     fn render_prompt_truncates_and_labels() {
-        let s = render_prompt("do thing", &[("X-Type".into(), "json".into())], b"{\"a\":1}");
+        let s = render_prompt(
+            "do thing",
+            &[("X-Type".into(), "json".into())],
+            b"{\"a\":1}",
+        );
         assert!(s.contains("do thing"));
         assert!(s.contains("X-Type=json"));
         assert!(s.contains("{\"a\":1}"));

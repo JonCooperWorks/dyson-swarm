@@ -58,12 +58,7 @@ impl SqlxSystemSecretStore {
 
 #[async_trait]
 impl SecretStore for SqlxSecretStore {
-    async fn put(
-        &self,
-        instance_id: &str,
-        name: &str,
-        ciphertext: &str,
-    ) -> Result<(), StoreError> {
+    async fn put(&self, instance_id: &str, name: &str, ciphertext: &str) -> Result<(), StoreError> {
         let now = now_secs();
         sqlx::query(
             "INSERT INTO instance_secrets (instance_id, name, ciphertext, created_at, updated_at) \
@@ -116,12 +111,7 @@ impl SecretStore for SqlxSecretStore {
 
 #[async_trait]
 impl UserSecretStore for SqlxUserSecretStore {
-    async fn put(
-        &self,
-        user_id: &str,
-        name: &str,
-        ciphertext: &str,
-    ) -> Result<(), StoreError> {
+    async fn put(&self, user_id: &str, name: &str, ciphertext: &str) -> Result<(), StoreError> {
         let now = now_secs();
         sqlx::query(
             "INSERT INTO user_secrets (user_id, name, ciphertext, created_at, updated_at) \
@@ -140,21 +130,17 @@ impl UserSecretStore for SqlxUserSecretStore {
         Ok(())
     }
 
-    async fn get(
-        &self,
-        user_id: &str,
-        name: &str,
-    ) -> Result<Option<String>, StoreError> {
-        let row = sqlx::query(
-            "SELECT ciphertext FROM user_secrets WHERE user_id = ? AND name = ?",
-        )
-        .bind(user_id)
-        .bind(name)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(map_sqlx)?;
+    async fn get(&self, user_id: &str, name: &str) -> Result<Option<String>, StoreError> {
+        let row = sqlx::query("SELECT ciphertext FROM user_secrets WHERE user_id = ? AND name = ?")
+            .bind(user_id)
+            .bind(name)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
         match row {
-            Some(r) => Ok(Some(r.try_get::<String, _>("ciphertext").map_err(map_sqlx)?)),
+            Some(r) => Ok(Some(
+                r.try_get::<String, _>("ciphertext").map_err(map_sqlx)?,
+            )),
             None => Ok(None),
         }
     }
@@ -218,7 +204,9 @@ impl SystemSecretStore for SqlxSystemSecretStore {
             .await
             .map_err(map_sqlx)?;
         match row {
-            Some(r) => Ok(Some(r.try_get::<String, _>("ciphertext").map_err(map_sqlx)?)),
+            Some(r) => Ok(Some(
+                r.try_get::<String, _>("ciphertext").map_err(map_sqlx)?,
+            )),
             None => Ok(None),
         }
     }

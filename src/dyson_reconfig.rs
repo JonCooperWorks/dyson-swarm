@@ -55,9 +55,8 @@ pub struct DysonReconfigurerHttp {
     /// poison the map and turn every future `ensure_secret` into an
     /// `expect`-failure.  The map is GC'd as instances finalise their
     /// first mint and as instances are destroyed (`forget_secret`).
-    mint_locks: Arc<parking_lot::Mutex<
-        std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>,
-    >>,
+    mint_locks:
+        Arc<parking_lot::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
 }
 
 impl DysonReconfigurerHttp {
@@ -79,9 +78,13 @@ impl DysonReconfigurerHttp {
                         tracing::info!(path = %path, "reconfigurer: trusting cube root CA");
                         b = b.add_root_certificate(cert);
                     }
-                    Err(e) => tracing::error!(path = %path, error = %e, "reconfigurer: parse PEM failed"),
+                    Err(e) => {
+                        tracing::error!(path = %path, error = %e, "reconfigurer: parse PEM failed")
+                    }
                 },
-                Err(e) => tracing::error!(path = %path, error = %e, "reconfigurer: read PEM failed"),
+                Err(e) => {
+                    tracing::error!(path = %path, error = %e, "reconfigurer: read PEM failed")
+                }
             }
         }
         Ok(Self {
@@ -98,7 +101,12 @@ impl DysonReconfigurerHttp {
     async fn ensure_secret(&self, instance_id: &str) -> Result<String, String> {
         let name = configure_secret_name(instance_id);
         // Fast path: secret already sealed.
-        if let Some(plain) = self.system_secrets.get(&name).await.map_err(|e| e.to_string())? {
+        if let Some(plain) = self
+            .system_secrets
+            .get(&name)
+            .await
+            .map_err(|e| e.to_string())?
+        {
             return String::from_utf8(plain)
                 .map_err(|_| "non-utf8 configure secret in system_secrets".to_string());
         }
@@ -115,7 +123,12 @@ impl DysonReconfigurerHttp {
         let _guard = lock.lock().await;
         // Re-check under the lock — another caller may have minted while
         // we were waiting.
-        if let Some(plain) = self.system_secrets.get(&name).await.map_err(|e| e.to_string())? {
+        if let Some(plain) = self
+            .system_secrets
+            .get(&name)
+            .await
+            .map_err(|e| e.to_string())?
+        {
             return String::from_utf8(plain)
                 .map_err(|_| "non-utf8 configure secret in system_secrets".to_string());
         }
@@ -253,11 +266,7 @@ impl DysonReconfigurer for DysonReconfigurerHttp {
         Ok(())
     }
 
-    async fn is_idle(
-        &self,
-        instance_id: &str,
-        sandbox_id: &str,
-    ) -> Result<(bool, u32), String> {
+    async fn is_idle(&self, instance_id: &str, sandbox_id: &str) -> Result<(bool, u32), String> {
         let secret = self.ensure_secret(instance_id).await?;
         let url = self.admin_url(sandbox_id, "idle");
         let resp = self
@@ -284,11 +293,7 @@ impl DysonReconfigurer for DysonReconfigurerHttp {
         Ok((idle, in_flight))
     }
 
-    async fn quiesce(
-        &self,
-        instance_id: &str,
-        sandbox_id: &str,
-    ) -> Result<bool, String> {
+    async fn quiesce(&self, instance_id: &str, sandbox_id: &str) -> Result<bool, String> {
         let secret = self.ensure_secret(instance_id).await?;
         let url = self.admin_url(sandbox_id, "quiesce");
         let resp = self
@@ -312,11 +317,7 @@ impl DysonReconfigurer for DysonReconfigurerHttp {
         Ok(true)
     }
 
-    async fn unquiesce(
-        &self,
-        instance_id: &str,
-        sandbox_id: &str,
-    ) -> Result<(), String> {
+    async fn unquiesce(&self, instance_id: &str, sandbox_id: &str) -> Result<(), String> {
         let secret = self.ensure_secret(instance_id).await?;
         let url = self.admin_url(sandbox_id, "unquiesce");
         let resp = self
@@ -340,10 +341,7 @@ impl DysonReconfigurer for DysonReconfigurerHttp {
 /// Best-effort — log on failure, never block destroy on it.  Called
 /// from `instance.destroy()` so the sealed plaintext doesn't linger
 /// after the sandbox is gone.
-pub async fn forget_secret(
-    system_secrets: &SystemSecretsService,
-    instance_id: &str,
-) {
+pub async fn forget_secret(system_secrets: &SystemSecretsService, instance_id: &str) {
     let name = configure_secret_name(instance_id);
     if let Err(err) = system_secrets.delete(&name).await {
         tracing::warn!(
@@ -377,8 +375,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let cipher_dir: Arc<dyn crate::envelope::CipherDirectory> =
             Arc::new(AgeCipherDirectory::new(tmp.path()).unwrap());
-        let store: Arc<dyn SystemSecretStore> =
-            Arc::new(SqlxSystemSecretStore::new(pool));
+        let store: Arc<dyn SystemSecretStore> = Arc::new(SqlxSystemSecretStore::new(pool));
         let system_secrets = Arc::new(SystemSecretsService::new(store, cipher_dir));
 
         let r = DysonReconfigurerHttp::new("cube.test:8443", system_secrets.clone()).unwrap();
@@ -391,7 +388,9 @@ mod tests {
         let mut handles = Vec::new();
         for _ in 0..16 {
             let r = r.clone();
-            handles.push(tokio::spawn(async move { r.ensure_secret(instance_id).await }));
+            handles.push(tokio::spawn(
+                async move { r.ensure_secret(instance_id).await },
+            ));
         }
         let mut secrets = Vec::with_capacity(16);
         for h in handles {
@@ -400,7 +399,10 @@ mod tests {
         // Every caller must see the same sealed plaintext.
         let first = secrets[0].clone();
         for s in &secrets {
-            assert_eq!(s, &first, "ensure_secret must not mint twice for one instance");
+            assert_eq!(
+                s, &first,
+                "ensure_secret must not mint twice for one instance"
+            );
         }
         // And the sealed value must equal what callers observed.
         let sealed = system_secrets
@@ -422,8 +424,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let cipher_dir: Arc<dyn crate::envelope::CipherDirectory> =
             Arc::new(AgeCipherDirectory::new(tmp.path()).unwrap());
-        let store: Arc<dyn SystemSecretStore> =
-            Arc::new(SqlxSystemSecretStore::new(pool));
+        let store: Arc<dyn SystemSecretStore> = Arc::new(SqlxSystemSecretStore::new(pool));
         let system_secrets = Arc::new(SystemSecretsService::new(store, cipher_dir));
 
         let r = DysonReconfigurerHttp::new("cube.test:8443", system_secrets.clone()).unwrap();

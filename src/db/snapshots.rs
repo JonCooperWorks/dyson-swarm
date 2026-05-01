@@ -186,8 +186,8 @@ mod tests {
             .create(InstanceRow {
                 id: id.into(),
                 owner_id: "legacy".into(),
-            name: String::new(),
-            task: String::new(),
+                name: String::new(),
+                task: String::new(),
                 cube_sandbox_id: None,
                 template_id: "t".into(),
                 status: InstanceStatus::Live,
@@ -233,7 +233,10 @@ mod tests {
         let store = SqliteSnapshotStore::new(pool);
         store.insert(&snap("s1", None, "i1")).await.unwrap();
         store.insert(&snap("s2", Some("s1"), "i1")).await.unwrap();
-        store.update_remote_uri("s2", "s3://bucket/key/s2/").await.unwrap();
+        store
+            .update_remote_uri("s2", "s3://bucket/key/s2/")
+            .await
+            .unwrap();
         let g = store.get("s2").await.unwrap().unwrap();
         assert_eq!(g.parent_snapshot_id.as_deref(), Some("s1"));
         assert_eq!(g.remote_uri.as_deref(), Some("s3://bucket/key/s2/"));

@@ -9,6 +9,9 @@ use reqwest::Method;
 use dyson_swarm::{
     api_client::ApiClient,
     auth::AuthState,
+    auth::{
+        Authenticator, UserAuthState, bearer::BearerAuthenticator, chain::ChainAuthenticator, oidc,
+    },
     backup::{local::LocalDiskBackupSink, s3::S3BackupSink},
     cli::{self, Command, SecretsAction},
     config, cube_client, db,
@@ -17,10 +20,9 @@ use dyson_swarm::{
     instance::InstanceService,
     logging,
     probe::{self, HttpHealthProber},
-    proxy::{self, policy_check::InstancePolicy, ProxyService},
+    proxy::{self, ProxyService, policy_check::InstancePolicy},
     secrets::SecretsService,
     snapshot::SnapshotService,
-    auth::{bearer::BearerAuthenticator, chain::ChainAuthenticator, oidc, Authenticator, UserAuthState},
     traits::{
         AuditStore, BackupSink, CubeClient, HealthProber, InstanceStore, PolicyStore, SecretStore,
         SnapshotStore, TokenStore, UserStore,
@@ -94,12 +96,20 @@ async fn main() -> ExitCode {
             include_destroyed,
         } => run_list(&cfg, args.dangerous_no_auth, status, include_destroyed).await,
         Command::Snapshot { id } => {
-            run_simple_post(&cfg, args.dangerous_no_auth, &format!("/v1/instances/{id}/snapshot"))
-                .await
+            run_simple_post(
+                &cfg,
+                args.dangerous_no_auth,
+                &format!("/v1/instances/{id}/snapshot"),
+            )
+            .await
         }
         Command::Backup { id } => {
-            run_simple_post(&cfg, args.dangerous_no_auth, &format!("/v1/instances/{id}/backup"))
-                .await
+            run_simple_post(
+                &cfg,
+                args.dangerous_no_auth,
+                &format!("/v1/instances/{id}/backup"),
+            )
+            .await
         }
         Command::Restore {
             instance,
@@ -147,7 +157,9 @@ async fn run_mint_api_key(
     let cipher_dir = match dyson_swarm::envelope::AgeCipherDirectory::new(
         cfg.keys_dir.clone().unwrap_or_default(),
     ) {
-        Ok(d) => std::sync::Arc::new(d) as std::sync::Arc<dyn dyson_swarm::envelope::CipherDirectory>,
+        Ok(d) => {
+            std::sync::Arc::new(d) as std::sync::Arc<dyn dyson_swarm::envelope::CipherDirectory>
+        }
         Err(err) => {
             eprintln!("keys_dir open: {err}");
             return ExitCode::from(2);
@@ -182,9 +194,10 @@ async fn run_dyson_skills(cfg: &config::Config, id: String) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let instances_store: std::sync::Arc<dyn dyson_swarm::traits::InstanceStore> = std::sync::Arc::new(
-        dyson_swarm::db::instances::SqlxInstanceStore::new(pool.clone()),
-    );
+    let instances_store: std::sync::Arc<dyn dyson_swarm::traits::InstanceStore> =
+        std::sync::Arc::new(dyson_swarm::db::instances::SqlxInstanceStore::new(
+            pool.clone(),
+        ));
     let row = match instances_store.get(&id).await {
         Ok(Some(r)) => r,
         Ok(None) => {
@@ -203,8 +216,12 @@ async fn run_dyson_skills(cfg: &config::Config, id: String) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let cipher_dir = match dyson_swarm::envelope::AgeCipherDirectory::new(cfg.keys_dir.clone().unwrap_or_default()) {
-        Ok(d) => std::sync::Arc::new(d) as std::sync::Arc<dyn dyson_swarm::envelope::CipherDirectory>,
+    let cipher_dir = match dyson_swarm::envelope::AgeCipherDirectory::new(
+        cfg.keys_dir.clone().unwrap_or_default(),
+    ) {
+        Ok(d) => {
+            std::sync::Arc::new(d) as std::sync::Arc<dyn dyson_swarm::envelope::CipherDirectory>
+        }
         Err(err) => {
             eprintln!("keys_dir open: {err}");
             return ExitCode::from(2);
@@ -212,19 +229,24 @@ async fn run_dyson_skills(cfg: &config::Config, id: String) -> ExitCode {
     };
     let system_secrets_store: std::sync::Arc<dyn dyson_swarm::traits::SystemSecretStore> =
         std::sync::Arc::new(dyson_swarm::db::secrets::SqlxSystemSecretStore::new(pool));
-    let system_secrets = std::sync::Arc::new(
-        dyson_swarm::secrets::SystemSecretsService::new(system_secrets_store, cipher_dir),
-    );
-    let reconfigurer = match DysonReconfigurerHttp::new(cfg.cube.sandbox_domain.clone(), system_secrets) {
-        Ok(r) => r,
-        Err(err) => {
-            eprintln!("reconfigurer init: {err}");
-            return ExitCode::from(2);
-        }
-    };
+    let system_secrets = std::sync::Arc::new(dyson_swarm::secrets::SystemSecretsService::new(
+        system_secrets_store,
+        cipher_dir,
+    ));
+    let reconfigurer =
+        match DysonReconfigurerHttp::new(cfg.cube.sandbox_domain.clone(), system_secrets) {
+            Ok(r) => r,
+            Err(err) => {
+                eprintln!("reconfigurer init: {err}");
+                return ExitCode::from(2);
+            }
+        };
     match reconfigurer.get_skills(&id, &sandbox_id).await {
         Ok(v) => {
-            println!("{}", serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string()));
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string())
+            );
             ExitCode::SUCCESS
         }
         Err(err) => {
@@ -252,10 +274,12 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     };
     let instances_store: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(pool.clone()));
     let secrets_store: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
-    let user_secrets_store: Arc<dyn dyson_swarm::traits::UserSecretStore> =
-        Arc::new(dyson_swarm::db::secrets::SqlxUserSecretStore::new(pool.clone()));
-    let system_secrets_store: Arc<dyn dyson_swarm::traits::SystemSecretStore> =
-        Arc::new(dyson_swarm::db::secrets::SqlxSystemSecretStore::new(pool.clone()));
+    let user_secrets_store: Arc<dyn dyson_swarm::traits::UserSecretStore> = Arc::new(
+        dyson_swarm::db::secrets::SqlxUserSecretStore::new(pool.clone()),
+    );
+    let system_secrets_store: Arc<dyn dyson_swarm::traits::SystemSecretStore> = Arc::new(
+        dyson_swarm::db::secrets::SqlxSystemSecretStore::new(pool.clone()),
+    );
     let tokens_store: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(pool.clone()));
 
     // Per-user envelope encryption directory.  Lazy-creates an age
@@ -272,10 +296,11 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         Arc::new(db::snapshots::SqliteSnapshotStore::new(pool.clone()));
     let policies_store: Arc<dyn PolicyStore> =
         Arc::new(db::policies::SqlitePolicyStore::new(pool.clone()));
-    let audit_store: Arc<dyn AuditStore> =
-        Arc::new(db::audit::SqliteAuditStore::new(pool.clone()));
-    let users_store: Arc<dyn UserStore> =
-        Arc::new(db::users::SqlxUserStore::new(pool.clone(), cipher_dir.clone()));
+    let audit_store: Arc<dyn AuditStore> = Arc::new(db::audit::SqliteAuditStore::new(pool.clone()));
+    let users_store: Arc<dyn UserStore> = Arc::new(db::users::SqlxUserStore::new(
+        pool.clone(),
+        cipher_dir.clone(),
+    ));
 
     // Dyson agents inside cube sandboxes can't reach swarm's bind
     // (which is loopback 127.0.0.1:8080 by design — Caddy is the only
@@ -432,11 +457,7 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     let backup_sink: Arc<dyn BackupSink> = match cfg.backup.sink {
         config::BackupSinkKind::Local => Arc::new(LocalDiskBackupSink::new(cube.clone())),
         config::BackupSinkKind::S3 => {
-            let s3cfg = cfg
-                .backup
-                .s3
-                .as_ref()
-                .expect("validated by Config::load");
+            let s3cfg = cfg.backup.s3.as_ref().expect("validated by Config::load");
             match S3BackupSink::new(s3cfg, cfg.backup.local_cache_dir.clone(), cube.clone()) {
                 Ok(s) => Arc::new(s),
                 Err(err) => {
@@ -515,9 +536,7 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
                 }
             });
         } else {
-            tracing::debug!(
-                "rotate-binary: default_template_id unset — startup sweep skipped"
-            );
+            tracing::debug!("rotate-binary: default_template_id unset — startup sweep skipped");
         }
     }
 
@@ -580,7 +599,9 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     // the proxy and the admin endpoints share one resolver.
     let or_provisioning: Option<Arc<dyn dyson_swarm::openrouter::Provisioning>> =
         match resolve_or_provisioning_async(&cfg, system_secrets_svc.as_ref()).await {
-            Ok(Some(client)) => Some(Arc::new(client) as Arc<dyn dyson_swarm::openrouter::Provisioning>),
+            Ok(Some(client)) => {
+                Some(Arc::new(client) as Arc<dyn dyson_swarm::openrouter::Provisioning>)
+            }
             Ok(None) => None,
             Err(err) => {
                 tracing::error!(error = %err, "openrouter provisioning init failed");
@@ -601,18 +622,14 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     // when set, the TOML value remains as a fallback for un-migrated
     // deployments.  Read once at startup — rotating an api key
     // requires a swarm restart, which is fine for v1.
-    let providers_resolved = match overlay_provider_keys(
-        cfg.providers.clone(),
-        system_secrets_svc.as_ref(),
-    )
-    .await
-    {
-        Ok(p) => p,
-        Err(err) => {
-            tracing::error!(error = %err, "system_secrets overlay failed");
-            return ExitCode::from(2);
-        }
-    };
+    let providers_resolved =
+        match overlay_provider_keys(cfg.providers.clone(), system_secrets_svc.as_ref()).await {
+            Ok(p) => p,
+            Err(err) => {
+                tracing::error!(error = %err, "system_secrets overlay failed");
+                return ExitCode::from(2);
+            }
+        };
 
     let providers_for_app = Arc::new(providers_resolved.clone());
     let mut proxy = match ProxyService::new(
@@ -702,10 +719,12 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     // shared cube-trusted reqwest client so it can reach a sandbox at
     // `<port>-<sandbox_id>.<sandbox_domain>` over cubeproxy's
     // mkcert-rooted TLS (same path `dyson_proxy::forward` takes).
-    let webhook_store: Arc<dyn dyson_swarm::traits::WebhookStore> =
-        Arc::new(dyson_swarm::db::webhooks::SqlxWebhookStore::new(pool.clone()));
-    let delivery_store: Arc<dyn dyson_swarm::traits::DeliveryStore> =
-        Arc::new(dyson_swarm::db::webhooks::SqlxDeliveryStore::new(pool.clone()));
+    let webhook_store: Arc<dyn dyson_swarm::traits::WebhookStore> = Arc::new(
+        dyson_swarm::db::webhooks::SqlxWebhookStore::new(pool.clone()),
+    );
+    let delivery_store: Arc<dyn dyson_swarm::traits::DeliveryStore> = Arc::new(
+        dyson_swarm::db::webhooks::SqlxDeliveryStore::new(pool.clone()),
+    );
     let webhook_dispatcher: Arc<dyn dyson_swarm::webhooks::WebhookDispatcher> = {
         let http_client = match http::dyson_proxy::build_client() {
             Ok(c) => c,
@@ -770,10 +789,7 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
             cfg.cube_profiles.clone(),
         )),
         dyson_http: http::dyson_proxy::build_client().expect("dyson http client init"),
-        models_upstream: cfg
-            .providers
-            .get("openrouter")
-            .map(|p| p.upstream.clone()),
+        models_upstream: cfg.providers.get("openrouter").map(|p| p.upstream.clone()),
         models_cache: http::models::ModelsCache::new(),
         openrouter_provisioning: or_provisioning,
         user_or_keys,
@@ -794,10 +810,9 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     };
     tracing::info!(bind = %cfg.bind, db = %cfg.db_path.display(), "swarm started");
 
-    let server = axum::serve(listener, app)
-        .with_graceful_shutdown(async {
-            let _ = wait_for_shutdown().await;
-        });
+    let server = axum::serve(listener, app).with_graceful_shutdown(async {
+        let _ = wait_for_shutdown().await;
+    });
     if let Err(err) = server.await {
         tracing::error!(error = %err, "server exited with error");
         return ExitCode::FAILURE;
@@ -821,7 +836,9 @@ async fn overlay_provider_keys(
 ) -> Result<config::Providers, String> {
     let names: Vec<String> = providers.names().map(str::to_string).collect();
     for name in names {
-        let Some(cfg) = providers.get_mut(&name) else { continue };
+        let Some(cfg) = providers.get_mut(&name) else {
+            continue;
+        };
         let key = format!("provider.{name}.api_key");
         match secrets.get_str(&key).await {
             Ok(Some(value)) => {
@@ -864,7 +881,9 @@ async fn resolve_or_provisioning_secret(
         tracing::info!("stage 3: openrouter provisioning key sourced from system_secrets");
         return Ok(Some(value.trim().to_owned()));
     }
-    let Some(or_cfg) = &cfg.openrouter else { return Ok(None); };
+    let Some(or_cfg) = &cfg.openrouter else {
+        return Ok(None);
+    };
     match or_cfg.provisioning_key.as_deref() {
         Some(k) if !k.trim().is_empty() => Ok(Some(k.trim().to_owned())),
         _ => Ok(None),
@@ -1176,7 +1195,7 @@ async fn run_restore(
 }
 
 async fn wait_for_shutdown() -> std::io::Result<()> {
-    use tokio::signal::unix::{signal, SignalKind};
+    use tokio::signal::unix::{SignalKind, signal};
     let mut term = signal(SignalKind::terminate())?;
     let mut int = signal(SignalKind::interrupt())?;
     tokio::select! {

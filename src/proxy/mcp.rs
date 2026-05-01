@@ -22,7 +22,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
-use crate::auth::{extract_bearer, CallerIdentity};
+use crate::auth::{CallerIdentity, extract_bearer};
 use crate::error::SwarmError;
 use crate::instance::InstanceService;
 use crate::mcp_servers::{
@@ -167,7 +167,9 @@ async fn forward(
     // 3. Refresh OAuth tokens if needed.  When the access token is past
     //    or near expiry, swap in a fresh pair using the refresh_token —
     //    the agent never sees the spin.
-    if let Err(err) = ensure_fresh_oauth(&svc, &owner_id, &instance_id, &server_name, &mut entry).await {
+    if let Err(err) =
+        ensure_fresh_oauth(&svc, &owner_id, &instance_id, &server_name, &mut entry).await
+    {
         tracing::warn!(error = %err, "mcp: oauth refresh failed");
         return error_resp(StatusCode::BAD_GATEWAY, "oauth refresh failed");
     }
@@ -221,7 +223,12 @@ async fn forward(
         }
         McpAuthSpec::Oauth { .. } => match entry.oauth_tokens.as_ref() {
             Some(tk) => outbound = outbound.bearer_auth(&tk.access_token),
-            None => return error_resp(StatusCode::PRECONDITION_REQUIRED, "oauth not authorised yet"),
+            None => {
+                return error_resp(
+                    StatusCode::PRECONDITION_REQUIRED,
+                    "oauth not authorised yet",
+                );
+            }
         },
     }
 
@@ -244,8 +251,8 @@ async fn forward(
 
     // 5. Stream the upstream response back to the agent.  Preserves the
     //    SSE envelope MCP streamable HTTP servers use.
-    let status = StatusCode::from_u16(resp.status().as_u16())
-        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    let status =
+        StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     let upstream_headers = resp.headers().clone();
     let upstream_ct = upstream_headers
         .get(axum::http::header::CONTENT_TYPE)
@@ -390,36 +397,55 @@ async fn oauth_start(
     if !owner_owns_instance(&svc, &owner_id, &instance_id).await {
         return Err(error_resp(StatusCode::NOT_FOUND, "no such instance"));
     }
-    let entry = mcp_servers::get(&svc.user_secrets, &owner_id, &instance_id, &body.server_name)
-        .await
-        .map_err(|e| {
-            tracing::warn!(error = %e, "mcp: oauth_start secret read failed");
-            error_resp(StatusCode::INTERNAL_SERVER_ERROR, "secret store error")
-        })?
-        .ok_or_else(|| error_resp(StatusCode::NOT_FOUND, "unknown mcp server"))?;
-    let (scopes, client_id_in, client_secret_in, auth_url_override, token_url_override, registration_url_override) =
-        match &entry.auth {
-            McpAuthSpec::Oauth {
-                scopes,
-                client_id,
-                client_secret,
-                authorization_url,
-                token_url,
-                registration_url,
-            } => (
-                scopes.clone(),
-                client_id.clone(),
-                client_secret.clone(),
-                authorization_url.clone(),
-                token_url.clone(),
-                registration_url.clone(),
-            ),
-            _ => return Err(error_resp(StatusCode::BAD_REQUEST, "server is not oauth-configured")),
-        };
+    let entry = mcp_servers::get(
+        &svc.user_secrets,
+        &owner_id,
+        &instance_id,
+        &body.server_name,
+    )
+    .await
+    .map_err(|e| {
+        tracing::warn!(error = %e, "mcp: oauth_start secret read failed");
+        error_resp(StatusCode::INTERNAL_SERVER_ERROR, "secret store error")
+    })?
+    .ok_or_else(|| error_resp(StatusCode::NOT_FOUND, "unknown mcp server"))?;
+    let (
+        scopes,
+        client_id_in,
+        client_secret_in,
+        auth_url_override,
+        token_url_override,
+        registration_url_override,
+    ) = match &entry.auth {
+        McpAuthSpec::Oauth {
+            scopes,
+            client_id,
+            client_secret,
+            authorization_url,
+            token_url,
+            registration_url,
+        } => (
+            scopes.clone(),
+            client_id.clone(),
+            client_secret.clone(),
+            authorization_url.clone(),
+            token_url.clone(),
+            registration_url.clone(),
+        ),
+        _ => {
+            return Err(error_resp(
+                StatusCode::BAD_REQUEST,
+                "server is not oauth-configured",
+            ));
+        }
+    };
 
-    let redirect_uri = svc
-        .redirect_uri()
-        .ok_or_else(|| error_resp(StatusCode::SERVICE_UNAVAILABLE, "swarm hostname not configured"))?;
+    let redirect_uri = svc.redirect_uri().ok_or_else(|| {
+        error_resp(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "swarm hostname not configured",
+        )
+    })?;
 
     // Resolve metadata: caller-supplied URLs win; otherwise discover.
     let metadata = match (auth_url_override.as_ref(), token_url_override.as_ref()) {
@@ -428,10 +454,12 @@ async fn oauth_start(
             token_endpoint: t.clone(),
             registration_endpoint: registration_url_override.clone(),
         },
-        _ => mcp_servers::discover_metadata(&entry.url, &svc.http).await.map_err(|e| {
-            tracing::warn!(error = %e, "mcp: discovery failed");
-            error_resp(StatusCode::BAD_GATEWAY, "oauth discovery failed")
-        })?,
+        _ => mcp_servers::discover_metadata(&entry.url, &svc.http)
+            .await
+            .map_err(|e| {
+                tracing::warn!(error = %e, "mcp: discovery failed");
+                error_resp(StatusCode::BAD_GATEWAY, "oauth discovery failed")
+            })?,
     };
 
     // DCR if no client_id was provided.
@@ -442,7 +470,12 @@ async fn oauth_start(
                 .registration_endpoint
                 .clone()
                 .or(registration_url_override)
-                .ok_or_else(|| error_resp(StatusCode::BAD_REQUEST, "no client_id and no registration endpoint"))?;
+                .ok_or_else(|| {
+                    error_resp(
+                        StatusCode::BAD_REQUEST,
+                        "no client_id and no registration endpoint",
+                    )
+                })?;
             let dcr = mcp_servers::register_client(
                 &reg_url,
                 &DcrRequest {
@@ -465,7 +498,10 @@ async fn oauth_start(
             .await
             .map_err(|e| {
                 tracing::warn!(error = %e, "mcp: DCR failed");
-                error_resp(StatusCode::BAD_GATEWAY, "dynamic client registration failed")
+                error_resp(
+                    StatusCode::BAD_GATEWAY,
+                    "dynamic client registration failed",
+                )
             })?;
             (dcr.client_id, dcr.client_secret)
         }
@@ -512,13 +548,13 @@ async fn oauth_start(
 // OAuth callback — public, CSRF-gated by `state`.
 // ───────────────────────────────────────────────────────────────────
 
-async fn oauth_callback(
-    State(svc): State<Arc<McpService>>,
-    uri: Uri,
-) -> Response<Body> {
+async fn oauth_callback(State(svc): State<Arc<McpService>>, uri: Uri) -> Response<Body> {
     let q = parse_query_string(uri.query().unwrap_or(""));
     if let Some(err) = q.get("error") {
-        let detail = q.get("error_description").map(String::as_str).unwrap_or_default();
+        let detail = q
+            .get("error_description")
+            .map(String::as_str)
+            .unwrap_or_default();
         return callback_html(
             StatusCode::BAD_REQUEST,
             &format!("OAuth provider returned error: {err} {detail}"),
@@ -663,13 +699,16 @@ async fn list_servers(
         })?;
     let mut out = Vec::with_capacity(names.len());
     for name in names {
-        if let Ok(Some(e)) = mcp_servers::get(&svc.user_secrets, &owner_id, &instance_id, &name).await {
+        if let Ok(Some(e)) =
+            mcp_servers::get(&svc.user_secrets, &owner_id, &instance_id, &name).await
+        {
             let auth_kind: &'static str = match &e.auth {
                 McpAuthSpec::None => "none",
                 McpAuthSpec::Bearer { .. } => "bearer",
                 McpAuthSpec::Oauth { .. } => "oauth",
             };
-            let connected = matches!(&e.auth, McpAuthSpec::Oauth { .. }) && e.oauth_tokens.is_some()
+            let connected = matches!(&e.auth, McpAuthSpec::Oauth { .. })
+                && e.oauth_tokens.is_some()
                 || matches!(&e.auth, McpAuthSpec::Bearer { .. } | McpAuthSpec::None);
             // Strip query string + fragment.  Many MCP servers carry their
             // API key as a `?apikey=...` query param (Alpha Vantage, a few
@@ -740,7 +779,8 @@ async fn get_server(
         McpAuthSpec::Bearer { .. } => "bearer",
         McpAuthSpec::Oauth { .. } => "oauth",
     };
-    let connected = matches!(&entry.auth, McpAuthSpec::Oauth { .. }) && entry.oauth_tokens.is_some()
+    let connected = matches!(&entry.auth, McpAuthSpec::Oauth { .. })
+        && entry.oauth_tokens.is_some()
         || matches!(&entry.auth, McpAuthSpec::Bearer { .. } | McpAuthSpec::None);
     Ok(Json(ServerSummary {
         name,
@@ -845,9 +885,14 @@ async fn put_enabled_tools(
         })?
         .ok_or_else(|| error_resp(StatusCode::NOT_FOUND, "no such mcp server"))?;
     entry.enabled_tools = body.enabled_tools;
-    if let Err(e) = mcp_servers::put(&svc.user_secrets, &owner_id, &instance_id, &name, &entry).await {
+    if let Err(e) =
+        mcp_servers::put(&svc.user_secrets, &owner_id, &instance_id, &name, &entry).await
+    {
         tracing::warn!(error = %e, "mcp: enabled-tools write failed");
-        return Err(error_resp(StatusCode::INTERNAL_SERVER_ERROR, "secret store error"));
+        return Err(error_resp(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "secret store error",
+        ));
     }
     Ok(Json(serde_json::json!({ "ok": true })))
 }
@@ -917,14 +962,22 @@ async fn check_server(
                 server = %name,
                 "mcp: check failed",
             );
-            return Err(error_resp(StatusCode::BAD_GATEWAY, &format!("upstream check failed: {err}")));
+            return Err(error_resp(
+                StatusCode::BAD_GATEWAY,
+                &format!("upstream check failed: {err}"),
+            ));
         }
     };
 
     entry.tools_catalog = Some(catalog.clone());
-    if let Err(e) = mcp_servers::put(&svc.user_secrets, &owner_id, &instance_id, &name, &entry).await {
+    if let Err(e) =
+        mcp_servers::put(&svc.user_secrets, &owner_id, &instance_id, &name, &entry).await
+    {
         tracing::warn!(error = %e, "mcp: check write-back failed");
-        return Err(error_resp(StatusCode::INTERNAL_SERVER_ERROR, "secret store error"));
+        return Err(error_resp(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "secret store error",
+        ));
     }
 
     Ok(Json(CheckResponse {
@@ -960,7 +1013,8 @@ async fn run_tools_list(
             },
         },
     });
-    let init_resp = post_jsonrpc(http, entry, &init_req, None).await
+    let init_resp = post_jsonrpc(http, entry, &init_req, None)
+        .await
         .map_err(|e| format!("initialize: {e}"))?;
     let session_id = init_resp.session_id.clone();
 
@@ -980,13 +1034,15 @@ async fn run_tools_list(
         "method": "tools/list",
         "params": {},
     });
-    let list_resp = post_jsonrpc(http, entry, &list_req, session_id.as_deref()).await
+    let list_resp = post_jsonrpc(http, entry, &list_req, session_id.as_deref())
+        .await
         .map_err(|e| format!("tools/list: {e}"))?;
 
     if let Some(err) = list_resp.body.get("error") {
         return Err(format!("upstream tools/list error: {err}"));
     }
-    let tools_value = list_resp.body
+    let tools_value = list_resp
+        .body
         .get("result")
         .and_then(|r| r.get("tools"))
         .and_then(|t| t.as_array())
@@ -999,7 +1055,10 @@ async fn run_tools_list(
             if name.is_empty() {
                 return None;
             }
-            let description = t.get("description").and_then(|d| d.as_str()).map(String::from);
+            let description = t
+                .get("description")
+                .and_then(|d| d.as_str())
+                .map(String::from);
             Some(McpToolSummary { name, description })
         })
         .collect();
@@ -1030,7 +1089,10 @@ async fn post_jsonrpc(
         // single-shot responses come back as JSON when the server
         // chooses, and SSE-streamed responses still arrive when it
         // doesn't.
-        .header(axum::http::header::ACCEPT, "application/json, text/event-stream");
+        .header(
+            axum::http::header::ACCEPT,
+            "application/json, text/event-stream",
+        );
     if let Some(s) = session_id {
         req = req.header("Mcp-Session-Id", s);
     }
@@ -1044,7 +1106,10 @@ async fn post_jsonrpc(
     }
 
     let resp = req.json(body).send().await.map_err(|e| {
-        format!("send: {}", crate::mcp_servers::redact_reqwest_err(&e, &entry.url))
+        format!(
+            "send: {}",
+            crate::mcp_servers::redact_reqwest_err(&e, &entry.url)
+        )
     })?;
     let status = resp.status();
     let session_id = resp
@@ -1059,10 +1124,7 @@ async fn post_jsonrpc(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_lowercase();
-    let bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| format!("read body: {e}"))?;
+    let bytes = resp.bytes().await.map_err(|e| format!("read body: {e}"))?;
 
     if !status.is_success() {
         // Echo a short body excerpt so a 4xx with detail is debuggable
@@ -1159,7 +1221,10 @@ fn peek_jsonrpc(bytes: &[u8]) -> Option<(String, serde_json::Value, serde_json::
     let obj = value.as_object()?;
     let method = obj.get("method")?.as_str()?.to_string();
     let id = obj.get("id").cloned().unwrap_or(serde_json::Value::Null);
-    let params = obj.get("params").cloned().unwrap_or(serde_json::Value::Null);
+    let params = obj
+        .get("params")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
     Some((method, id, params))
 }
 
@@ -1192,10 +1257,9 @@ fn jsonrpc_error_resp(id: serde_json::Value, code: i64, message: &str) -> Respon
 /// parse failure or unexpected shape returns Err so the caller can
 /// fall back to passing the upstream body through.
 fn filter_tools_list_body(bytes: &[u8], allowed: &[String]) -> Result<Vec<u8>, String> {
-    let mut value: serde_json::Value = serde_json::from_slice(bytes)
-        .map_err(|e| format!("parse: {e}"))?;
-    let allowed_set: std::collections::HashSet<&str> =
-        allowed.iter().map(String::as_str).collect();
+    let mut value: serde_json::Value =
+        serde_json::from_slice(bytes).map_err(|e| format!("parse: {e}"))?;
+    let allowed_set: std::collections::HashSet<&str> = allowed.iter().map(String::as_str).collect();
     let Some(tools) = value
         .get_mut("result")
         .and_then(|r| r.get_mut("tools"))

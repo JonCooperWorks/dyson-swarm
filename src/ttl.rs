@@ -87,10 +87,7 @@ mod tests {
 
     #[async_trait]
     impl CubeClient for MockCube {
-        async fn create_sandbox(
-            &self,
-            _: CreateSandboxArgs,
-        ) -> Result<SandboxInfo, CubeError> {
+        async fn create_sandbox(&self, _: CreateSandboxArgs) -> Result<SandboxInfo, CubeError> {
             let mut n = self.next.lock().unwrap();
             *n += 1;
             let sid = format!("sb-{}", *n);
@@ -104,11 +101,7 @@ mod tests {
             self.destroyed.lock().unwrap().push(sandbox_id.into());
             Ok(())
         }
-        async fn snapshot_sandbox(
-            &self,
-            _: &str,
-            _: &str,
-        ) -> Result<SnapshotInfo, CubeError> {
+        async fn snapshot_sandbox(&self, _: &str, _: &str) -> Result<SnapshotInfo, CubeError> {
             unimplemented!()
         }
         async fn delete_snapshot(&self, _: &str, _: &str) -> Result<(), CubeError> {
@@ -139,44 +132,53 @@ mod tests {
 
         // a: unpinned, will expire shortly
         let a = svc
-            .create("legacy", CreateRequest {
-                template_id: "t".into(),
-                name: None,
-                task: None,
-                env: env_with_model(),
-                ttl_seconds: Some(1),
-                network_policy: crate::network_policy::NetworkPolicy::default(),
-                mcp_servers: Vec::new(),
-            })
+            .create(
+                "legacy",
+                CreateRequest {
+                    template_id: "t".into(),
+                    name: None,
+                    task: None,
+                    env: env_with_model(),
+                    ttl_seconds: Some(1),
+                    network_policy: crate::network_policy::NetworkPolicy::default(),
+                    mcp_servers: Vec::new(),
+                },
+            )
             .await
             .unwrap();
 
         // b: pinned, must NOT be destroyed even though TTL is 1
         let b = svc
-            .create("legacy", CreateRequest {
-                template_id: "t".into(),
-                name: None,
-                task: None,
-                env: env_with_model(),
-                ttl_seconds: Some(1),
-                network_policy: crate::network_policy::NetworkPolicy::default(),
-                mcp_servers: Vec::new(),
-            })
+            .create(
+                "legacy",
+                CreateRequest {
+                    template_id: "t".into(),
+                    name: None,
+                    task: None,
+                    env: env_with_model(),
+                    ttl_seconds: Some(1),
+                    network_policy: crate::network_policy::NetworkPolicy::default(),
+                    mcp_servers: Vec::new(),
+                },
+            )
             .await
             .unwrap();
         instances.pin(&b.id, true, None).await.unwrap();
 
         // c: long TTL, must NOT be destroyed
         let c = svc
-            .create("legacy", CreateRequest {
-                template_id: "t".into(),
-                name: None,
-                task: None,
-                env: env_with_model(),
-                ttl_seconds: Some(10_000),
-                network_policy: crate::network_policy::NetworkPolicy::default(),
-                mcp_servers: Vec::new(),
-            })
+            .create(
+                "legacy",
+                CreateRequest {
+                    template_id: "t".into(),
+                    name: None,
+                    task: None,
+                    env: env_with_model(),
+                    ttl_seconds: Some(10_000),
+                    network_policy: crate::network_policy::NetworkPolicy::default(),
+                    mcp_servers: Vec::new(),
+                },
+            )
             .await
             .unwrap();
 

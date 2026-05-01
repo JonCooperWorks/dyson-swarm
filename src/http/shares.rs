@@ -16,8 +16,8 @@ use serde::{Deserialize, Serialize};
 use crate::auth::CallerIdentity;
 use crate::db::shares::{ShareAccessRow, ShareRow};
 use crate::http::AppState;
-use crate::shares::service::{MintedShare, ShareServiceError};
 use crate::shares::ShareTtl;
+use crate::shares::service::{MintedShare, ShareServiceError};
 
 pub fn router(state: AppState) -> Router {
     Router::new()
@@ -198,7 +198,9 @@ async fn list_accesses(
         .list_accesses(&caller.user_id, &jti, 200)
         .await
         .map_err(|e| err_to_status(&e))?;
-    Ok(Json(rows.into_iter().map(ShareAccessView::from_row).collect()))
+    Ok(Json(
+        rows.into_iter().map(ShareAccessView::from_row).collect(),
+    ))
 }
 
 async fn reissue_share(

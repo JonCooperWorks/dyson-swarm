@@ -13,7 +13,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use axum::http::HeaderMap;
 
-use crate::auth::{extract_bearer, looks_like_jwt, AuthError, AuthSource, Authenticator, UserIdentity};
+use crate::auth::{
+    AuthError, AuthSource, Authenticator, UserIdentity, extract_bearer, looks_like_jwt,
+};
 use crate::traits::UserStore;
 
 #[derive(Clone)]
@@ -105,11 +107,15 @@ mod tests {
         format!("{:032x}", 0xa1u128 | (0xa1u128 << 64))
     }
 
-    async fn build() -> (BearerAuthenticator, Arc<SqlxUserStore>, String, tempfile::TempDir) {
+    async fn build() -> (
+        BearerAuthenticator,
+        Arc<SqlxUserStore>,
+        String,
+        tempfile::TempDir,
+    ) {
         let pool = open_in_memory().await.unwrap();
         let tmp = tempfile::tempdir().unwrap();
-        let dir: Arc<dyn CipherDirectory> =
-            Arc::new(AgeCipherDirectory::new(tmp.path()).unwrap());
+        let dir: Arc<dyn CipherDirectory> = Arc::new(AgeCipherDirectory::new(tmp.path()).unwrap());
         let store = Arc::new(SqlxUserStore::new(pool, dir));
         let id = alice_id();
         store
@@ -177,8 +183,7 @@ mod tests {
     async fn prefix_filter_routes_other_tokens_to_unsupported() {
         let pool = open_in_memory().await.unwrap();
         let tmp = tempfile::tempdir().unwrap();
-        let dir: Arc<dyn CipherDirectory> =
-            Arc::new(AgeCipherDirectory::new(tmp.path()).unwrap());
+        let dir: Arc<dyn CipherDirectory> = Arc::new(AgeCipherDirectory::new(tmp.path()).unwrap());
         let store = Arc::new(SqlxUserStore::new(pool, dir));
         let auth = BearerAuthenticator::with_prefix(store, "wk-");
         let err = auth

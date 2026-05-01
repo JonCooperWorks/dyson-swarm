@@ -46,7 +46,9 @@ pub struct McpServerSpec {
 pub enum McpAuthSpec {
     None,
     /// Static bearer token added on every forwarded request.
-    Bearer { token: String },
+    Bearer {
+        token: String,
+    },
     /// OAuth 2.1 Authorization Code + PKCE.  All discovery fields
     /// optional — leave empty to run two-step discovery (RFC 9728
     /// Protected Resource Metadata → RFC 8414 path-prefixed AS metadata)
@@ -142,7 +144,12 @@ impl McpOAuthTokens {
 
 impl McpServerEntry {
     pub fn from_spec(spec: McpServerSpec) -> (String, Self) {
-        let McpServerSpec { name, url, auth, enabled_tools } = spec;
+        let McpServerSpec {
+            name,
+            url,
+            auth,
+            enabled_tools,
+        } = spec;
         (
             name,
             Self {
@@ -188,7 +195,9 @@ pub async fn put_all(
                 "serialise mcp entry: {e}"
             )))
         })?;
-        secrets.put(owner_id, &entry_key(instance_id, &name), &blob).await?;
+        secrets
+            .put(owner_id, &entry_key(instance_id, &name), &blob)
+            .await?;
         names.push(name);
     }
     let idx = serde_json::to_vec(&names).map_err(|e| {
@@ -207,7 +216,10 @@ pub async fn get(
     instance_id: &str,
     server_name: &str,
 ) -> Result<Option<McpServerEntry>, SecretsError> {
-    let Some(bytes) = secrets.get(owner_id, &entry_key(instance_id, server_name)).await? else {
+    let Some(bytes) = secrets
+        .get(owner_id, &entry_key(instance_id, server_name))
+        .await?
+    else {
         return Ok(None);
     };
     let entry: McpServerEntry = serde_json::from_slice(&bytes).map_err(|e| {
@@ -232,7 +244,9 @@ pub async fn put(
             "serialise mcp entry: {e}"
         )))
     })?;
-    secrets.put(owner_id, &entry_key(instance_id, server_name), &blob).await?;
+    secrets
+        .put(owner_id, &entry_key(instance_id, server_name), &blob)
+        .await?;
     Ok(())
 }
 
@@ -284,7 +298,9 @@ pub async fn copy_all(
                 "serialise mcp index: {e}"
             )))
         })?;
-        secrets.put(owner_id, &index_key(dst_instance_id), &idx).await?;
+        secrets
+            .put(owner_id, &index_key(dst_instance_id), &idx)
+            .await?;
     }
     Ok(copied)
 }
@@ -299,7 +315,10 @@ pub async fn forget_all(
 ) -> Result<(), SecretsError> {
     let names = list_names(secrets, owner_id, instance_id).await?;
     for name in names {
-        if let Err(err) = secrets.delete(owner_id, &entry_key(instance_id, &name)).await {
+        if let Err(err) = secrets
+            .delete(owner_id, &entry_key(instance_id, &name))
+            .await
+        {
             tracing::warn!(
                 error = %err,
                 instance = %instance_id,
@@ -430,7 +449,10 @@ pub fn generate_pkce() -> PkceChallenge {
     let bytes: [u8; 32] = rand::thread_rng().r#gen();
     let verifier = URL_SAFE_NO_PAD.encode(bytes);
     let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
-    PkceChallenge { verifier, challenge }
+    PkceChallenge {
+        verifier,
+        challenge,
+    }
 }
 
 pub fn generate_state() -> String {
@@ -512,8 +534,8 @@ async fn fetch_as_metadata(
     client: &reqwest::Client,
     resource_domain: &str,
 ) -> Result<AuthMetadata, String> {
-    let well_known = as_metadata_url(as_url)
-        .map_err(|e| format!("discovery {resource_domain}: {e}"))?;
+    let well_known =
+        as_metadata_url(as_url).map_err(|e| format!("discovery {resource_domain}: {e}"))?;
     fetch_metadata_at(&well_known, client, resource_domain).await
 }
 
@@ -547,8 +569,8 @@ async fn fetch_metadata_at(
 ///   `https://auth.example.com/`           → `https://auth.example.com/.well-known/oauth-authorization-server`
 ///   `https://auth.example.com/tenant/svc` → `https://auth.example.com/.well-known/oauth-authorization-server/tenant/svc`
 pub fn as_metadata_url(as_url: &str) -> Result<String, String> {
-    let parsed = reqwest::Url::parse(as_url)
-        .map_err(|e| format!("parse {}: {e}", domain_of(as_url)))?;
+    let parsed =
+        reqwest::Url::parse(as_url).map_err(|e| format!("parse {}: {e}", domain_of(as_url)))?;
     let host = parsed
         .host_str()
         .ok_or_else(|| format!("no host in {}", domain_of(as_url)))?;
@@ -568,9 +590,9 @@ pub fn as_metadata_url(as_url: &str) -> Result<String, String> {
 }
 
 fn origin_of(url: &str) -> Result<String, String> {
-    let parsed = reqwest::Url::parse(url)
-        .map_err(|e| format!("parse {}: {e}", domain_of(url)))?;
-    let host = parsed.host_str()
+    let parsed = reqwest::Url::parse(url).map_err(|e| format!("parse {}: {e}", domain_of(url)))?;
+    let host = parsed
+        .host_str()
         .ok_or_else(|| format!("no host in {}", domain_of(url)))?;
     let scheme = parsed.scheme();
     Ok(match parsed.port() {
@@ -662,11 +684,12 @@ pub fn build_auth_url(
     code_challenge: &str,
     state: &str,
 ) -> Result<String, String> {
-    let mut url = reqwest::Url::parse(authorization_endpoint)
-        .map_err(|e| format!(
+    let mut url = reqwest::Url::parse(authorization_endpoint).map_err(|e| {
+        format!(
             "parse auth endpoint {}: {e}",
             domain_of(authorization_endpoint),
-        ))?;
+        )
+    })?;
     {
         let mut q = url.query_pairs_mut();
         q.append_pair("response_type", "code")
@@ -741,7 +764,10 @@ async fn post_token(
         .send()
         .await
         .map_err(|e| {
-            format!("token request to {domain}: {}", redact_reqwest_err(&e, token_url))
+            format!(
+                "token request to {domain}: {}",
+                redact_reqwest_err(&e, token_url)
+            )
         })?;
     if !resp.status().is_success() {
         let status = resp.status();
@@ -837,12 +863,11 @@ mod tests {
                 .find(|(u, n, _)| u == user_id && n == name)
                 .map(|(_, _, c)| c.clone()))
         }
-        async fn delete(
-            &self,
-            user_id: &str,
-            name: &str,
-        ) -> Result<(), crate::error::StoreError> {
-            self.0.lock().unwrap().retain(|(u, n, _)| !(u == user_id && n == name));
+        async fn delete(&self, user_id: &str, name: &str) -> Result<(), crate::error::StoreError> {
+            self.0
+                .lock()
+                .unwrap()
+                .retain(|(u, n, _)| !(u == user_id && n == name));
             Ok(())
         }
         async fn list(
@@ -880,7 +905,9 @@ mod tests {
             vec![McpServerSpec {
                 name: "linear".into(),
                 url: "https://api.linear.app/mcp".into(),
-                auth: McpAuthSpec::Bearer { token: "lin_xxx".into() },
+                auth: McpAuthSpec::Bearer {
+                    token: "lin_xxx".into(),
+                },
                 enabled_tools: None,
             }],
         )
@@ -890,7 +917,10 @@ mod tests {
         let names = list_names(&svc, &owner, instance).await.unwrap();
         assert_eq!(names, vec!["linear"]);
 
-        let entry = get(&svc, &owner, instance, "linear").await.unwrap().unwrap();
+        let entry = get(&svc, &owner, instance, "linear")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(entry.url, "https://api.linear.app/mcp");
         match entry.auth {
             McpAuthSpec::Bearer { token } => assert_eq!(token, "lin_xxx"),
@@ -996,7 +1026,10 @@ mod tests {
             client_secret: None,
         };
         assert!(near.needs_refresh(now), "30s left should refresh");
-        let far = McpOAuthTokens { expires_at: Some(now + 600), ..near.clone() };
+        let far = McpOAuthTokens {
+            expires_at: Some(now + 600),
+            ..near.clone()
+        };
         assert!(!far.needs_refresh(now));
     }
 
@@ -1070,9 +1103,7 @@ mod tests {
         // walks the error chain too, but the substring substitution
         // is the load-bearing piece.
         let url = "https://api.linear.app/mcp?token=lin_secret_abc";
-        let leaky = format!(
-            "error sending request for url ({url}): connection closed",
-        );
+        let leaky = format!("error sending request for url ({url}): connection closed",);
         let domain = domain_of(url);
         let scrubbed = leaky.replace(url, &domain);
         assert!(
@@ -1106,7 +1137,8 @@ mod tests {
         // The Smithery shape — multi-tenant AS with the tenant in
         // the path.  Well-known sits between origin and tenant path.
         assert_eq!(
-            as_metadata_url("https://auth.smithery.ai/nexgendata-apify/finance-mcp-server").unwrap(),
+            as_metadata_url("https://auth.smithery.ai/nexgendata-apify/finance-mcp-server")
+                .unwrap(),
             "https://auth.smithery.ai/.well-known/oauth-authorization-server/nexgendata-apify/finance-mcp-server",
         );
         // Trailing slash on the AS URL is normalised away so we
@@ -1173,8 +1205,10 @@ mod tests {
         )
         .unwrap();
         // url-encoded space between scopes
-        assert!(url.contains("scope=read+write") || url.contains("scope=read%20write"),
-                "scope joined with space: {url}");
+        assert!(
+            url.contains("scope=read+write") || url.contains("scope=read%20write"),
+            "scope joined with space: {url}"
+        );
     }
 
     #[test]
@@ -1202,8 +1236,10 @@ mod tests {
             scope: None,
         };
         let v = serde_json::to_value(&req).unwrap();
-        assert!(v.get("scope").is_none(),
-                "scope must be absent (not null) so AS uses its default: {v}");
+        assert!(
+            v.get("scope").is_none(),
+            "scope must be absent (not null) so AS uses its default: {v}"
+        );
     }
 
     #[test]

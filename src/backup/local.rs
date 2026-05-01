@@ -68,20 +68,13 @@ mod tests {
 
     #[async_trait]
     impl CubeClient for StubCube {
-        async fn create_sandbox(
-            &self,
-            _: CreateSandboxArgs,
-        ) -> Result<SandboxInfo, CubeError> {
+        async fn create_sandbox(&self, _: CreateSandboxArgs) -> Result<SandboxInfo, CubeError> {
             unreachable!()
         }
         async fn destroy_sandbox(&self, _: &str) -> Result<(), CubeError> {
             unreachable!()
         }
-        async fn snapshot_sandbox(
-            &self,
-            _: &str,
-            _: &str,
-        ) -> Result<SnapshotInfo, CubeError> {
+        async fn snapshot_sandbox(&self, _: &str, _: &str) -> Result<SnapshotInfo, CubeError> {
             unreachable!()
         }
         async fn delete_snapshot(&self, id: &str, host_ip: &str) -> Result<(), CubeError> {

@@ -34,7 +34,8 @@ fn main() {
 
     watch_inputs(&web);
 
-    assert!(web.join("index.html").exists(), 
+    assert!(
+        web.join("index.html").exists(),
         "frontend source missing at {} — did the checkout preserve the web/ directory?",
         web.display(),
     );
@@ -79,7 +80,12 @@ fn needs_rebuild(web: &Path, dist: &Path) -> bool {
 
 fn inputs_newest_mtime(web: &Path) -> Option<SystemTime> {
     let mut newest = None;
-    for rel in ["index.html", "package.json", "package-lock.json", "vite.config.js"] {
+    for rel in [
+        "index.html",
+        "package.json",
+        "package-lock.json",
+        "vite.config.js",
+    ] {
         if let Ok(m) = fs::metadata(web.join(rel)).and_then(|m| m.modified()) {
             newest = Some(newest.map_or(m, |n: SystemTime| n.max(m)));
         }
@@ -109,7 +115,9 @@ fn walk(root: &Path) -> Vec<PathBuf> {
     }
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let Ok(entries) = fs::read_dir(&dir) else { continue };
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
         for e in entries.flatten() {
             let path = e.path();
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
@@ -145,7 +153,9 @@ fn ensure_node_modules(web: &Path) {
     let lock = web.join("package-lock.json");
     let hash = fs::read(&lock).map_or(0, hash_bytes);
 
-    let existing = fs::read_to_string(&stamp).ok().and_then(|s| s.trim().parse::<u64>().ok());
+    let existing = fs::read_to_string(&stamp)
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok());
     if existing == Some(hash) && web.join("node_modules").exists() {
         return;
     }
@@ -154,7 +164,11 @@ fn ensure_node_modules(web: &Path) {
     // `npm install` (not `npm ci`) so first-time builds without a
     // package-lock.json still work.  `npm ci` is stricter but requires a
     // pre-existing lockfile, which we don't ship.
-    let cmd = if web.join("package-lock.json").exists() { "ci" } else { "install" };
+    let cmd = if web.join("package-lock.json").exists() {
+        "ci"
+    } else {
+        "install"
+    };
     let status = Command::new("npm")
         .arg(cmd)
         .arg("--no-audit")

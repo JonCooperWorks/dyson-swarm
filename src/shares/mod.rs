@@ -26,8 +26,8 @@
 
 use std::sync::Arc;
 
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use hmac::{Hmac, Mac};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -210,11 +210,7 @@ pub fn decode_token(token: &str) -> Result<(SharePayload, Vec<u8>), ShareError> 
 /// Constant-time comparison via the existing `subtle` helper shape.
 /// Caller has already checked `payload.exp` against the wall clock
 /// before this is called (the cheap-reject ordering).
-pub fn verify_with_key(
-    payload: &SharePayload,
-    sig: &[u8],
-    key: &[u8],
-) -> Result<(), ShareError> {
+pub fn verify_with_key(payload: &SharePayload, sig: &[u8], key: &[u8]) -> Result<(), ShareError> {
     let payload_bytes = postcard::to_allocvec(payload).map_err(|_| ShareError::Malformed)?;
     let expected = hmac_sha256(key, &payload_bytes);
     if !ct_eq(&expected, sig) {
@@ -273,9 +269,7 @@ pub async fn rotate_signing_key(
     user_secrets: &UserSecretsService,
     user_id: &str,
 ) -> Result<Vec<u8>, SecretsError> {
-    let _ = user_secrets
-        .delete(user_id, SIGNING_KEY_SECRET_NAME)
-        .await;
+    let _ = user_secrets.delete(user_id, SIGNING_KEY_SECRET_NAME).await;
     let mut key = vec![0u8; SIGNING_KEY_BYTES];
     rand::thread_rng().fill_bytes(&mut key);
     user_secrets
@@ -421,7 +415,11 @@ mod tests {
         let _ = decoded;
         let forged_payload_bytes = postcard::to_allocvec(&payload).unwrap();
         let forged_sig = hmac_sha256(&key, &forged_payload_bytes);
-        assert_ne!(forged_sig, *sig.as_slice(), "different bytes → different sigs");
+        assert_ne!(
+            forged_sig,
+            *sig.as_slice(),
+            "different bytes → different sigs"
+        );
     }
 
     #[test]
@@ -440,10 +438,14 @@ mod tests {
             ".",
             "no-dot-here",
             "...too.many.dots",
-            "@!.&%",                    // invalid base64
-            &"a".repeat(2048),          // over the 1KiB cap
+            "@!.&%",           // invalid base64
+            &"a".repeat(2048), // over the 1KiB cap
             // Valid base64 but not postcard:
-            &format!("{}.{}", URL_SAFE_NO_PAD.encode(b"hello"), URL_SAFE_NO_PAD.encode(b"sig")),
+            &format!(
+                "{}.{}",
+                URL_SAFE_NO_PAD.encode(b"hello"),
+                URL_SAFE_NO_PAD.encode(b"sig")
+            ),
         ] {
             let err = decode_token(bad).unwrap_err();
             assert!(matches!(err, ShareError::Malformed), "input {bad:?}");

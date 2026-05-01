@@ -25,7 +25,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use axum::{extract::State, http::StatusCode, routing::get, Json, Router};
+use axum::{Json, Router, extract::State, http::StatusCode, routing::get};
 use serde::Serialize;
 use tokio::sync::Mutex;
 
@@ -62,7 +62,9 @@ struct ModelsResponse {
 }
 
 pub fn router(state: AppState) -> Router {
-    Router::new().route("/v1/models", get(handler)).with_state(state)
+    Router::new()
+        .route("/v1/models", get(handler))
+        .with_state(state)
 }
 
 async fn handler(State(state): State<AppState>) -> Result<Json<ModelsResponse>, StatusCode> {
@@ -71,7 +73,9 @@ async fn handler(State(state): State<AppState>) -> Result<Json<ModelsResponse>, 
         if let Some(entry) = guard.as_ref()
             && entry.fetched_at.elapsed() < CACHE_TTL
         {
-            return Ok(Json(ModelsResponse { models: entry.ids.clone() }));
+            return Ok(Json(ModelsResponse {
+                models: entry.ids.clone(),
+            }));
         }
     }
 

@@ -21,7 +21,9 @@ use async_trait::async_trait;
 use reqwest::Client;
 use tokio::sync::Mutex;
 
-use crate::traits::{HealthProber, InstanceRow, InstanceStatus, InstanceStore, ListFilter, ProbeResult};
+use crate::traits::{
+    HealthProber, InstanceRow, InstanceStatus, InstanceStore, ListFilter, ProbeResult,
+};
 
 #[derive(Clone)]
 pub struct HttpHealthProber {
@@ -61,7 +63,11 @@ impl HealthProber for HttpHealthProber {
         // forward path through swarm's dispatcher to succeed (it's
         // the value dyson_proxy uses to address cubeproxy), so a
         // missing id is a hard "unreachable".
-        if instance.cube_sandbox_id.as_deref().is_none_or(str::is_empty) {
+        if instance
+            .cube_sandbox_id
+            .as_deref()
+            .is_none_or(str::is_empty)
+        {
             return ProbeResult::Unreachable {
                 reason: "no cube sandbox id".into(),
             };
@@ -80,7 +86,7 @@ impl HealthProber for HttpHealthProber {
             Err(e) => {
                 return ProbeResult::Unreachable {
                     reason: e.to_string(),
-                }
+                };
             }
         };
         let status = resp.status();
@@ -236,8 +242,8 @@ mod tests {
             .create(InstanceRow {
                 id: id.into(),
                 owner_id: "legacy".into(),
-            name: String::new(),
-            task: String::new(),
+                name: String::new(),
+                task: String::new(),
                 cube_sandbox_id: Some(format!("sb-{id}")),
                 template_id: "t".into(),
                 status: InstanceStatus::Live,
@@ -262,9 +268,7 @@ mod tests {
     #[test]
     fn unreachable_counter_warns_exactly_once_at_three() {
         let mut c = UnreachableCounters::default();
-        let unr = || ProbeResult::Unreachable {
-            reason: "x".into(),
-        };
+        let unr = || ProbeResult::Unreachable { reason: "x".into() };
         assert!(!c.observe("i1", &unr())); // 1
         assert!(!c.observe("i1", &unr())); // 2
         assert!(c.observe("i1", &unr())); // 3 → warn
@@ -275,9 +279,7 @@ mod tests {
     #[test]
     fn unreachable_counter_resets_on_recovery() {
         let mut c = UnreachableCounters::default();
-        let unr = || ProbeResult::Unreachable {
-            reason: "x".into(),
-        };
+        let unr = || ProbeResult::Unreachable { reason: "x".into() };
         assert!(!c.observe("i1", &unr()));
         assert!(!c.observe("i1", &unr()));
         assert!(!c.observe("i1", &ProbeResult::Healthy));
@@ -291,9 +293,7 @@ mod tests {
     #[test]
     fn unreachable_counter_is_per_instance() {
         let mut c = UnreachableCounters::default();
-        let unr = || ProbeResult::Unreachable {
-            reason: "x".into(),
-        };
+        let unr = || ProbeResult::Unreachable { reason: "x".into() };
         assert!(!c.observe("a", &unr()));
         assert!(!c.observe("b", &unr()));
         assert!(!c.observe("a", &unr()));
@@ -313,8 +313,8 @@ mod tests {
             .create(InstanceRow {
                 id: "d1".into(),
                 owner_id: "legacy".into(),
-            name: String::new(),
-            task: String::new(),
+                name: String::new(),
+                task: String::new(),
                 cube_sandbox_id: Some("sb-d1".into()),
                 template_id: "t".into(),
                 status: InstanceStatus::Destroyed,

@@ -25,13 +25,13 @@
 //! `instances::internal_router`).  The bearer-token check in this
 //! handler IS the auth.
 
+use axum::Router;
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::{Request, StatusCode};
 use axum::routing::post;
-use axum::Router;
-use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD as B64;
 use serde::Deserialize;
 
 use crate::artefacts::IngestMeta;
@@ -157,11 +157,7 @@ async fn ingest(State(state): State<AppState>, req: Request<Body>) -> StatusCode
         created_at: body.created_at,
         metadata_json: metadata_json.as_deref(),
     };
-    match state
-        .artefact_cache
-        .ingest(meta, decoded.as_deref())
-        .await
-    {
+    match state.artefact_cache.ingest(meta, decoded.as_deref()).await {
         Ok(_) => StatusCode::NO_CONTENT,
         Err(e) => {
             tracing::warn!(
@@ -196,19 +192,19 @@ fn extract_bearer(req: &Request<Body>) -> Option<&str> {
 mod tests {
     use super::*;
     use crate::artefacts::ArtefactCacheService;
-    use crate::db::open_in_memory;
+    use crate::backup::local::LocalDiskBackupSink;
     use crate::db::instances::SqlxInstanceStore;
+    use crate::db::open_in_memory;
     use crate::db::secrets::SqlxSecretStore;
     use crate::db::tokens::SqlxTokenStore;
+    use crate::instance::InstanceService;
+    use crate::secrets::SecretsService;
+    use crate::snapshot::SnapshotService;
     use crate::traits::{
         BackupSink, CreateSandboxArgs, CubeClient, HealthProber, InstanceRow, InstanceStatus,
         InstanceStore, ProbeResult, SandboxInfo, SecretStore, SnapshotInfo, SnapshotStore,
         TokenStore, UserRow, UserStatus,
     };
-    use crate::backup::local::LocalDiskBackupSink;
-    use crate::instance::InstanceService;
-    use crate::secrets::SecretsService;
-    use crate::snapshot::SnapshotService;
 
     use std::sync::Arc;
 
@@ -262,8 +258,7 @@ mod tests {
 
         let pool = open_in_memory().await.unwrap();
 
-        let raw_secret_store: Arc<dyn SecretStore> =
-            Arc::new(SqlxSecretStore::new(pool.clone()));
+        let raw_secret_store: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
         let keys = tempfile::tempdir().unwrap();
         let cipher_dir: Arc<dyn crate::envelope::CipherDirectory> =
             Arc::new(crate::envelope::AgeCipherDirectory::new(keys.path()).unwrap());
@@ -274,12 +269,10 @@ mod tests {
             instances_store.clone(),
             cipher_dir.clone(),
         ));
-        let user_secrets_store: Arc<dyn crate::traits::UserSecretStore> = Arc::new(
-            crate::db::secrets::SqlxUserSecretStore::new(pool.clone()),
-        );
-        let system_secrets_store: Arc<dyn crate::traits::SystemSecretStore> = Arc::new(
-            crate::db::secrets::SqlxSystemSecretStore::new(pool.clone()),
-        );
+        let user_secrets_store: Arc<dyn crate::traits::UserSecretStore> =
+            Arc::new(crate::db::secrets::SqlxUserSecretStore::new(pool.clone()));
+        let system_secrets_store: Arc<dyn crate::traits::SystemSecretStore> =
+            Arc::new(crate::db::secrets::SqlxSystemSecretStore::new(pool.clone()));
         let user_secrets_svc = Arc::new(crate::secrets::UserSecretsService::new(
             user_secrets_store,
             cipher_dir.clone(),
@@ -578,7 +571,8 @@ mod tests {
 
         // Row landed under the OWNER from the token (not from the
         // request body — there's no owner field on the wire).
-        let row = f.state
+        let row = f
+            .state
             .artefact_cache
             .find(&f.instance, "c1", "a1")
             .await
@@ -591,7 +585,13 @@ mod tests {
         assert_eq!(row.bytes, 16);
 
         // Body decrypts back to the input plaintext.
-        let plain = f.state.artefact_cache.read_body(&row).await.unwrap().unwrap();
+        let plain = f
+            .state
+            .artefact_cache
+            .read_body(&row)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(plain, b"# Findings\n\n* a\n");
 
         // Disk holds ciphertext, not plaintext.
@@ -622,14 +622,21 @@ mod tests {
             .unwrap();
         assert_eq!(r2.status(), 204);
 
-        let row = f.state
+        let row = f
+            .state
             .artefact_cache
             .find(&f.instance, "c1", "a1")
             .await
             .unwrap()
             .unwrap();
         assert_eq!(row.bytes, 14);
-        let plain = f.state.artefact_cache.read_body(&row).await.unwrap().unwrap();
+        let plain = f
+            .state
+            .artefact_cache
+            .read_body(&row)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(plain, b"v2-much-longer");
     }
 
@@ -665,7 +672,8 @@ mod tests {
             .unwrap();
         assert_eq!(r2.status(), 204);
 
-        let row = f.state
+        let row = f
+            .state
             .artefact_cache
             .find(&f.instance, "c1", "a1")
             .await
@@ -673,7 +681,13 @@ mod tests {
             .unwrap();
         assert_eq!(row.title, "Renamed");
         assert_eq!(row.bytes, 8);
-        let plain = f.state.artefact_cache.read_body(&row).await.unwrap().unwrap();
+        let plain = f
+            .state
+            .artefact_cache
+            .read_body(&row)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(plain, b"original");
     }
 
@@ -702,7 +716,8 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), 204);
 
-        let row = f.state
+        let row = f
+            .state
             .artefact_cache
             .find(&f.instance, "evil-chat", "evil-art")
             .await
@@ -733,14 +748,21 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), 204);
 
-        let row = f.state
+        let row = f
+            .state
             .artefact_cache
             .find(&f.instance, "c1", "empty")
             .await
             .unwrap()
             .unwrap();
         assert_eq!(row.bytes, 0);
-        let got = f.state.artefact_cache.read_body(&row).await.unwrap().unwrap();
+        let got = f
+            .state
+            .artefact_cache
+            .read_body(&row)
+            .await
+            .unwrap()
+            .unwrap();
         assert!(got.is_empty());
     }
 }

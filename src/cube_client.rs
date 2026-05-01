@@ -193,7 +193,14 @@ impl CubeClient for HttpCubeClient {
         };
         let url = self.url("/sandboxes");
         let resp: CreateResp = with_retry(MAX_ATTEMPTS, || async {
-            send_json(&self.http, reqwest::Method::POST, &url, &self.api_key, Some(&body)).await
+            send_json(
+                &self.http,
+                reqwest::Method::POST,
+                &url,
+                &self.api_key,
+                Some(&body),
+            )
+            .await
         })
         .await?;
         let sandbox_url = self.build_sandbox_url(&resp.sandbox_id);
@@ -207,7 +214,14 @@ impl CubeClient for HttpCubeClient {
     async fn destroy_sandbox(&self, sandbox_id: &str) -> Result<(), CubeError> {
         let url = self.url(&format!("/sandboxes/{sandbox_id}"));
         let _: serde_json::Value = with_retry(MAX_ATTEMPTS, || async {
-            send_json::<()>(&self.http, reqwest::Method::DELETE, &url, &self.api_key, None).await
+            send_json::<()>(
+                &self.http,
+                reqwest::Method::DELETE,
+                &url,
+                &self.api_key,
+                None,
+            )
+            .await
         })
         .await?;
         Ok(())
@@ -221,7 +235,14 @@ impl CubeClient for HttpCubeClient {
         let url = self.url(&format!("/sandboxes/{sandbox_id}/snapshots"));
         let body = SnapshotBody { name };
         let resp: SnapshotResp = with_retry(MAX_ATTEMPTS, || async {
-            send_json(&self.http, reqwest::Method::POST, &url, &self.api_key, Some(&body)).await
+            send_json(
+                &self.http,
+                reqwest::Method::POST,
+                &url,
+                &self.api_key,
+                Some(&body),
+            )
+            .await
         })
         .await?;
         // CubeMaster's response omits `path` when the underlying
@@ -249,9 +270,18 @@ impl CubeClient for HttpCubeClient {
         // The fork's delete route is /sandboxes/snapshots/{snapshotID}
         // with hostIP as a required query string — single-host installs
         // use whatever host_ip the snapshot create response carried.
-        let url = self.url(&format!("/sandboxes/snapshots/{snapshot_id}?hostIP={host_ip}"));
+        let url = self.url(&format!(
+            "/sandboxes/snapshots/{snapshot_id}?hostIP={host_ip}"
+        ));
         let _: serde_json::Value = with_retry(MAX_ATTEMPTS, || async {
-            send_json::<()>(&self.http, reqwest::Method::DELETE, &url, &self.api_key, None).await
+            send_json::<()>(
+                &self.http,
+                reqwest::Method::DELETE,
+                &url,
+                &self.api_key,
+                None,
+            )
+            .await
         })
         .await?;
         Ok(())
@@ -329,7 +359,8 @@ where
     for attempt in 1..=max_attempts {
         match f().await {
             AttemptResult::Ok(v) => {
-                return serde_json::from_value::<T>(v).map_err(|e| CubeError::Decode(e.to_string()));
+                return serde_json::from_value::<T>(v)
+                    .map_err(|e| CubeError::Decode(e.to_string()));
             }
             AttemptResult::Terminal(e) => return Err(e),
             AttemptResult::Retry(e) => {
@@ -444,10 +475,7 @@ mod tests {
         AxStatus::NO_CONTENT
     }
 
-    async fn delete_snap_handler(
-        State(s): State<MockState>,
-        Path(_): Path<String>,
-    ) -> AxStatus {
+    async fn delete_snap_handler(State(s): State<MockState>, Path(_): Path<String>) -> AxStatus {
         s.delete_calls.fetch_add(1, Ordering::SeqCst);
         AxStatus::NO_CONTENT
     }

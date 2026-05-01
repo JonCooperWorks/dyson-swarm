@@ -115,7 +115,10 @@ mod tests {
         };
         store.put(TEST_USER, &p).await.unwrap();
         let got = store.get(TEST_USER).await.unwrap().unwrap();
-        assert_eq!(got.allowed_providers, vec!["openai".to_string(), "anthropic".into()]);
+        assert_eq!(
+            got.allowed_providers,
+            vec!["openai".to_string(), "anthropic".into()]
+        );
         assert_eq!(got.allowed_models, vec!["*".to_string()]);
         assert_eq!(got.daily_token_budget, Some(100_000));
         assert_eq!(got.monthly_usd_budget, Some(50.0));

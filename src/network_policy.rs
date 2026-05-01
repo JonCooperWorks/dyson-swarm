@@ -168,13 +168,19 @@ impl Default for ResolvedPolicy {
 /// map to `SwarmError::BadRequest` at the HTTP boundary.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum PolicyError {
-    #[error("invalid network entry {0:?}: must be an IPv4 CIDR (a.b.c.d/N), a bare IPv4, or a hostname")]
+    #[error(
+        "invalid network entry {0:?}: must be an IPv4 CIDR (a.b.c.d/N), a bare IPv4, or a hostname"
+    )]
     InvalidEntry(String),
     #[error("hostname {0:?} resolved to no IPv4 addresses")]
     HostUnresolvable(String),
-    #[error("Allowlist requires at least one entry — empty allowlist is the same as Airgap; pick Airgap directly")]
+    #[error(
+        "Allowlist requires at least one entry — empty allowlist is the same as Airgap; pick Airgap directly"
+    )]
     EmptyAllowlist,
-    #[error("Airgap and Allowlist require an LLM-proxy CIDR — set `cube_facing_addr` to an IPv4 in swarm.toml")]
+    #[error(
+        "Airgap and Allowlist require an LLM-proxy CIDR — set `cube_facing_addr` to an IPv4 in swarm.toml"
+    )]
     LlmCidrRequired,
 }
 
@@ -300,7 +306,10 @@ fn is_valid_hostname(s: &str) -> bool {
         if label.starts_with('-') || label.ends_with('-') {
             return false;
         }
-        if !label.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
+        if !label
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        {
             return false;
         }
     }
@@ -348,7 +357,9 @@ pub async fn resolve(
     resolver: &dyn HostResolver,
 ) -> Result<ResolvedPolicy, PolicyError> {
     let llm_owned = llm_cidr.map(str::to_owned);
-    let llm_or_default = llm_owned.clone().unwrap_or_else(|| "192.168.0.1/32".to_owned());
+    let llm_or_default = llm_owned
+        .clone()
+        .unwrap_or_else(|| "192.168.0.1/32".to_owned());
     let default_deny: Vec<String> = DEFAULT_DENY_OUT.iter().map(|s| (*s).to_owned()).collect();
     match policy {
         NetworkPolicy::NoLocalNet => Ok(ResolvedPolicy {
@@ -468,7 +479,10 @@ mod tests {
         assert_eq!(resolved.allow_out, vec!["0.0.0.0/0", "192.168.0.1/32"]);
         assert_eq!(
             resolved.deny_out,
-            DEFAULT_DENY_OUT.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>(),
+            DEFAULT_DENY_OUT
+                .iter()
+                .map(|s| (*s).to_owned())
+                .collect::<Vec<_>>(),
         );
     }
 
@@ -490,12 +504,12 @@ mod tests {
         // sensitive ones individually so a future "tidy up" commit
         // can't quietly drop them.
         for c in [
-            "127.0.0.0/8",     // loopback
-            "169.254.0.0/16",  // link-local + cloud metadata
-            "10.0.0.0/8",      // RFC1918
-            "172.16.0.0/12",   // RFC1918
-            "192.168.0.0/16",  // RFC1918
-            "100.64.0.0/10",   // CGNAT
+            "127.0.0.0/8",    // loopback
+            "169.254.0.0/16", // link-local + cloud metadata
+            "10.0.0.0/8",     // RFC1918
+            "172.16.0.0/12",  // RFC1918
+            "192.168.0.0/16", // RFC1918
+            "100.64.0.0/10",  // CGNAT
         ] {
             assert!(
                 resolved.deny_out.iter().any(|d| d == c),
@@ -589,10 +603,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_allowlist_with_multiple_a_records_includes_all() {
-        let r = MockResolver::with(&[(
-            "example.com",
-            &["93.184.216.34", "93.184.216.35"],
-        )]);
+        let r = MockResolver::with(&[("example.com", &["93.184.216.34", "93.184.216.35"])]);
         let p = NetworkPolicy::Allowlist {
             entries: vec!["example.com".to_owned()],
         };

@@ -47,11 +47,11 @@ use std::time::Duration;
 
 use axum::body::Body;
 use axum::extract::Request;
-use axum::http::{header, HeaderMap, HeaderName, HeaderValue, Method, Response, StatusCode};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, Response, StatusCode, header};
 use axum::middleware::Next;
 use futures::TryStreamExt;
 
-use crate::auth::{user::resolve_active_user, Authenticator};
+use crate::auth::{Authenticator, user::resolve_active_user};
 use crate::http::AppState;
 use crate::traits::InstanceRow;
 
@@ -66,8 +66,16 @@ pub struct DispatchState {
 }
 
 impl DispatchState {
-    pub fn new(app: AppState, authenticator: Arc<dyn Authenticator>, hostname: Option<String>) -> Self {
-        Self { app, authenticator, hostname }
+    pub fn new(
+        app: AppState,
+        authenticator: Arc<dyn Authenticator>,
+        hostname: Option<String>,
+    ) -> Self {
+        Self {
+            app,
+            authenticator,
+            hostname,
+        }
     }
 }
 
@@ -82,7 +90,11 @@ pub async fn dispatch(
     let Some(base) = state.hostname.as_deref() else {
         return next.run(req).await;
     };
-    let Some(host) = req.headers().get(header::HOST).and_then(|v| v.to_str().ok()) else {
+    let Some(host) = req
+        .headers()
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+    else {
         return next.run(req).await;
     };
     let Some(instance_id) = extract_instance_subdomain(host, base) else {
@@ -107,7 +119,11 @@ pub fn extract_instance_subdomain<'a>(host: &'a str, base: &str) -> Option<&'a s
         return None;
     }
     let dot_idx = host_no_port.len() - suffix_len;
-    if host_no_port.as_bytes().get(dot_idx).is_none_or(|&b| b != b'.') {
+    if host_no_port
+        .as_bytes()
+        .get(dot_idx)
+        .is_none_or(|&b| b != b'.')
+    {
         return None;
     }
     let prefix = &host_no_port[..dot_idx];
@@ -128,10 +144,8 @@ async fn forward(state: DispatchState, instance_id: String, req: Request) -> Res
     //    proxy honest regardless of browser behaviour.  GET / HEAD /
     //    OPTIONS skip the check (they're either non-state-changing or
     //    pre-flight).
-    if !matches!(
-        req.method().as_str(),
-        "GET" | "HEAD" | "OPTIONS"
-    ) && !origin_is_allowed(req.headers(), state.hostname.as_deref())
+    if !matches!(req.method().as_str(), "GET" | "HEAD" | "OPTIONS")
+        && !origin_is_allowed(req.headers(), state.hostname.as_deref())
     {
         tracing::warn!(
             method = %req.method(),
@@ -204,11 +218,8 @@ async fn forward(state: DispatchState, instance_id: String, req: Request) -> Res
                 // failure).
                 if resp.status() == StatusCode::UNAUTHORIZED
                     && wants_login_redirect(req.method(), req.headers())
-                    && let Some(redirect) = build_login_redirect(
-                        state.hostname.as_deref(),
-                        req.headers(),
-                        req.uri(),
-                    )
+                    && let Some(redirect) =
+                        build_login_redirect(state.hostname.as_deref(), req.headers(), req.uri())
                 {
                     return redirect;
                 }
@@ -288,7 +299,11 @@ async fn forward(state: DispatchState, instance_id: String, req: Request) -> Res
     //    Dyson), then stamp the per-instance bearer.
     let mut out_headers = HeaderMap::new();
     for (k, v) in &parts.headers {
-        if is_hop_by_hop(k) || k == header::COOKIE || k == header::HOST || k == header::AUTHORIZATION {
+        if is_hop_by_hop(k)
+            || k == header::COOKIE
+            || k == header::HOST
+            || k == header::AUTHORIZATION
+        {
             continue;
         }
         out_headers.insert(k.clone(), v.clone());
@@ -582,9 +597,13 @@ pub fn build_client() -> Result<reqwest::Client, reqwest::Error> {
                     tracing::info!(path = %path, "dyson_proxy: trusting cube root CA");
                     b = b.add_root_certificate(cert);
                 }
-                Err(e) => tracing::error!(path = %path, error = %e, "SWARM_CUBE_ROOT_CA: failed to parse PEM"),
+                Err(e) => {
+                    tracing::error!(path = %path, error = %e, "SWARM_CUBE_ROOT_CA: failed to parse PEM")
+                }
             },
-            Err(e) => tracing::error!(path = %path, error = %e, "SWARM_CUBE_ROOT_CA: failed to read"),
+            Err(e) => {
+                tracing::error!(path = %path, error = %e, "SWARM_CUBE_ROOT_CA: failed to read")
+            }
         }
     }
     b.build()
@@ -694,7 +713,9 @@ mod tests {
         // Browser hits swarm's own UI on the apex hostname — not a
         // sandbox subdomain.
         assert!(extract_instance_subdomain("swarm.example.com", "swarm.example.com").is_none());
-        assert!(extract_instance_subdomain("swarm.example.com:8080", "swarm.example.com").is_none());
+        assert!(
+            extract_instance_subdomain("swarm.example.com:8080", "swarm.example.com").is_none()
+        );
     }
 
     #[test]
@@ -708,11 +729,10 @@ mod tests {
     fn unrelated_host_does_not_match() {
         assert!(extract_instance_subdomain("evil.com", "swarm.example.com").is_none());
         // Substring-but-not-suffix attack.
-        assert!(extract_instance_subdomain(
-            "swarm.example.com.evil.com",
-            "swarm.example.com",
-        )
-        .is_none());
+        assert!(
+            extract_instance_subdomain("swarm.example.com.evil.com", "swarm.example.com",)
+                .is_none()
+        );
     }
 
     #[test]
@@ -809,10 +829,7 @@ mod tests {
         // reject — a browser only emits Origin when it's authoritative
         // for the request's source.
         let mut h = HeaderMap::new();
-        h.insert(
-            header::ORIGIN,
-            HeaderValue::from_static("https://evil.com"),
-        );
+        h.insert(header::ORIGIN, HeaderValue::from_static("https://evil.com"));
         h.insert(
             header::REFERER,
             HeaderValue::from_static("https://swarm.example.com/whatever"),
@@ -853,10 +870,7 @@ mod tests {
         // followed and the JSON parse on the apex login HTML would
         // confusingly fail downstream.
         let mut h = HeaderMap::new();
-        h.insert(
-            header::ACCEPT,
-            HeaderValue::from_static("application/json"),
-        );
+        h.insert(header::ACCEPT, HeaderValue::from_static("application/json"));
         assert!(!wants_login_redirect(&Method::GET, &h));
     }
 

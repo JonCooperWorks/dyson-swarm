@@ -26,9 +26,9 @@ use serde::{Deserialize, Serialize};
 use crate::auth::CallerIdentity;
 use crate::http::AppState;
 use crate::proxy::adapters;
-use crate::proxy::byok::{byok_name, ByoBlob, BYO_BLOB_NAME};
-use crate::proxy::upstream_policy::{validate_byo_upstream, ByoUpstreamError};
-use crate::proxy::validate::{validate_key, ValidateError, ValidateResult};
+use crate::proxy::byok::{BYO_BLOB_NAME, ByoBlob, byok_name};
+use crate::proxy::upstream_policy::{ByoUpstreamError, validate_byo_upstream};
+use crate::proxy::validate::{ValidateError, ValidateResult, validate_key};
 
 /// Body for `PUT /v1/byok/:provider`.  `upstream` is required only
 /// when `provider == "byo"`; the field is ignored otherwise so a
@@ -174,11 +174,7 @@ async fn put_byok(
         Option<String>,
     ) = if provider == "byo" {
         let Some(u) = body.upstream.as_ref() else {
-            return (
-                StatusCode::BAD_REQUEST,
-                "byo requires upstream in body",
-            )
-                .into_response();
+            return (StatusCode::BAD_REQUEST, "byo requires upstream in body").into_response();
         };
         if u.trim().is_empty() {
             return (StatusCode::BAD_REQUEST, "upstream is empty").into_response();
@@ -203,11 +199,7 @@ async fn put_byok(
         };
         (normalized.clone(), None, Some(normalized))
     } else if let Some(cfg) = state.providers.get(&provider) {
-        (
-            cfg.upstream.clone(),
-            cfg.anthropic_version.clone(),
-            None,
-        )
+        (cfg.upstream.clone(), cfg.anthropic_version.clone(), None)
     } else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -289,7 +281,11 @@ async fn delete_byok(
     } else {
         byok_name(&provider)
     };
-    match state.user_secrets.delete(&caller.user_id, &secret_name).await {
+    match state
+        .user_secrets
+        .delete(&caller.user_id, &secret_name)
+        .await
+    {
         Ok(()) => StatusCode::NO_CONTENT,
         Err(err) => {
             tracing::warn!(provider = %provider, error = %err, "byok delete failed");
@@ -300,8 +296,8 @@ async fn delete_byok(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicU16, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU16, Ordering};
 
     use axum::extract::Path as AxPath;
     use axum::http::StatusCode as AxStatus;
@@ -330,23 +326,32 @@ mod tests {
     struct StubProber;
     #[async_trait::async_trait]
     impl HealthProber for StubProber {
-        async fn probe(&self, _: &InstanceRow) -> ProbeResult { ProbeResult::Healthy }
+        async fn probe(&self, _: &InstanceRow) -> ProbeResult {
+            ProbeResult::Healthy
+        }
     }
     struct StubCube;
     #[async_trait::async_trait]
     impl CubeClient for StubCube {
-        async fn create_sandbox(&self, _: CreateSandboxArgs)
-            -> Result<SandboxInfo, crate::error::CubeError>
-        { unreachable!() }
-        async fn destroy_sandbox(&self, _: &str)
-            -> Result<(), crate::error::CubeError>
-        { unreachable!() }
-        async fn snapshot_sandbox(&self, _: &str, _: &str)
-            -> Result<SnapshotInfo, crate::error::CubeError>
-        { unreachable!() }
-        async fn delete_snapshot(&self, _: &str, _: &str)
-            -> Result<(), crate::error::CubeError>
-        { unreachable!() }
+        async fn create_sandbox(
+            &self,
+            _: CreateSandboxArgs,
+        ) -> Result<SandboxInfo, crate::error::CubeError> {
+            unreachable!()
+        }
+        async fn destroy_sandbox(&self, _: &str) -> Result<(), crate::error::CubeError> {
+            unreachable!()
+        }
+        async fn snapshot_sandbox(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> Result<SnapshotInfo, crate::error::CubeError> {
+            unreachable!()
+        }
+        async fn delete_snapshot(&self, _: &str, _: &str) -> Result<(), crate::error::CubeError> {
+            unreachable!()
+        }
     }
 
     /// Mock provider upstream.  Every request is answered with the
@@ -357,8 +362,7 @@ mod tests {
         axum::extract::State(s): axum::extract::State<Arc<AtomicU16>>,
         AxPath(_rest): AxPath<String>,
     ) -> impl axum::response::IntoResponse {
-        let code = AxStatus::from_u16(s.load(Ordering::SeqCst))
-            .unwrap_or(AxStatus::OK);
+        let code = AxStatus::from_u16(s.load(Ordering::SeqCst)).unwrap_or(AxStatus::OK);
         (code, AxJson(serde_json::json!({"ok": true})))
     }
 
@@ -370,7 +374,9 @@ mod tests {
             .with_state(s);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
         (format!("http://{addr}"), status)
     }
     /// Build a full AppState pointed at a per-test mock provider for
@@ -509,15 +515,16 @@ mod tests {
             axum::Router::new(),
             axum::Router::new(),
         );
-        tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
         format!("http://{addr}")
     }
 
     #[tokio::test]
     async fn put_byok_happy_path_validates_and_persists() {
         let (mock_url, _status) = spawn_mock_provider(200).await;
-        let (state, user_auth, uid, _) =
-            build_state_with_provider("openai", &mock_url).await;
+        let (state, user_auth, uid, _) = build_state_with_provider("openai", &mock_url).await;
         let user_secrets = state.user_secrets.clone();
         let base = spawn_full(state, user_auth).await;
 
@@ -539,8 +546,7 @@ mod tests {
     async fn put_byok_validation_rejection_returns_422_and_does_not_persist() {
         let (mock_url, status) = spawn_mock_provider(401).await;
         let _ = status; // already wired
-        let (state, user_auth, uid, _) =
-            build_state_with_provider("openai", &mock_url).await;
+        let (state, user_auth, uid, _) = build_state_with_provider("openai", &mock_url).await;
         let user_secrets = state.user_secrets.clone();
         let base = spawn_full(state, user_auth).await;
 
@@ -561,8 +567,7 @@ mod tests {
     #[tokio::test]
     async fn put_byok_unknown_provider_returns_404() {
         let (mock_url, _status) = spawn_mock_provider(200).await;
-        let (state, user_auth, _uid, _) =
-            build_state_with_provider("openai", &mock_url).await;
+        let (state, user_auth, _uid, _) = build_state_with_provider("openai", &mock_url).await;
         let base = spawn_full(state, user_auth).await;
 
         let r = reqwest::Client::new()
@@ -577,8 +582,7 @@ mod tests {
     #[tokio::test]
     async fn put_byo_without_upstream_returns_400() {
         let (mock_url, _status) = spawn_mock_provider(200).await;
-        let (state, user_auth, _uid, _) =
-            build_state_with_provider("openai", &mock_url).await;
+        let (state, user_auth, _uid, _) = build_state_with_provider("openai", &mock_url).await;
         let base = spawn_full(state, user_auth).await;
 
         let r = reqwest::Client::new()
@@ -593,8 +597,7 @@ mod tests {
     #[tokio::test]
     async fn put_byo_with_upstream_persists_blob() {
         let (mock_url, _status) = spawn_mock_provider(200).await;
-        let (state, user_auth, uid, _) =
-            build_state_with_provider("openai", &mock_url).await;
+        let (state, user_auth, uid, _) = build_state_with_provider("openai", &mock_url).await;
         let user_secrets = state.user_secrets.clone();
         let base = spawn_full(state, user_auth).await;
 
@@ -612,13 +615,16 @@ mod tests {
     #[tokio::test]
     async fn delete_byok_is_idempotent() {
         let (mock_url, _status) = spawn_mock_provider(200).await;
-        let (state, user_auth, _uid, _) =
-            build_state_with_provider("openai", &mock_url).await;
+        let (state, user_auth, _uid, _) = build_state_with_provider("openai", &mock_url).await;
         let base = spawn_full(state, user_auth).await;
 
         let cli = reqwest::Client::new();
         // Delete with no row should still succeed.
-        let r = cli.delete(format!("{base}/v1/byok/openai")).send().await.unwrap();
+        let r = cli
+            .delete(format!("{base}/v1/byok/openai"))
+            .send()
+            .await
+            .unwrap();
         assert_eq!(r.status(), 204);
 
         // PUT then DELETE then DELETE — all 204.
@@ -627,8 +633,16 @@ mod tests {
             .send()
             .await
             .unwrap();
-        let r1 = cli.delete(format!("{base}/v1/byok/openai")).send().await.unwrap();
-        let r2 = cli.delete(format!("{base}/v1/byok/openai")).send().await.unwrap();
+        let r1 = cli
+            .delete(format!("{base}/v1/byok/openai"))
+            .send()
+            .await
+            .unwrap();
+        let r2 = cli
+            .delete(format!("{base}/v1/byok/openai"))
+            .send()
+            .await
+            .unwrap();
         assert_eq!(r1.status(), 204);
         assert_eq!(r2.status(), 204);
     }
@@ -636,8 +650,7 @@ mod tests {
     #[tokio::test]
     async fn list_providers_shows_registry_with_byok_status() {
         let (mock_url, _status) = spawn_mock_provider(200).await;
-        let (state, user_auth, _uid, _) =
-            build_state_with_provider("openai", &mock_url).await;
+        let (state, user_auth, _uid, _) = build_state_with_provider("openai", &mock_url).await;
         let base = spawn_full(state, user_auth).await;
         let cli = reqwest::Client::new();
 
@@ -654,8 +667,19 @@ mod tests {
             .iter()
             .map(|r| r["name"].as_str().unwrap().to_owned())
             .collect();
-        for n in ["openai", "anthropic", "openrouter", "groq", "deepseek", "xai", "byo"] {
-            assert!(names.contains(&n.to_owned()), "missing provider {n} in {names:?}");
+        for n in [
+            "openai",
+            "anthropic",
+            "openrouter",
+            "groq",
+            "deepseek",
+            "xai",
+            "byo",
+        ] {
+            assert!(
+                names.contains(&n.to_owned()),
+                "missing provider {n} in {names:?}"
+            );
         }
         // None has BYOK yet.
         for r in &rows {
@@ -692,8 +716,7 @@ mod tests {
     #[tokio::test]
     async fn list_byok_returns_only_user_rows() {
         let (mock_url, _status) = spawn_mock_provider(200).await;
-        let (state, user_auth, _uid, _) =
-            build_state_with_provider("openai", &mock_url).await;
+        let (state, user_auth, _uid, _) = build_state_with_provider("openai", &mock_url).await;
         let base = spawn_full(state, user_auth).await;
 
         let cli = reqwest::Client::new();

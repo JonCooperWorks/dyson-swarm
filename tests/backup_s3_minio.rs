@@ -29,8 +29,7 @@ use dyson_swarm::backup::s3::S3BackupSink;
 use dyson_swarm::config::S3Config;
 use dyson_swarm::error::CubeError;
 use dyson_swarm::traits::{
-    BackupSink, CreateSandboxArgs, CubeClient, SandboxInfo, SnapshotInfo, SnapshotKind,
-    SnapshotRow,
+    BackupSink, CreateSandboxArgs, CubeClient, SandboxInfo, SnapshotInfo, SnapshotKind, SnapshotRow,
 };
 
 struct StubCube;
@@ -120,7 +119,9 @@ async fn promote_pull_delete_round_trip_against_minio() {
     let pulled = sink.pull(&row).await.expect("pull");
     assert!(pulled.exists());
     for (name, payload) in &original {
-        let got = tokio::fs::read(pulled.join(name)).await.expect("read pulled");
+        let got = tokio::fs::read(pulled.join(name))
+            .await
+            .expect("read pulled");
         assert_eq!(got.as_slice(), payload.as_slice(), "{name} mismatch");
     }
 

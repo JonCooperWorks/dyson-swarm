@@ -67,7 +67,8 @@ impl TokenStore for SqlxTokenStore {
         // `provider = "ingest"` let the internal-ingest route reject
         // chat-provider tokens at the door and let operators grep the
         // table apart.
-        self.mint_with_prefix("it_", instance_id, INGEST_PROVIDER).await
+        self.mint_with_prefix("it_", instance_id, INGEST_PROVIDER)
+            .await
     }
 
     async fn resolve(&self, token: &str) -> Result<Option<TokenRecord>, StoreError> {
@@ -118,10 +119,7 @@ impl TokenStore for SqlxTokenStore {
         Ok(r.rows_affected() > 0)
     }
 
-    async fn lookup_by_instance(
-        &self,
-        instance_id: &str,
-    ) -> Result<Option<String>, StoreError> {
+    async fn lookup_by_instance(&self, instance_id: &str) -> Result<Option<String>, StoreError> {
         // Caller wants the chat-side proxy token specifically — pin
         // the provider filter to `SHARED_PROVIDER` so an ingest
         // token (`provider = "ingest"`) minted after the chat one
@@ -167,8 +165,8 @@ mod tests {
             .create(InstanceRow {
                 id: id.into(),
                 owner_id: "legacy".into(),
-            name: String::new(),
-            task: String::new(),
+                name: String::new(),
+                task: String::new(),
                 cube_sandbox_id: None,
                 template_id: "t".into(),
                 status: InstanceStatus::Live,
@@ -268,7 +266,10 @@ mod tests {
         seed(&pool, "i1").await;
         let store = SqlxTokenStore::new(pool);
         let tok = store.mint_ingest("i1").await.unwrap();
-        assert!(tok.starts_with("it_"), "ingest token must start with `it_`, got {tok:?}");
+        assert!(
+            tok.starts_with("it_"),
+            "ingest token must start with `it_`, got {tok:?}"
+        );
         assert_eq!(tok.len(), 35, "it_ + 32 hex chars");
 
         let resolved = store.resolve(&tok).await.unwrap().expect("present");
@@ -289,8 +290,14 @@ mod tests {
         let ingest = store.mint_ingest("i1").await.unwrap();
 
         store.revoke_for_instance("i1").await.unwrap();
-        assert!(store.resolve(&chat).await.unwrap().is_none(), "chat token revoked");
-        assert!(store.resolve(&ingest).await.unwrap().is_none(), "ingest token revoked");
+        assert!(
+            store.resolve(&chat).await.unwrap().is_none(),
+            "chat token revoked"
+        );
+        assert!(
+            store.resolve(&ingest).await.unwrap().is_none(),
+            "ingest token revoked"
+        );
     }
 
     #[tokio::test]

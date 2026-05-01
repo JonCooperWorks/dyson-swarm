@@ -6,12 +6,12 @@
 //!
 //! Mounted under `/v1/*` so the admin-bearer middleware applies.
 
+use axum::Router;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::post;
-use axum::Router;
 
-use crate::http::{secrets::store_err_to_status, AppState};
+use crate::http::{AppState, secrets::store_err_to_status};
 
 pub fn router(state: AppState) -> Router {
     Router::new()
@@ -19,10 +19,7 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-async fn revoke(
-    State(state): State<AppState>,
-    Path(token): Path<String>,
-) -> StatusCode {
+async fn revoke(State(state): State<AppState>, Path(token): Path<String>) -> StatusCode {
     // Resolve first so we can 404 cleanly on unknown / already-revoked
     // tokens.  `resolve` returns None for both "never existed" and
     // "revoked", which is what we want: an admin retrying a revoke on
@@ -153,8 +150,8 @@ mod tests {
             .create(InstanceRow {
                 id: id.clone(),
                 owner_id: "legacy".into(),
-            name: String::new(),
-            task: String::new(),
+                name: String::new(),
+                task: String::new(),
                 cube_sandbox_id: None,
                 template_id: "t".into(),
                 status: InstanceStatus::Live,

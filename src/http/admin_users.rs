@@ -17,7 +17,7 @@ use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
-use crate::http::{secrets::store_err_to_status, AppState};
+use crate::http::{AppState, secrets::store_err_to_status};
 use crate::openrouter::USER_OR_KEY_SECRET_NAME;
 use crate::traits::{UserRow, UserStatus};
 
@@ -29,7 +29,10 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/admin/users/:id/keys", post(mint_key))
         .route("/v1/admin/users/keys/:token", delete(revoke_key))
         .route("/v1/admin/users/:id/openrouter_limit", patch(set_or_limit))
-        .route("/v1/admin/users/:id/openrouter_key/mint", post(force_mint_or_key))
+        .route(
+            "/v1/admin/users/:id/openrouter_key/mint",
+            post(force_mint_or_key),
+        )
         .with_state(state)
 }
 
@@ -136,20 +139,14 @@ async fn list_users(State(state): State<AppState>) -> Result<Json<Vec<UserView>>
     }
 }
 
-async fn activate(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> StatusCode {
+async fn activate(State(state): State<AppState>, Path(id): Path<String>) -> StatusCode {
     match state.users.set_status(&id, UserStatus::Active).await {
         Ok(()) => StatusCode::NO_CONTENT,
         Err(e) => store_err_to_status(e),
     }
 }
 
-async fn suspend(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> StatusCode {
+async fn suspend(State(state): State<AppState>, Path(id): Path<String>) -> StatusCode {
     // Stage 6.5: revoke the user's OpenRouter key upstream BEFORE
     // flipping local status, so a leaked plaintext stops accruing
     // charges even if the local DB write fails.  Best-effort — we
@@ -171,7 +168,10 @@ async fn suspend(
             // Wipe the local plaintext + id regardless of upstream
             // outcome.  If upstream still has the key, the operator
             // can reconcile via the OR dashboard.
-            let _ = state.user_secrets.delete(&id, USER_OR_KEY_SECRET_NAME).await;
+            let _ = state
+                .user_secrets
+                .delete(&id, USER_OR_KEY_SECRET_NAME)
+                .await;
             let _ = state.users.set_openrouter_key_id(&id, None).await;
         }
     }
@@ -197,20 +197,13 @@ async fn mint_key(
     Path(id): Path<String>,
     Json(body): Json<MintKeyBody>,
 ) -> Result<(StatusCode, Json<MintKeyResp>), StatusCode> {
-    match state
-        .users
-        .mint_api_key(&id, body.label.as_deref())
-        .await
-    {
+    match state.users.mint_api_key(&id, body.label.as_deref()).await {
         Ok(token) => Ok((StatusCode::CREATED, Json(MintKeyResp { token }))),
         Err(e) => Err(store_err_to_status(e)),
     }
 }
 
-async fn revoke_key(
-    State(state): State<AppState>,
-    Path(token): Path<String>,
-) -> StatusCode {
+async fn revoke_key(State(state): State<AppState>, Path(token): Path<String>) -> StatusCode {
     match state.users.revoke_api_key(&token).await {
         Ok(()) => StatusCode::NO_CONTENT,
         Err(e) => store_err_to_status(e),
@@ -290,16 +283,16 @@ async fn force_mint_or_key(
         user.openrouter_key_id.as_deref(),
     ) {
         let _ = prov.delete(old_id).await;
-        let _ = state.user_secrets.delete(&id, USER_OR_KEY_SECRET_NAME).await;
+        let _ = state
+            .user_secrets
+            .delete(&id, USER_OR_KEY_SECRET_NAME)
+            .await;
         let _ = state.users.set_openrouter_key_id(&id, None).await;
     }
-    let plaintext = resolver
-        .resolve_plaintext(&id)
-        .await
-        .map_err(|err| {
-            tracing::warn!(error = %err, user = %id, "force mint OR key failed");
-            StatusCode::BAD_GATEWAY
-        })?;
+    let plaintext = resolver.resolve_plaintext(&id).await.map_err(|err| {
+        tracing::warn!(error = %err, user = %id, "force mint OR key failed");
+        StatusCode::BAD_GATEWAY
+    })?;
     // Re-read so we surface the new id.
     let new_id = match state.users.get(&id).await {
         Ok(Some(u)) => u.openrouter_key_id.unwrap_or_default(),
@@ -307,6 +300,9 @@ async fn force_mint_or_key(
     };
     Ok((
         StatusCode::CREATED,
-        Json(ForceMintResp { token: plaintext, or_key_id: new_id }),
+        Json(ForceMintResp {
+            token: plaintext,
+            or_key_id: new_id,
+        }),
     ))
 }

@@ -82,9 +82,7 @@ pub async fn require_admin_role(
         // is unreachable.  Fail closed; same 404 shape as the
         // missing-role path so a misconfiguration doesn't reveal
         // any more about the admin surface than a regular denial would.
-        tracing::warn!(
-            "admin route hit but [oidc.roles] not configured — denying"
-        );
+        tracing::warn!("admin route hit but [oidc.roles] not configured — denying");
         return StatusCode::NOT_FOUND.into_response();
     };
 
@@ -105,7 +103,11 @@ pub async fn require_admin_role(
 /// elements — all return false.  Roles in opaque-bearer identities
 /// (where claims is `Null`) always return false; admin requires OIDC.
 pub fn caller_has_role(caller: &CallerIdentity, claim_name: &str, wanted: &str) -> bool {
-    let Some(arr) = caller.identity.claims.get(claim_name).and_then(|v| v.as_array())
+    let Some(arr) = caller
+        .identity
+        .claims
+        .get(claim_name)
+        .and_then(|v| v.as_array())
     else {
         return false;
     };

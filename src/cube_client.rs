@@ -131,9 +131,29 @@ struct SnapshotBody<'a> {
 struct SnapshotResp {
     #[serde(rename = "snapshotID")]
     snapshot_id: String,
-    path: String,
+    /// CubeMaster currently returns this as `omitempty` — the
+    /// underlying gRPC's `commitRsp.GetSnapshotPath()` is sometimes
+    /// blank and CubeAPI then drops the field from the JSON.  Bundle
+    /// IS on disk at `<CUBE_SNAPSHOT_ROOT>/<snapshot_id>` regardless,
+    /// so we deserialize as Option and the caller derives the path
+    /// from the snapshot id when cube didn't supply one.  Tracked
+    /// upstream; this defensive shape unblocks rotation in the
+    /// meantime.
+    #[serde(default)]
+    path: Option<String>,
     #[serde(rename = "hostIP", default)]
     host_ip: String,
+}
+
+/// Filesystem layout the cube uses for snapshot bundles when CubeMaster
+/// doesn't echo the path back.  Same root the CubeShim writes to
+/// (`/usr/local/services/cubetoolbox/cube-snapshot/cubebox/<name>`)
+/// — kept in sync with `deploy/scripts/bring-up.sh`'s install prefix.
+/// Override via the `CUBE_SNAPSHOT_ROOT` env var on dev hosts that ran
+/// the cube installer with a non-standard `--prefix`.
+fn cube_snapshot_root() -> String {
+    std::env::var("CUBE_SNAPSHOT_ROOT")
+        .unwrap_or_else(|_| "/usr/local/services/cubetoolbox/cube-snapshot/cubebox".to_owned())
 }
 
 #[async_trait]
@@ -186,9 +206,23 @@ impl CubeClient for HttpCubeClient {
             send_json(&self.http, reqwest::Method::POST, &url, &self.api_key, Some(&body)).await
         })
         .await?;
+        // CubeMaster's response omits `path` when the underlying
+        // gRPC didn't fill it in; the bundle is still on disk under
+        // `<CUBE_SNAPSHOT_ROOT>/<snapshot_id>`.  Reconstruct the
+        // path so the snapshot row carries something
+        // restore can later open.
+        let path = resp.path.filter(|s| !s.is_empty()).unwrap_or_else(|| {
+            let derived = format!("{}/{}", cube_snapshot_root(), resp.snapshot_id);
+            tracing::debug!(
+                snapshot_id = %resp.snapshot_id,
+                derived = %derived,
+                "snapshot response missing path; deriving from snapshot_id"
+            );
+            derived
+        });
         Ok(SnapshotInfo {
             snapshot_id: resp.snapshot_id,
-            path: resp.path,
+            path,
             host_ip: resp.host_ip,
         })
     }

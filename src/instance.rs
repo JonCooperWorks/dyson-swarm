@@ -272,44 +272,6 @@ pub trait DysonReconfigurer: Send + Sync {
         sandbox_id: &str,
         body: &ReconfigureBody,
     ) -> Result<(), String>;
-
-    /// Read dyson's idle state.  Returns `(idle, in_flight_chats)`.
-    /// Used by the upgrade orchestrator's wait-loop to decide whether
-    /// `quiesce` is worth attempting yet.  Default impl returns
-    /// `Ok((true, 0))` so test mocks that only exercise `push`
-    /// continue to compile — production overrides on
-    /// `DysonReconfigurerHttp`.
-    async fn is_idle(
-        &self,
-        _instance_id: &str,
-        _sandbox_id: &str,
-    ) -> Result<(bool, u32), String> {
-        Ok((true, 0))
-    }
-
-    /// Atomically latch dyson's "refuse new turns" flag if and only if
-    /// nothing is in flight.  Returns `Ok(true)` on success, `Ok(false)`
-    /// if dyson is busy (caller retries later).  Default impl is a
-    /// no-op success so unrelated tests don't have to plumb it.
-    async fn quiesce(
-        &self,
-        _instance_id: &str,
-        _sandbox_id: &str,
-    ) -> Result<bool, String> {
-        Ok(true)
-    }
-
-    /// Release the latch.  Idempotent — used only when an upgrade
-    /// attempt aborts AFTER quiesce succeeded so the user's chat
-    /// resumes on the original cube instead of being wedged behind
-    /// 503.  Default no-op.
-    async fn unquiesce(
-        &self,
-        _instance_id: &str,
-        _sandbox_id: &str,
-    ) -> Result<(), String> {
-        Ok(())
-    }
 }
 
 /// Build the orchestrator-managed env envelope that gets handed to the
@@ -985,108 +947,8 @@ impl InstanceService {
             "rotate-in-place: starting snapshot+swap+destroy pipeline"
         );
 
-        // Phase 0: wait for dyson to be naturally idle, then atomically
-        // latch the "refuse new turns" flag so the snapshot in Phase 1
-        // captures a consistent disk state.  Without this, a turn the
-        // user starts during the snapshot would write to disk after the
-        // snapshot moment and be lost when we swap to the new cube.
-        //
-        // The poll cadence (every 30s) matches the cube cold-boot time
-        // — we expect to wait roughly one VM lifetime for the user to
-        // pause naturally.  If the instance is perpetually busy past
-        // the timeout, bail without quiescing so the next sweep retries.
-        // Best-effort: a reconfigurer error (network blip, dyson down)
-        // logs a warning and proceeds without the gate — rotation is
-        // still better than no rotation, and the snapshot mechanism is
-        // best-effort consistent under live load anyway.
-        let mut quiesced = false;
-        if let Some(reconfigurer) = self.reconfigurer.as_ref() {
-            const POLL_INTERVAL_SECS: u64 = 30;
-            const MAX_WAIT_SECS: u64 = 300; // 5 idle-checks
-            let started = std::time::Instant::now();
-            loop {
-                match reconfigurer.is_idle(&source.id, &old_sandbox_id).await {
-                    Ok((true, _)) => {
-                        match reconfigurer.quiesce(&source.id, &old_sandbox_id).await {
-                            Ok(true) => {
-                                quiesced = true;
-                                tracing::info!(
-                                    instance = %source.id,
-                                    sandbox = %old_sandbox_id,
-                                    "rotate-in-place: dyson quiesced"
-                                );
-                                break;
-                            }
-                            Ok(false) => {
-                                tracing::debug!(
-                                    instance = %source.id,
-                                    "rotate-in-place: quiesce 409'd (turn slipped in); retrying"
-                                );
-                            }
-                            Err(err) => {
-                                tracing::warn!(
-                                    instance = %source.id,
-                                    error = %err,
-                                    "rotate-in-place: quiesce errored; rotating without gate"
-                                );
-                                break;
-                            }
-                        }
-                    }
-                    Ok((false, in_flight)) => {
-                        tracing::info!(
-                            instance = %source.id,
-                            in_flight,
-                            "rotate-in-place: waiting for dyson to go idle"
-                        );
-                    }
-                    Err(err) => {
-                        tracing::warn!(
-                            instance = %source.id,
-                            error = %err,
-                            "rotate-in-place: idle check errored; rotating without gate"
-                        );
-                        break;
-                    }
-                }
-                if started.elapsed().as_secs() >= MAX_WAIT_SECS {
-                    return Err(SwarmError::BadRequest(format!(
-                        "instance {} did not go idle within {MAX_WAIT_SECS}s; will retry next sweep",
-                        source.id,
-                    )));
-                }
-                tokio::time::sleep(std::time::Duration::from_secs(POLL_INTERVAL_SECS)).await;
-            }
-        }
-
-        // RAII-ish unquiesce-on-failure: any error path between here
-        // and the pointer swap (Phase 4) leaves the user wedged behind
-        // 503 until we tell dyson otherwise.  Helper that takes the
-        // reconfigurer + sandbox id and best-efforts an unquiesce.
-        // The new cube boots unquiesced regardless (the flag is
-        // in-memory), so we only need to undo OLD on failure.
-        let unquiesce_on_drop = |reason: &str, err: &dyn std::fmt::Display| {
-            tracing::warn!(
-                instance = %source.id,
-                sandbox = %old_sandbox_id,
-                error = %err,
-                "rotate-in-place: {reason}; unquiescing OLD so user can resume"
-            );
-        };
-
         // Phase 1: snapshot the source workspace.
-        let snap = match snapshot_svc.snapshot(SYSTEM_OWNER, &source.id).await {
-            Ok(s) => s,
-            Err(e) => {
-                if quiesced {
-                    if let Some(rc) = self.reconfigurer.as_ref() {
-                        unquiesce_on_drop("snapshot failed", &e);
-                        let _ = rc.unquiesce(&source.id, &old_sandbox_id).await;
-                    }
-                }
-                return Err(e);
-            }
-        };
+        let snap = snapshot_svc.snapshot(SYSTEM_OWNER, &source.id).await?;
         tracing::info!(
             instance = %source.id,
             snapshot = %snap.id,
@@ -1119,7 +981,7 @@ impl InstanceService {
 
         // Phase 3: spin up a fresh cube under the new template using
         // the snapshot we just took.
-        let info = match self
+        let info = self
             .cube
             .create_sandbox(CreateSandboxArgs {
                 template_id: new_template_id.to_owned(),
@@ -1127,19 +989,7 @@ impl InstanceService {
                 from_snapshot_path: Some(std::path::PathBuf::from(&snap.path)),
                 resolved_policy: resolved.clone(),
             })
-            .await
-        {
-            Ok(i) => i,
-            Err(e) => {
-                if quiesced {
-                    if let Some(rc) = self.reconfigurer.as_ref() {
-                        unquiesce_on_drop("cube create failed", &e);
-                        let _ = rc.unquiesce(&source.id, &old_sandbox_id).await;
-                    }
-                }
-                return Err(e.into());
-            }
-        };
+            .await?;
         tracing::info!(
             instance = %source.id,
             old_sandbox = %old_sandbox_id,
@@ -1149,10 +999,8 @@ impl InstanceService {
 
         // Phase 4: swap on the row.  After this commit, DNS for
         // `<id>.<host>` resolves to the new sandbox — that's the
-        // user-visible cutover.  After this point, OLD is doomed and
-        // we don't need to unquiesce it (it's about to be destroyed).
-        if let Err(e) = self
-            .instances
+        // user-visible cutover.
+        self.instances
             .replace_cube_sandbox(
                 &source.id,
                 &info.sandbox_id,
@@ -1161,27 +1009,7 @@ impl InstanceService {
                 &resolved.allow_out,
                 now_secs(),
             )
-            .await
-        {
-            // Roll back: NEW is orphaned, OLD still authoritative;
-            // we owe the user an unquiesce on OLD.  Best-effort destroy
-            // NEW so we don't leak a cube — the row never pointed at it.
-            if quiesced {
-                if let Some(rc) = self.reconfigurer.as_ref() {
-                    unquiesce_on_drop("DB swap failed", &e);
-                    let _ = rc.unquiesce(&source.id, &old_sandbox_id).await;
-                }
-            }
-            if let Err(d) = self.cube.destroy_sandbox(&info.sandbox_id).await {
-                tracing::warn!(
-                    instance = %source.id,
-                    new_sandbox = %info.sandbox_id,
-                    error = %d,
-                    "rotate-in-place: orphan cube destroy after DB swap failure (janitor will sweep)"
-                );
-            }
-            return Err(e.into());
-        }
+            .await?;
 
         // Phase 5: push the configure envelope so the new cube
         // boots out of warmup-placeholder mode.  Mirrors the create

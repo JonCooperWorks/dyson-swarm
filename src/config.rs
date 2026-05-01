@@ -90,18 +90,21 @@ pub struct Config {
     #[serde(default)]
     pub openrouter: Option<OpenRouterConfig>,
 
-    /// Deprecated.  Startup binary-rotation is now always-on: every
-    /// swarm restart sweeps Live instances whose cube template is
-    /// older than `default_template_id` and snapshot+swap+destroys
-    /// each onto the current default, one at a time, gated on a
-    /// `/api/admin/quiesce` handshake with each dyson so users
-    /// mid-conversation don't see a 503.  Subdomain + bearer survive
-    /// the swap (rotate_in_place keeps `<id>.<hostname>` stable), so
-    /// the original "rotation is destructive of the URL" rationale
-    /// no longer applies.  Field kept for back-compat with existing
-    /// config TOMLs; value is ignored.
-    #[serde(default, alias = "rotate_binary_on_startup")]
-    #[allow(dead_code)]
+    /// Opt-in startup sweep that snapshot+restores every Live
+    /// instance whose cube template is older than
+    /// `default_template_id` onto the current default — closes the
+    /// gap left by config-only rewires when the fix lives in the
+    /// dyson binary itself (new ConfigureBody fields, tool registration
+    /// logic, the no-skills-block boot fix, etc.).
+    ///
+    /// Default `false` because rotation is destructive: it churns the
+    /// underlying `cube_sandbox_id` for every outdated instance, so
+    /// any client holding an old `<id>.<hostname>` URL gets a 404 and
+    /// must rediscover the new id (workspace state survives via the
+    /// snapshot).  Operators flip this on when they want a swarm
+    /// restart to also propagate a binary-level fix; otherwise leave
+    /// it off and run rotation by hand.
+    #[serde(default)]
     pub rotate_binary_on_startup: bool,
 }
 

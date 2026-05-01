@@ -446,16 +446,11 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     // the cubeproxy upstream routing fully warm so the new restore's
     // configure-push doesn't race a cold nginx and lose to 502s.
     //
-    // Always run the rotate-binary sweep on startup.  The sequence
-    // serialises one instance at a time through `rotate_in_place`
-    // (snapshot + new cube + swap + destroy) so the host never carries
-    // 2× cube memory at once.  The Phase 0 quiesce gate inside
-    // `rotate_in_place` waits for each dyson to go naturally idle
-    // before snapshotting, so users mid-conversation aren't forced
-    // into a 503 — they pause, we swap silently, they resume on the
-    // new cube under the same subdomain.  Skipped only when
-    // `default_template_id` is unset (single-tenant test mode).
-    {
+    // Gated behind `rotate_binary_on_startup` (default false): the
+    // sweep is destructive of `cube_sandbox_id` for every rotated
+    // instance, and the SPA needs to refresh `<id>.<hostname>` URLs
+    // afterwards — operators opt in.
+    if cfg.rotate_binary_on_startup {
         let target_template = cfg
             .default_template_id
             .clone()
@@ -489,8 +484,8 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
                 }
             });
         } else {
-            tracing::debug!(
-                "rotate-binary: default_template_id unset — startup sweep skipped"
+            tracing::warn!(
+                "rotate_binary_on_startup is enabled but default_template_id is unset — sweep skipped"
             );
         }
     }

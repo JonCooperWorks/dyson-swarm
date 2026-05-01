@@ -150,19 +150,12 @@ impl DysonReconfigurerHttp {
     /// forwarding regular requests (cubeproxy routes by the
     /// leading `<port>-` label of the SNI).
     fn url_for(&self, sandbox_id: &str) -> String {
-        self.admin_url(sandbox_id, "configure")
-    }
-
-    /// Same shape as `url_for` but takes the trailing endpoint name
-    /// so quiesce / unquiesce / idle can share the cubeproxy URL
-    /// pattern without each duplicating the port + domain assembly.
-    fn admin_url(&self, sandbox_id: &str, endpoint: &str) -> String {
         let port: u16 = std::env::var("SWARM_CUBE_INTERNAL_PORT")
             .ok()
             .and_then(|p| p.parse().ok())
             .unwrap_or(80);
         format!(
-            "https://{port}-{sandbox_id}.{}/api/admin/{endpoint}",
+            "https://{port}-{sandbox_id}.{}/api/admin/configure",
             self.sandbox_domain
         )
     }
@@ -250,88 +243,6 @@ impl DysonReconfigurer for DysonReconfigurerHttp {
             response = %resp_body,
             "reconfigure: dyson accepted"
         );
-        Ok(())
-    }
-
-    async fn is_idle(
-        &self,
-        instance_id: &str,
-        sandbox_id: &str,
-    ) -> Result<(bool, u32), String> {
-        let secret = self.ensure_secret(instance_id).await?;
-        let url = self.admin_url(sandbox_id, "idle");
-        let resp = self
-            .http
-            .get(&url)
-            .header(CONFIGURE_HEADER, &secret)
-            .header(CSRF_HEADER, "swarm-internal")
-            .send()
-            .await
-            .map_err(|e| format!("send: {e}"))?;
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        if !status.is_success() {
-            return Err(format!("dyson /api/admin/idle {status}: {body}"));
-        }
-        let v: serde_json::Value =
-            serde_json::from_str(&body).map_err(|e| format!("parse: {e}"))?;
-        let idle = v.get("idle").and_then(|x| x.as_bool()).unwrap_or(false);
-        let in_flight = v
-            .get("in_flight_chats")
-            .and_then(serde_json::Value::as_u64)
-            .and_then(|n| u32::try_from(n).ok())
-            .unwrap_or(0);
-        Ok((idle, in_flight))
-    }
-
-    async fn quiesce(
-        &self,
-        instance_id: &str,
-        sandbox_id: &str,
-    ) -> Result<bool, String> {
-        let secret = self.ensure_secret(instance_id).await?;
-        let url = self.admin_url(sandbox_id, "quiesce");
-        let resp = self
-            .http
-            .post(&url)
-            .header(CONFIGURE_HEADER, &secret)
-            .header(CSRF_HEADER, "swarm-internal")
-            .send()
-            .await
-            .map_err(|e| format!("send: {e}"))?;
-        let status = resp.status();
-        // 200 → latched (or already-latched).  409 → busy; not an
-        // error in the trait sense — caller wants to retry, not bail.
-        if status == reqwest::StatusCode::CONFLICT {
-            return Ok(false);
-        }
-        let body = resp.text().await.unwrap_or_default();
-        if !status.is_success() {
-            return Err(format!("dyson /api/admin/quiesce {status}: {body}"));
-        }
-        Ok(true)
-    }
-
-    async fn unquiesce(
-        &self,
-        instance_id: &str,
-        sandbox_id: &str,
-    ) -> Result<(), String> {
-        let secret = self.ensure_secret(instance_id).await?;
-        let url = self.admin_url(sandbox_id, "unquiesce");
-        let resp = self
-            .http
-            .post(&url)
-            .header(CONFIGURE_HEADER, &secret)
-            .header(CSRF_HEADER, "swarm-internal")
-            .send()
-            .await
-            .map_err(|e| format!("send: {e}"))?;
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(format!("dyson /api/admin/unquiesce {status}: {body}"));
-        }
         Ok(())
     }
 }

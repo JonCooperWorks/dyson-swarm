@@ -95,6 +95,9 @@ async fn ingest(State(state): State<AppState>, req: Request<Body>) -> StatusCode
             return StatusCode::INTERNAL_SERVER_ERROR;
         }
     };
+    if token_record.provider != crate::db::tokens::INGEST_PROVIDER {
+        return StatusCode::UNAUTHORIZED;
+    }
     let instance_id = token_record.instance_id;
 
     // 2. Resolve the instance row (unscoped — caller has no user

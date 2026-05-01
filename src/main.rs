@@ -34,6 +34,13 @@ fn collect_env() -> BTreeMap<String, String> {
         .collect()
 }
 
+fn env_flag(name: &str) -> bool {
+    matches!(
+        std::env::var(name).as_deref(),
+        Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+    )
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     // Tighten the process umask before any FS I/O.  Files we create
@@ -55,6 +62,12 @@ async fn main() -> ExitCode {
     }
     let args = cli::Cli::parse();
     if args.dangerous_no_auth {
+        if !env_flag("SWARM_DEV_MODE") && !env_flag("SWARM_DANGEROUS_NO_AUTH_OK") {
+            eprintln!(
+                "error: --dangerous-no-auth requires SWARM_DEV_MODE=1 or SWARM_DANGEROUS_NO_AUTH_OK=1"
+            );
+            return ExitCode::from(2);
+        }
         cli::print_dangerous_banner();
     }
     logging::init();
@@ -119,6 +132,11 @@ async fn run_mint_api_key(
     user_id: String,
     label: Option<String>,
 ) -> ExitCode {
+    if !env_flag("SWARM_MINT_API_KEY_OK") {
+        eprintln!("error: mint-api-key requires SWARM_MINT_API_KEY_OK=1");
+        return ExitCode::from(2);
+    }
+
     let pool = match dyson_swarm::db::open(&cfg.db_path).await {
         Ok(p) => p,
         Err(err) => {

@@ -128,8 +128,8 @@ binary mints an opaque user api-key directly through the DB +
 cipher, bypassing the HTTP surface entirely:
 
 ```sh
-sudo -u dyson-swarm /usr/local/bin/swarm \
-  mint-api-key --label "ops-foo" <users.id>
+sudo -u dyson-swarm env SWARM_MINT_API_KEY_OK=1 \
+  /usr/local/bin/swarm mint-api-key --label "ops-foo" <users.id>
 ```
 
 Prints the plaintext token (e.g. `dy_…`) to stdout; capture it

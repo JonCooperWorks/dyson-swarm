@@ -15,7 +15,7 @@ import { TasksListPage, TaskFormPage, AuditListPage, AuditDetailPage } from './t
 import { SharesPage } from './shares.jsx';
 import { AdminView } from './admin.jsx';
 import { ByokView } from './byok.jsx';
-import { MyArtefactsPage, InstanceArtefactsPage } from './artefacts.jsx';
+import { MyArtefactsPage, InstanceArtefactsPage, ArtefactPage } from './artefacts.jsx';
 
 export function App() {
   const view = useAppState(s => s.meta.view);
@@ -62,6 +62,8 @@ function renderView(view) {
       return <SharesPage instanceId={view.id}/>;
     case 'instance-artefacts':
       return <InstanceArtefactsPage instanceId={view.id}/>;
+    case 'instance-artefact':
+      return <ArtefactPage instanceId={view.id} artefactId={view.artefactId}/>;
     case 'artefacts':
       return <MyArtefactsPage/>;
     case 'admin':

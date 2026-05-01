@@ -230,6 +230,15 @@ export function parseHashView() {
   if (tasks) return { name: 'instance-tasks', id: decodeURIComponent(tasks[1]), taskName: null };
   const shares = h.match(/^#\/i\/([^/?#]+)\/shares/);
   if (shares) return { name: 'instance-shares', id: decodeURIComponent(shares[1]) };
+  // Deep-linked single-artefact reader.  Must come before the bare
+  // `#/i/<id>/artefacts` route so a canonical /<art_id> at the tail
+  // doesn't get swallowed by the listing route.
+  const instArtefactDetail = h.match(/^#\/i\/([^/?#]+)\/artefacts\/([^/?#]+)/);
+  if (instArtefactDetail) return {
+    name: 'instance-artefact',
+    id: decodeURIComponent(instArtefactDetail[1]),
+    artefactId: decodeURIComponent(instArtefactDetail[2]),
+  };
   const instArtefacts = h.match(/^#\/i\/([^/?#]+)\/artefacts/);
   if (instArtefacts) return { name: 'instance-artefacts', id: decodeURIComponent(instArtefacts[1]) };
   const edit = h.match(/^#\/i\/([^/?#]+)\/edit/);

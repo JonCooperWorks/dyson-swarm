@@ -78,7 +78,6 @@ function ArtefactsView({ backHref, subtitle, load, onSweep, showInstance }) {
   const [busy, setBusy] = React.useState(false);
   const [minted, setMinted] = React.useState(null);
   const [page, setPage] = React.useState(1);
-  const [opened, setOpened] = React.useState(null); // row currently in the reader
 
   const refresh = React.useCallback(async () => {
     setErr(null);
@@ -131,23 +130,21 @@ function ArtefactsView({ backHref, subtitle, load, onSweep, showInstance }) {
         refresh={refresh}
         showInstance={showInstance}
         sweepClick={sweepClick}
-        onOpen={setOpened}
       />
-
-      {opened ? (
-        <ArtefactReader
-          row={opened}
-          client={client}
-          onClose={() => setOpened(null)}
-        />
-      ) : null}
     </main>
   );
 }
 
+/// Build the deep-link URL for an artefact's reader page.  Both the
+/// per-instance and cross-instance lists navigate to the same
+/// canonical URL.
+function artefactHref(instanceId, artefactId) {
+  return `#/i/${encodeURIComponent(instanceId)}/artefacts/${encodeURIComponent(artefactId)}`;
+}
+
 function ArtefactTable({
   rows, page, setPage, client, busy, setBusy, setErr, setMinted, refresh,
-  showInstance, sweepClick, onOpen,
+  showInstance, sweepClick,
 }) {
   if (rows === null) return <p className="muted small">loading…</p>;
   if (rows.length === 0) {
@@ -238,11 +235,11 @@ function ArtefactTable({
               <td data-label="size" className="muted small">{fmtBytes(r.bytes)}</td>
               <td data-label="cached" className="muted small">{fmtTime(r.cached_at)}</td>
               <td className="row-actions">
-                <button
+                <a
                   className="btn btn-ghost btn-sm"
-                  onClick={() => onOpen && onOpen(r)}
-                  title="open the cached body inline"
-                >open</button>
+                  href={artefactHref(r.instance_id, r.id)}
+                  title="open the cached body in the reader"
+                >open</a>
                 <button
                   className="btn btn-ghost btn-sm"
                   onClick={() => share(r)}
@@ -302,38 +299,57 @@ function Pagination({ page, pageCount, total, start, shown, onPage }) {
   );
 }
 
-/// In-page reader.  Fires an authenticated bytes fetch and renders
-/// the result based on (kind, mime, name):
+/// Deep-linkable artefact reader page.  Mounted at
+///   #/i/<instance>/artefacts/<id>
+/// — both the per-instance and cross-instance listings link here on
+/// "open".  The page hydrates row metadata from
+/// `getInstanceArtefactMeta` (so a cold reload works) and fetches
+/// bytes via `fetchInstanceArtefactBytes`.
+///
+/// Render branches mirror dyson's reader (views-secondary.jsx):
 ///   - image/* (or kind=='image') → <img> from a blob URL
-///   - text/markdown (or .md/.markdown name) → react-markdown w/ gfm + breaks
+///   - text/markdown (or .md/.markdown name / kind=='security_review')
+///       → react-markdown w/ remark-gfm + remark-breaks
 ///   - text/* / json / xml → <pre> raw text
 ///   - everything else → download card
-/// Shape mirrors dyson's `ArtefactReader` (views-secondary.jsx) so the
-/// two SPAs feel the same on click.  Modal-style overlay; Esc + a
-/// scrim click both close.  Blob URLs are revoked on close to keep the
-/// browser's memory bounded.
-function ArtefactReader({ row, client, onClose }) {
+///
+/// Header parity with dyson: title chip, kind badge, anonymous-share
+/// dropdown (1d / 7d / 30d / never), copy-bytes / copy-url, download.
+export function ArtefactPage({ instanceId, artefactId }) {
+  const { client } = useApi();
+  const [row, setRow] = React.useState(null);
+  const [rowErr, setRowErr] = React.useState(null);
   const [state, setState] = React.useState({
     loading: true, err: null, mime: '', text: null, blob: null, blobUrl: null,
   });
 
+  // Hydrate row metadata.  Cold deep-link load: caller may not have
+  // a list cached, so fetch the single row directly.
+  React.useEffect(() => {
+    let cancelled = false;
+    setRow(null); setRowErr(null);
+    client.getInstanceArtefactMeta(instanceId, artefactId)
+      .then(r => { if (!cancelled) setRow(r); })
+      .catch(e => { if (!cancelled) setRowErr(e?.detail || e?.message || 'metadata fetch failed'); });
+    return () => { cancelled = true; };
+  }, [client, instanceId, artefactId]);
+
+  // Hydrate body bytes once we know the row exists.  Re-runs on
+  // navigation between artefacts even though the page stays mounted.
   React.useEffect(() => {
     let cancelled = false;
     let createdUrl = null;
+    setState({ loading: true, err: null, mime: '', text: null, blob: null, blobUrl: null });
     (async () => {
       try {
         const { blob, mime, text } = await client.fetchInstanceArtefactBytes(
-          row.instance_id, row.id,
+          instanceId, artefactId,
         );
         if (cancelled) return;
-        // Image branch needs an objectURL; markdown only needs the
-        // text.  Other types may want both (preview download card).
         const isImage = (mime || '').startsWith('image/')
-          || row.kind === 'image'
-          || (row.mime || '').startsWith('image/');
-        if (isImage) {
-          createdUrl = URL.createObjectURL(blob);
-        }
+          || (row && row.kind === 'image')
+          || (row && (row.mime || '').startsWith('image/'));
+        if (isImage) createdUrl = URL.createObjectURL(blob);
         setState({ loading: false, err: null, mime, text, blob, blobUrl: createdUrl });
       } catch (e) {
         if (cancelled) return;
@@ -344,64 +360,206 @@ function ArtefactReader({ row, client, onClose }) {
       cancelled = true;
       if (createdUrl) URL.revokeObjectURL(createdUrl);
     };
-  }, [client, row.instance_id, row.id]);
+  }, [client, instanceId, artefactId, row && row.kind, row && row.mime]);
 
-  // Esc closes — same posture as a confirm modal.
-  React.useEffect(() => {
-    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
+  const backHref = `#/i/${encodeURIComponent(instanceId)}/artefacts`;
 
   const download = () => {
     if (!state.blob) return;
     const url = state.blobUrl || URL.createObjectURL(state.blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = row.title || row.id;
+    a.download = (row && row.title) || artefactId;
     document.body.appendChild(a); a.click(); a.remove();
     if (!state.blobUrl) setTimeout(() => URL.revokeObjectURL(url), 5000);
   };
 
   return (
-    <div
-      onClick={onClose}
-      style={{
-        position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)',
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-        zIndex: 1000, padding: 20,
-      }}
-    >
-      <section
-        onClick={(e) => e.stopPropagation()}
-        className="panel"
-        style={{
-          maxWidth: '900px', width: '100%', maxHeight: '90vh',
-          display: 'flex', flexDirection: 'column', overflow: 'hidden',
-        }}
-      >
-        <div className="panel-header">
-          <div className="panel-title" style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {row.title || row.id}
-          </div>
-          <div className="panel-actions">
-            <span className="muted small" style={{ marginRight: 8 }}>
-              {row.kind} · {fmtBytes(row.bytes)}
-            </span>
-            <button
-              className="btn btn-ghost btn-sm"
-              onClick={download}
-              disabled={!state.blob}
-              title="download the bytes"
-            >download</button>
-            <button className="btn btn-ghost btn-sm" onClick={onClose} title="close (esc)">×</button>
-          </div>
-        </div>
-        <div style={{ overflow: 'auto', padding: 16, flex: 1 }}>
-          <ArtefactBody row={row} state={state} />
+    <main className="page page-edit">
+      <header className="page-header">
+        <a className="btn btn-ghost btn-sm" href={backHref}>← back</a>
+        <h1 className="page-title">
+          {row?.title || artefactId}
+        </h1>
+        <p className="page-sub muted">
+          {row ? (
+            <>
+              {row.kind}
+              {row.mime ? ` · ${row.mime}` : ''}
+              {' · '}{fmtBytes(row.bytes)}
+              {' · '}cached {fmtTime(row.cached_at)}
+              {' · instance '}
+              <a className="mono-sm" href={backHref}>{shortId(instanceId)}</a>
+              {row.chat_id ? <> · chat <span className="mono-sm">{shortId(row.chat_id)}</span></> : null}
+            </>
+          ) : rowErr ? (
+            <span className="error">{rowErr}</span>
+          ) : 'loading…'}
+        </p>
+      </header>
+
+      {row ? (
+        <ArtefactActionsBar
+          client={client}
+          row={row}
+          state={state}
+          onDownload={download}
+        />
+      ) : null}
+
+      <section className="panel">
+        <div style={{ padding: 16 }}>
+          <ArtefactBody row={row || { kind: '', mime: '', title: '' }} state={state} />
         </div>
       </section>
-    </div>
+    </main>
+  );
+}
+
+/// Header bar with copy / download / share actions.  Share UI mirrors
+/// dyson's ShareMenu — dropdown picker for 1d / 7d / 30d / never,
+/// minted URL surfaced in a banner with copy + dismiss.
+function ArtefactActionsBar({ client, row, state, onDownload }) {
+  const [shareBusy, setShareBusy] = React.useState(false);
+  const [shareUrl, setShareUrl] = React.useState(null);
+  const [shareErr, setShareErr] = React.useState(null);
+  const [shareCopied, setShareCopied] = React.useState(false);
+  const [shareExp, setShareExp] = React.useState(null);
+
+  const mintShare = async (ttl) => {
+    setShareBusy(true); setShareErr(null);
+    try {
+      const m = await client.mintShare(row.instance_id, row.id, {
+        chat_id: row.chat_id,
+        ttl,
+        label: null,
+      });
+      setShareUrl(m.url || null);
+      setShareExp(m.expires_at || null);
+    } catch (e) {
+      setShareErr(e?.detail || e?.message || 'share failed');
+    } finally {
+      setShareBusy(false);
+    }
+  };
+
+  const copyUrl = async () => {
+    if (!shareUrl) return;
+    try {
+      await navigator.clipboard.writeText(shareUrl);
+      setShareCopied(true);
+      setTimeout(() => setShareCopied(false), 1500);
+    } catch { /* ignore */ }
+  };
+
+  const isImage = (state.mime || '').startsWith('image/') || row.kind === 'image';
+  const isText = state.text != null && !isImage;
+
+  const copyBody = async () => {
+    if (!isText || state.text == null) return;
+    try { await navigator.clipboard.writeText(state.text); } catch { /* ignore */ }
+  };
+
+  return (
+    <>
+      <section
+        className="panel"
+        style={{
+          marginBottom: 12, display: 'flex', alignItems: 'center',
+          gap: 8, padding: '8px 12px', flexWrap: 'wrap',
+        }}
+      >
+        <ShareMenu busy={shareBusy} onMint={mintShare} />
+        <button
+          className="btn btn-ghost btn-sm"
+          onClick={copyBody}
+          disabled={!isText}
+          title="copy body to clipboard"
+        >copy</button>
+        <button
+          className="btn btn-sm"
+          onClick={onDownload}
+          disabled={!state.blob}
+          title="download bytes"
+        >download</button>
+      </section>
+      {(shareUrl || shareErr) ? (
+        <div className="banner banner-info" style={{ marginBottom: 12 }}>
+          {shareErr ? (
+            <>
+              <span className="error">share failed: {shareErr}</span>
+              <div style={{ marginTop: 8 }}>
+                <button className="btn btn-ghost btn-sm" onClick={() => setShareErr(null)}>dismiss</button>
+              </div>
+            </>
+          ) : (
+            <>
+              <div>anonymous share URL — capability is in the URL, copy it now:</div>
+              <code className="mono-sm" style={{ display: 'block', marginTop: 4, wordBreak: 'break-all' }}>
+                {shareUrl}
+              </code>
+              <div className="muted small" style={{ marginTop: 6 }}>
+                {shareExp ? <>expires {fmtTime(shareExp)}</> : null}
+              </div>
+              <div style={{ marginTop: 10, display: 'flex', gap: 8 }}>
+                <button className="btn btn-sm btn-primary" onClick={copyUrl}>
+                  {shareCopied ? 'copied' : 'copy link'}
+                </button>
+                <button className="btn btn-ghost btn-sm" onClick={() => setShareUrl(null)}>dismiss</button>
+              </div>
+            </>
+          )}
+        </div>
+      ) : null}
+    </>
+  );
+}
+
+/// TTL picker for the share-mint affordance.  Mirrors dyson's
+/// ShareMenu (views-secondary.jsx): 1d / 7d / 30d / never options,
+/// outside-click closes, the picked value mints immediately and the
+/// resulting URL appears in a banner under the bar.
+function ShareMenu({ busy, onMint }) {
+  const [open, setOpen] = React.useState(false);
+  const ref = React.useRef(null);
+  React.useEffect(() => {
+    if (!open) return;
+    const onDoc = (e) => {
+      if (ref.current && !ref.current.contains(e.target)) setOpen(false);
+    };
+    document.addEventListener('mousedown', onDoc);
+    return () => document.removeEventListener('mousedown', onDoc);
+  }, [open]);
+  const pick = (ttl) => { setOpen(false); onMint(ttl); };
+  return (
+    <span ref={ref} style={{ position: 'relative', display: 'inline-block' }}>
+      <button
+        className="btn btn-ghost btn-sm"
+        onClick={() => setOpen(o => !o)}
+        disabled={busy}
+        title="anonymous shareable link"
+      >
+        {busy ? 'minting…' : 'share…'}
+      </button>
+      {open ? (
+        <div role="menu" style={{
+          position: 'absolute', left: 0, top: '100%', marginTop: 4,
+          background: 'var(--panel, #1e1e1e)', border: '1px solid var(--line, #333)',
+          borderRadius: 6, padding: 4, zIndex: 20, display: 'flex',
+          flexDirection: 'column', minWidth: 110,
+          boxShadow: '0 4px 12px rgba(0,0,0,0.4)',
+        }}>
+          <button className="btn btn-ghost btn-sm" onClick={() => pick('1d')}>1 day</button>
+          <button className="btn btn-ghost btn-sm" onClick={() => pick('7d')}>7 days</button>
+          <button className="btn btn-ghost btn-sm" onClick={() => pick('30d')}>30 days</button>
+          <button
+            className="btn btn-ghost btn-sm"
+            onClick={() => pick('never')}
+            title="never expires (revoke manually from the shares panel)"
+          >never</button>
+        </div>
+      ) : null}
+    </span>
   );
 }
 

@@ -381,6 +381,17 @@ export class SwarmClient {
     return objectUrl;
   }
 
+  /// Single-row metadata for the deep-linked artefact reader page.
+  /// Returns null on 404 so the page can render an empty state.
+  getInstanceArtefactMeta(instanceId, artefactId) {
+    return this._json(
+      `/v1/instances/${encodeURIComponent(instanceId)}/artefacts/${encodeURIComponent(artefactId)}`,
+    ).catch(e => {
+      if (e && e.status === 404) return null;
+      throw e;
+    });
+  }
+
   /// Fetch raw artefact bytes + mime for in-SPA rendering (the
   /// reader pane uses this to render markdown, images, etc inline
   /// rather than dumping the body into a fresh tab).  Returns

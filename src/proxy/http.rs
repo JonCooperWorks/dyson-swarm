@@ -279,13 +279,13 @@ async fn handle(
             )
             .await;
             // Don't surface `e` to the client OR the log.  reqwest's
-            // Display includes the upstream URL, which for Gemini
-            // carries `?key=<real_key>` (see proxy::adapters::gemini)
-            // — echoing the error would leak the platform-wide
-            // provider key on any timeout or TLS hiccup.  Use the
-            // structured-fields shape: it captures the failure mode
-            // without ever stringifying the URL.  C2 in the security
-            // review.
+            // Display includes the upstream URL, and even though we
+            // moved Gemini auth out of the URL (now `x-goog-api-key`)
+            // we keep the URL out of error text as defence-in-depth:
+            // future adapters might re-introduce sensitive query
+            // params, and our client-facing errors should never carry
+            // upstream URLs anyway.  Structured fields capture the
+            // failure mode without stringifying the URL.
             tracing::warn!(
                 provider = %provider,
                 is_timeout = e.is_timeout(),

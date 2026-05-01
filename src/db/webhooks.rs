@@ -1,10 +1,10 @@
 //! sqlx-backed `WebhookStore` and `DeliveryStore` impls.
 //!
-//! The store layer is metadata-only: signing keys live in
-//! `instance_secrets` (sealed under the owner's age cipher) and are
-//! referenced by `secret_name`.  Delivery rows persist *metadata*
-//! about each fire — never request bodies; the agent sees those once,
-//! and we don't keep a second copy at rest.
+//! Webhook signing keys live in `instance_secrets` (sealed under the
+//! owner's age cipher) and are referenced by `secret_name`.  Delivery
+//! rows persist metadata for every fire plus the request body sealed
+//! under the same owner cipher (the store sees opaque ciphertext; the
+//! service layer in `crate::webhooks` does the seal/open).
 
 use async_trait::async_trait;
 use sqlx::{Row, SqlitePool};
@@ -261,12 +261,12 @@ impl DeliveryStore for SqlxDeliveryStore {
         // string-concat'ing the values: SQLite treats bound parameters
         // as data, never as SQL.
         //
-        // For `q`: matches against either the body (cast to TEXT —
-        // SQLite folds BLOBs to TEXT byte-for-byte, which is correct
-        // for utf8 payloads and is the same semantics rg uses) or the
-        // recorded error string.  Lowercased on both sides via LOWER()
-        // so the search is case-insensitive without needing a special
-        // collation.
+        // For `q`: matches against the recorded error string only.
+        // Bodies are sealed under the owner's age cipher (the service
+        // layer in `crate::webhooks` does the seal), so a SQL-side
+        // substring search would only ever hit ciphertext bytes, which
+        // is useless.  Operators searching payload contents need to
+        // scan with the cipher loaded — out of scope for the store.
         let mut sql = String::from(
             "SELECT id, instance_id, webhook_name, fired_at, status_code, \
                     latency_ms, request_id, signature_ok, error, \
@@ -281,10 +281,7 @@ impl DeliveryStore for SqlxDeliveryStore {
             sql.push_str(" AND fired_at < ?");
         }
         if q.is_some() {
-            sql.push_str(
-                " AND (LOWER(CAST(body AS TEXT)) LIKE ? \
-                       OR LOWER(COALESCE(error, '')) LIKE ?)",
-            );
+            sql.push_str(" AND LOWER(COALESCE(error, '')) LIKE ?");
         }
         sql.push_str(" ORDER BY fired_at DESC LIMIT ?");
 
@@ -297,7 +294,7 @@ impl DeliveryStore for SqlxDeliveryStore {
         }
         if let Some(needle) = q {
             let like = format!("%{}%", needle.to_lowercase());
-            query = query.bind(like.clone()).bind(like);
+            query = query.bind(like);
         }
         query = query.bind(i64::from(limit));
 
@@ -544,24 +541,32 @@ mod tests {
         webhooks.put(&row("i2", "ping")).await.unwrap();
         let deliveries = SqlxDeliveryStore::new(pool);
 
-        let mk = |id: &str, instance: &str, name: &str, ts: i64, body: &[u8]| DeliveryRow {
-            id: id.into(),
-            instance_id: instance.into(),
-            webhook_name: name.into(),
-            fired_at: ts,
-            status_code: 204,
-            latency_ms: 10,
-            request_id: None,
-            signature_ok: true,
-            error: None,
-            body: Some(body.to_vec()),
-            body_size: Some(body.len() as i64),
-            content_type: Some("application/json".into()),
+        let mk = |id: &str,
+                  instance: &str,
+                  name: &str,
+                  ts: i64,
+                  body: &[u8],
+                  error: Option<&str>|
+         -> DeliveryRow {
+            DeliveryRow {
+                id: id.into(),
+                instance_id: instance.into(),
+                webhook_name: name.into(),
+                fired_at: ts,
+                status_code: 204,
+                latency_ms: 10,
+                request_id: None,
+                signature_ok: true,
+                error: error.map(str::to_owned),
+                body: Some(body.to_vec()),
+                body_size: Some(body.len() as i64),
+                content_type: Some("application/json".into()),
+            }
         };
-        deliveries.insert(&mk("a", "i1", "ping", 100, b"{\"action\":\"opened\"}")).await.unwrap();
-        deliveries.insert(&mk("b", "i1", "deploy", 200, b"{\"ref\":\"main\"}")).await.unwrap();
-        deliveries.insert(&mk("c", "i1", "ping", 300, b"{\"action\":\"closed\"}")).await.unwrap();
-        deliveries.insert(&mk("d", "i2", "ping", 400, b"other tenant")).await.unwrap();
+        deliveries.insert(&mk("a", "i1", "ping", 100, b"{\"action\":\"opened\"}", Some("upstream timeout"))).await.unwrap();
+        deliveries.insert(&mk("b", "i1", "deploy", 200, b"{\"ref\":\"main\"}", None)).await.unwrap();
+        deliveries.insert(&mk("c", "i1", "ping", 300, b"{\"action\":\"closed\"}", None)).await.unwrap();
+        deliveries.insert(&mk("d", "i2", "ping", 400, b"other tenant", None)).await.unwrap();
 
         let listed = deliveries
             .list_for_instance("i1", None, None, None, 10)
@@ -591,11 +596,13 @@ mod tests {
             .unwrap();
         assert_eq!(pings.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), vec!["c", "a"]);
 
-        let opened = deliveries
-            .list_for_instance("i1", None, Some("OPENED"), None, 10)
+        // `q` is now an error-text substring search.  Bodies are
+        // sealed at the service layer so the store can't grep them.
+        let timeouts = deliveries
+            .list_for_instance("i1", None, Some("TIMEOUT"), None, 10)
             .await
             .unwrap();
-        assert_eq!(opened.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), vec!["a"]);
+        assert_eq!(timeouts.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), vec!["a"]);
     }
 
     #[tokio::test]

@@ -318,6 +318,7 @@ mod tests {
             svc.clone(),
             instance_svc.clone(),
             Arc::new(crate::webhooks::NullWebhookDispatcher),
+            cipher_dir.clone(),
         ));
         let shares_svc = Arc::new(crate::shares::ShareService::new(
             pool.clone(),

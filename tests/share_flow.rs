@@ -219,6 +219,7 @@ async fn build() -> Fixture {
         secrets_svc.clone(),
         instance_svc.clone(),
         Arc::new(dyson_swarm::webhooks::NullWebhookDispatcher),
+        cipher_dir.clone(),
     ));
     let apex = "swarm.test".to_string();
     let shares_svc = Arc::new(dyson_swarm::shares::ShareService::new(

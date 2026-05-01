@@ -343,6 +343,7 @@ async fn build_stack(subject_for_no_bearer: &str) -> Stack {
         secrets_svc.clone(),
         instance_svc.clone(),
         Arc::new(dyson_swarm::webhooks::NullWebhookDispatcher),
+        cipher_dir.clone(),
     ));
     let shares_svc = Arc::new(dyson_swarm::shares::ShareService::new(
         pool.clone(),

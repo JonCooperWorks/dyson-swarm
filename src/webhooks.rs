@@ -3,15 +3,22 @@
 //! - `WebhookService` glues:
 //!     1. `WebhookStore`         — metadata (name, description, scheme, enabled)
 //!     2. `SecretsService`       — signing keys (sealed under owner's age cipher)
-//!     3. `DeliveryStore`        — audit log (metadata-only)
+//!     3. `DeliveryStore`        — audit log (metadata + sealed body)
 //!     4. `WebhookDispatcher`    — kicks off a fresh agent conversation
+//!     5. `CipherDirectory`      — owner-keyed age ciphers; used to seal
+//!                                 audit bodies at write time and open
+//!                                 them on the detail-page read.
 //!
 //! Verification timing-attack defenses: HMAC compares use `subtle`'s
 //! constant-time `ConstantTimeEq`; bearer compares use the same.
 //!
-//! No request bodies are ever persisted — the agent receives the
-//! payload once and that's the only copy we keep.  Delivery rows
-//! capture *what happened*, not *what was sent*.
+//! Request bodies are kept for audit but sealed under the instance
+//! owner's age cipher before insert, so a stolen SQLite file alone
+//! does not expose historical webhook payloads — an attacker would
+//! also need the owner's age key (kept outside the DB).  Body-text
+//! search across rows is not available at the store layer for the
+//! same reason: the bytes on disk are ciphertext.  `body_size` and
+//! `error` remain plaintext for "what happened" queries.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -22,12 +29,19 @@ use sha2::Sha256;
 use subtle::ConstantTimeEq;
 use uuid::Uuid;
 
+use crate::envelope::CipherDirectory;
 use crate::error::StoreError;
 use crate::instance::InstanceService;
 use crate::secrets::{SecretsError, SecretsService};
 use crate::traits::{
     DeliveryRow, DeliveryStore, InstanceRow, WebhookAuthScheme, WebhookRow, WebhookStore,
 };
+
+/// Sentinel that armored age ciphertext starts with.  We use this on
+/// the read side to tell sealed bodies (current writes) apart from
+/// legacy plaintext bodies that pre-date encryption — those open as-is
+/// rather than going through the cipher.
+const AGE_ARMOR_PREFIX: &[u8] = b"-----BEGIN AGE ENCRYPTED FILE-----";
 
 /// Maximum body size accepted at `/webhooks/<id>/<name>`.  Mirrors
 /// dyson's `MAX_TURN_BODY` so we never accept a payload the agent
@@ -308,6 +322,11 @@ pub struct WebhookService {
     secrets: Arc<SecretsService>,
     instances: Arc<InstanceService>,
     dispatcher: Arc<dyn WebhookDispatcher>,
+    /// Per-user age ciphers — used to seal audit bodies so the SQLite
+    /// file can't be read offline to recover historical webhook
+    /// payloads.  Same directory used by `SecretsService` so we don't
+    /// bring a second key namespace into the picture.
+    ciphers: Arc<dyn CipherDirectory>,
 }
 
 impl WebhookService {
@@ -317,6 +336,7 @@ impl WebhookService {
         secrets: Arc<SecretsService>,
         instances: Arc<InstanceService>,
         dispatcher: Arc<dyn WebhookDispatcher>,
+        ciphers: Arc<dyn CipherDirectory>,
     ) -> Self {
         Self {
             webhooks,
@@ -324,6 +344,7 @@ impl WebhookService {
             secrets,
             instances,
             dispatcher,
+            ciphers,
         }
     }
 
@@ -465,8 +486,9 @@ impl WebhookService {
     /// Cross-task audit listing.  Owner-scoped at the entry point, then
     /// passes through to the store.  `webhook_name` narrows to a single
     /// task when the operator is filtering by name in the SPA; `q` is
-    /// a substring match on body+error; `before` is the cursor (the
-    /// previous page's oldest `fired_at` value).
+    /// a substring match on the recorded error text (bodies are sealed
+    /// at rest, so the store can't grep them); `before` is the cursor
+    /// (the previous page's oldest `fired_at` value).
     pub async fn list_instance_deliveries(
         &self,
         owner_id: &str,
@@ -488,6 +510,16 @@ impl WebhookService {
     /// detail page.  Owner-scoped at the entry; the store also bounds
     /// the query by `instance_id` so a guessed delivery id can't reach
     /// into another tenant.
+    ///
+    /// Bodies are sealed under the owner's age cipher at write time.
+    /// We open them here so callers see plaintext and don't have to
+    /// know about the at-rest format.  Rows persisted before encryption
+    /// shipped (legacy plaintext, no age armor header) pass through
+    /// unchanged so the audit history stays readable.  A row whose
+    /// ciphertext fails to open with the owner's current key (e.g.
+    /// the key was rotated and the row is now orphaned) returns with
+    /// `body = None`; a warning is logged so operators can see that
+    /// some history is unrecoverable rather than silently empty.
     pub async fn get_delivery(
         &self,
         owner_id: &str,
@@ -495,10 +527,47 @@ impl WebhookService {
         delivery_id: &str,
     ) -> Result<DeliveryRow, WebhookError> {
         self.ensure_owner(owner_id, instance_id).await?;
-        self.deliveries
+        let mut row = self
+            .deliveries
             .get_by_id(instance_id, delivery_id)
             .await?
-            .ok_or(WebhookError::NotFound)
+            .ok_or(WebhookError::NotFound)?;
+        if let Some(stored) = row.body.take() {
+            row.body = self.open_audit_body(owner_id, &row.id, stored);
+        }
+        Ok(row)
+    }
+
+    fn open_audit_body(
+        &self,
+        owner_id: &str,
+        delivery_id: &str,
+        stored: Vec<u8>,
+    ) -> Option<Vec<u8>> {
+        if !stored.starts_with(AGE_ARMOR_PREFIX) {
+            // Legacy row written before bodies were sealed — surface
+            // as-is so historical audits remain readable.
+            return Some(stored);
+        }
+        match self.ciphers.for_user(owner_id) {
+            Ok(cipher) => match cipher.open(&stored) {
+                Ok(plain) => Some(plain),
+                Err(e) => {
+                    tracing::warn!(
+                        delivery = %delivery_id, error = %e,
+                        "webhook delivery: body decrypt failed (key rotated?) — surfacing as empty"
+                    );
+                    None
+                }
+            },
+            Err(e) => {
+                tracing::warn!(
+                    delivery = %delivery_id, error = %e,
+                    "webhook delivery: owner cipher unavailable — body suppressed"
+                );
+                None
+            }
+        }
     }
 
     /// Public-facing entrypoint.  Owner-LESS — verification replaces
@@ -547,6 +616,24 @@ impl WebhookService {
         // and a "delivery for a webhook that doesn't exist" row is
         // useless to operators anyway.
         if !matches!(res, Err(WebhookError::NotFound)) {
+            // Seal the body under the instance owner's age cipher
+            // before storing.  We need the owner_id, which the inner
+            // call already resolved — re-resolve it here cheaply
+            // rather than threading it back out (this path runs at
+            // webhook-fire frequency, not per-request).  If the
+            // owner can't be resolved (instance vanished mid-flight)
+            // OR the seal fails, we drop the body and keep just the
+            // metadata row so the audit trail still lands.
+            let sealed_body = match self.seal_body_for_audit(instance_id, body).await {
+                Ok(b) => b,
+                Err(reason) => {
+                    tracing::warn!(
+                        instance = %instance_id, webhook = %name, %reason,
+                        "webhook delivery: body seal failed; storing without body"
+                    );
+                    None
+                }
+            };
             let row = DeliveryRow {
                 id: Uuid::new_v4().simple().to_string(),
                 instance_id: instance_id.to_string(),
@@ -557,13 +644,15 @@ impl WebhookService {
                 request_id: request_id.map(str::to_owned),
                 signature_ok,
                 error: error_text,
-                // Audit storage: keep the body for every delivery
-                // we accepted into the pipeline (signature failed
-                // OR succeeded — both are operator-relevant).  The
-                // SPA never reads this column.  Empty bodies still
-                // record body_size=0 so an audit can distinguish
-                // "no body" from "body purged".
-                body: Some(body.to_vec()),
+                // Audit storage: keep the body for every delivery we
+                // accepted into the pipeline, sealed under the owner's
+                // age cipher.  An attacker with read access to the
+                // SQLite file alone can't recover historical webhook
+                // payloads — they need the owner's age key too, which
+                // lives outside the DB.  body_size always reflects the
+                // *plaintext* length so audits can tell "no body" from
+                // "body present" without decrypting.
+                body: sealed_body,
                 body_size: Some(i64::try_from(body.len()).unwrap_or(i64::MAX)),
                 content_type,
             };
@@ -575,6 +664,34 @@ impl WebhookService {
             }
         }
         res
+    }
+
+    /// Resolve the instance owner and seal `body` under their age
+    /// cipher.  Returns `Ok(None)` for empty bodies (nothing to seal).
+    /// Returns `Err(reason)` on any failure so the caller can log and
+    /// fall back to a body-less audit row.
+    async fn seal_body_for_audit(
+        &self,
+        instance_id: &str,
+        body: &[u8],
+    ) -> Result<Option<Vec<u8>>, String> {
+        if body.is_empty() {
+            return Ok(None);
+        }
+        let owner_id = self
+            .instances
+            .get_unscoped(instance_id)
+            .await
+            .map(|r| r.owner_id)
+            .map_err(|e| format!("owner lookup: {e}"))?;
+        let cipher = self
+            .ciphers
+            .for_user(&owner_id)
+            .map_err(|e| format!("cipher: {e}"))?;
+        let ct = cipher
+            .seal(body)
+            .map_err(|e| format!("seal: {e}"))?;
+        Ok(Some(ct))
     }
 
     async fn verify_and_dispatch_inner(

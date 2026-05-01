@@ -21,7 +21,11 @@ impl SqlxTokenStore {
 #[async_trait]
 impl TokenStore for SqlxTokenStore {
     async fn mint(&self, instance_id: &str, provider: &str) -> Result<String, StoreError> {
-        let token = Uuid::new_v4().simple().to_string();
+        // `pt_` prefix lets operators grep proxy tokens out of access
+        // logs without false matches against bare 32-hex strings (UUIDs,
+        // OR key ids, etc).  128 bits of entropy still come from the
+        // UUID body — the prefix is purely for log distinguishability.
+        let token = format!("pt_{}", Uuid::new_v4().simple());
         sqlx::query(
             "INSERT INTO proxy_tokens (token, instance_id, provider, created_at, revoked_at) \
              VALUES (?, ?, ?, ?, NULL)",
@@ -147,7 +151,8 @@ mod tests {
         seed(&pool, "i1").await;
         let store = SqlxTokenStore::new(pool);
         let tok = store.mint("i1", "anthropic").await.unwrap();
-        assert_eq!(tok.len(), 32);
+        assert!(tok.starts_with("pt_"));
+        assert_eq!(tok.len(), 35);
 
         let resolved = store.resolve(&tok).await.unwrap().expect("present");
         assert_eq!(resolved.instance_id, "i1");

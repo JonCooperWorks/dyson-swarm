@@ -8,7 +8,7 @@
 //!   `GET <upstream>/v1/models` with `Authorization: Bearer <key>`.
 //!   Ollama here means Ollama Cloud (OpenAI-compatible); local
 //!   `ollama serve` daemons go through the `byo` slot instead.
-//! - gemini → `GET <upstream>/v1beta/models?key=<key>`.
+//! - gemini → `GET <upstream>/v1beta/models` with `x-goog-api-key`.
 //! - anthropic → `POST <upstream>/v1/messages` with `x-api-key`,
 //!   `max_tokens=1`, `model=claude-3-5-haiku-latest` (no public list-
 //!   models endpoint).
@@ -66,7 +66,7 @@ pub async fn validate_key(
             .map_err(|e| ValidateError::Network(e.to_string()))?,
         "gemini" => http
             .get(format!("{base}/v1beta/models"))
-            .query(&[("key", key)])
+            .header("x-goog-api-key", key)
             .send()
             .await
             .map_err(|e| ValidateError::Network(e.to_string()))?,

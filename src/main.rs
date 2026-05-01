@@ -695,6 +695,7 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         secrets_svc.clone(),
         instance_svc.clone(),
         webhook_dispatcher,
+        cipher_dir.clone(),
     ));
 
     // Anonymous artefact-share service — wires the SQLite pool, the

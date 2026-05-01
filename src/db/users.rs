@@ -467,6 +467,12 @@ impl UserStore for SqlxUserStore {
         // Same prefix-and-open flow as resolve, but we mark the row
         // by id (NOT by token, since the token isn't in the DB).
         let Some(prefix) = lookup_prefix(token) else {
+            // Match resolve_api_key's miss-path padding: do one
+            // sentinel decrypt so a "wrong shape" rejection costs
+            // about the same as a "right shape, unknown key" miss.
+            // This is admin-gated so the timing side-channel is
+            // already small, but it's free to be consistent.
+            let _ = dummy_decrypt_against_sentinel(token);
             return Err(StoreError::NotFound);
         };
         let rows = sqlx::query(
@@ -477,6 +483,13 @@ impl UserStore for SqlxUserStore {
         .fetch_all(&self.pool)
         .await
         .map_err(map_sqlx)?;
+        if rows.is_empty() {
+            // Same padding as resolve_api_key when the prefix bucket
+            // is empty: one sentinel decrypt so the cost matches the
+            // single-candidate path.
+            let _ = dummy_decrypt_against_sentinel(token);
+            return Err(StoreError::NotFound);
+        }
         for r in rows {
             let user_id: String = r.get("user_id");
             let ciphertext: String = r.get("ciphertext");

@@ -645,10 +645,14 @@ pub struct DeliveryRow {
     pub request_id: Option<String>,
     pub signature_ok: bool,
     pub error: Option<String>,
-    /// Inbound request body, stored verbatim for audit.  Never
-    /// surfaced to the SPA; operators read it via SQL or the swarm
-    /// CLI.  `None` for failed verifications where we deliberately
-    /// don't keep the bytes (e.g. a 413 caught before insert).
+    /// Inbound request body for audit.  At the store layer this is
+    /// opaque bytes — the service layer (`crate::webhooks`) seals it
+    /// under the instance owner's age cipher on write and opens it on
+    /// read.  `None` means either the row pre-dated body capture, the
+    /// seal failed (logged), or the row was a 413 caught before insert.
+    /// Never surfaced raw to the SPA; the audit detail page goes
+    /// through the service so plaintext only escapes with the
+    /// owner-keyed cipher loaded.
     #[serde(skip)]
     pub body: Option<Vec<u8>>,
     /// Inbound `Content-Type`, if present.  Recorded alongside the
@@ -675,10 +679,10 @@ pub trait DeliveryStore: Send + Sync {
     /// Cursor pagination by `fired_at`: pass the previous page's oldest
     /// `fired_at` (in seconds) as `before` to fetch the next page.
     /// Optional `webhook_name` narrows to a single task; optional `q`
-    /// is a case-insensitive substring filter applied to the request
-    /// body bytes (decoded as utf8) and to the error column.  Returned
-    /// rows omit the body bytes — callers fetch the body via
-    /// [`get_by_id`] when rendering the detail page.
+    /// is a case-insensitive substring filter applied to the error
+    /// column only — bodies are encrypted at rest so the store can't
+    /// grep them.  Returned rows omit the body bytes; callers fetch
+    /// the body via [`get_by_id`] when rendering the detail page.
     async fn list_for_instance(
         &self,
         instance_id: &str,

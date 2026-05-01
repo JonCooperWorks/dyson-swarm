@@ -2897,7 +2897,8 @@ mod tests {
             .unwrap();
         assert!(created.url.starts_with("https://sb-1."));
         assert_eq!(created.bearer_token.len(), 32);
-        assert_eq!(created.proxy_token.len(), 32);
+        assert!(created.proxy_token.starts_with("pt_"));
+        assert_eq!(created.proxy_token.len(), 35);
 
         let captured = cube.last_create();
         assert_eq!(captured.template_id, "tpl-x");

@@ -20,7 +20,11 @@ path = "src/main.rs"
 # Bumping a minor is a deliberate operation; SemVer-major bumps require
 # a code review and a security/breakage check.
 axum = { version = "0.7.9", default-features = false, features = ["http1", "json", "tokio", "matched-path"] }
-tokio = { version = "1.52", default-features = false, features = ["rt-multi-thread", "net", "macros", "signal", "sync", "fs"] }
+tokio = { version = "1.52", default-features = false, features = ["rt-multi-thread", "net", "macros", "signal", "sync", "fs", "io-util", "time"] }
+bytes = "1.11.1"
+http-body-util = "0.1.3"
+hyper = { version = "1.9.0", default-features = false, features = ["client", "http1", "server"] }
+hyper-util = { version = "0.1.20", default-features = false, features = ["tokio"] }
 reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls", "json", "stream"] }
 sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "macros", "migrate"] }
 # rust-s3 0.37 closes RUSTSEC-2026-0098 / 2026-0099 / 2026-0104 (rustls-webpki

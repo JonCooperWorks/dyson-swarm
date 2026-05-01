@@ -72,19 +72,36 @@ sweep retries the full pipeline.
 
 ### Network policies
 
-Every dyson is hired with one of four egress profiles, mapped to
+Every dyson is hired with one of five egress profiles, mapped to
 CubeAPI's `allow_internet_access` + `network.allowOut` / `denyOut`:
 
 | Profile     | UI label                          | What the cube enforces |
 |-------------|-----------------------------------|------------------------|
-| `open`      | "Open (full internet)"            | Pre-feature default — full internet, RFC1918+linklocal denied. |
+| `nolocalnet` | "Open"                           | Default — public internet allowed; private, link-local, loopback, multicast, and reserved ranges denied. |
+| `open`      | "Open + LAN"                      | Full internet and internal hosts; explicit opt-in for LAN/internal access. |
 | `airgap`    | "Air-gapped (LLM only)"           | No egress except the swarm `/llm` proxy. |
 | `allowlist` | "Allowlist (only these networks)" | LLM proxy + listed CIDRs/hostnames. Hostnames resolve at hire time. |
-| `denylist`  | "Denylist (block these networks)" | Full internet minus listed CIDRs/hostnames. |
+| `denylist`  | "Denylist (block these networks)" | Public internet minus default denies and listed CIDRs/hostnames. |
 
-The new-instance page (`#/new`) carries a profile picker.  Existing
-rows backfill to `Open` (no behaviour change for instances created
-before this feature shipped).
+The new-instance page (`#/new`) carries a profile picker.  `nolocalnet`
+is the default; `open` is the compatibility escape hatch for workloads
+that intentionally need internal/LAN targets.
+
+Host HTTP(S) proxy egress is enforced by `dyson-egress-proxy`, not
+tinyproxy.  Cubes still use `HTTP_PROXY=http://169.254.68.5:3128` and
+`HTTPS_PROXY=http://169.254.68.5:3128`; Cube DNATs that address to
+`192.168.0.1:3128` on the host.  The proxy reads
+`/run/dyson-egress/policies.json` and checks the source sandbox IP plus
+every resolved destination IPv4 immediately before dialing.  Unknown
+source sandbox IPs fail closed with `403`.
+
+Useful operator commands:
+
+```bash
+journalctl -u dyson-egress-proxy
+sudo systemctl start dyson-egress-policy.service
+jq . /run/dyson-egress/policies.json
+```
 
 #### Hostnames in entries
 
@@ -117,7 +134,9 @@ Authorisation: instance owner OR admin (`SYSTEM_OWNER` / `"*"`).
 `cube_facing_addr` to an IPv4 (e.g. `"192.168.0.1:8080"`) in
 `swarm.toml`.  Hires using those profiles return 400 with a clear
 config-help message when it's missing.  `Open` and `Denylist` work
-without it (they include `0.0.0.0/0`).
+without it (they include `0.0.0.0/0`); `NoLocalNet` does not require
+it because public destinations use the default-allow path while local
+ranges stay denied.
 
 ### Operator escape hatch: minting an api-key without an admin bearer
 

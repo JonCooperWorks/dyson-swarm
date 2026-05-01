@@ -586,6 +586,10 @@ fn is_hop_by_hop(name: &HeaderName) -> bool {
 /// authoritative for cubeproxy's hostnames.
 pub fn build_client() -> Result<reqwest::Client, reqwest::Error> {
     let mut b = reqwest::Client::builder()
+        // This client is for host-side cubeproxy traffic only: the
+        // reverse proxy, webhooks, and artefact fetches must not inherit
+        // a host HTTP_PROXY/HTTPS_PROXY and loop through sandbox egress.
+        .no_proxy()
         .timeout(Duration::from_secs(30 * 60))
         .pool_idle_timeout(Duration::from_secs(60));
     if let Ok(path) = std::env::var("SWARM_CUBE_ROOT_CA")

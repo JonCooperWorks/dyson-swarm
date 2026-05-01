@@ -182,6 +182,13 @@ impl HttpWebhookDispatcher {
             .and_then(|p| p.parse().ok())
             .unwrap_or(80)
     }
+
+    fn cube_base_url(sandbox_domain: &str, port: u16, sandbox_id: &str) -> String {
+        format!(
+            "https://{port}-{sandbox_id}.{}",
+            sandbox_domain.trim_end_matches('/')
+        )
+    }
 }
 
 #[async_trait]
@@ -202,10 +209,7 @@ impl WebhookDispatcher for HttpWebhookDispatcher {
             return Err("instance has no cube sandbox id".into());
         };
         let port = Self::cube_port();
-        let base = format!(
-            "https://{port}-{sandbox_id}.{}",
-            self.sandbox_domain.trim_end_matches('/')
-        );
+        let base = Self::cube_base_url(&self.sandbox_domain, port, sandbox_id);
         let bearer = format!("Bearer {}", instance.bearer_token);
 
         // 1. Mint a fresh conversation.  Title carries the webhook
@@ -896,5 +900,11 @@ mod tests {
         let s = render_prompt("brief", &[], &[0xff, 0xfe]);
         assert!(s.contains("non-utf8"));
         assert!(s.contains("fffe"));
+    }
+
+    #[test]
+    fn http_dispatcher_targets_cubeproxy_authority() {
+        let base = HttpWebhookDispatcher::cube_base_url("cube.test/", 80, "sb-abc");
+        assert_eq!(base, "https://80-sb-abc.cube.test");
     }
 }

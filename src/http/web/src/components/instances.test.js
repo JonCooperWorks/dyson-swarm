@@ -20,6 +20,7 @@ import {
   DEFAULT_POLICY_KIND,
   POLICY_OPTIONS,
   CubeProfilePicker,
+  findCubeProfile,
 } from './instances.jsx';
 
 afterEach(() => { cleanup(); });
@@ -75,6 +76,28 @@ describe('profileLabel', () => {
     // crashing the whole page.
     expect(profileLabel(null)).toBe('');
     expect(profileLabel(undefined)).toBe('');
+  });
+});
+
+describe('findCubeProfile', () => {
+  const PROFILES = [
+    { name: 'default', template_id: 'tpl-default', disk_gb: 5, cpu_millicores: 2000, memory_mb: 2000 },
+    { name: 'large', template_id: 'tpl-large', disk_gb: 10, cpu_millicores: 4000, memory_mb: 4000 },
+  ];
+
+  test('returns the matching profile by template_id', () => {
+    expect(findCubeProfile('tpl-large', PROFILES).name).toBe('large');
+  });
+
+  test('returns null when no profile matches (retired tier or stale row)', () => {
+    expect(findCubeProfile('tpl-vanished', PROFILES)).toBeNull();
+  });
+
+  test('returns null for missing inputs (legacy row, empty ladder, etc.)', () => {
+    expect(findCubeProfile(null, PROFILES)).toBeNull();
+    expect(findCubeProfile('tpl-default', [])).toBeNull();
+    expect(findCubeProfile('tpl-default', null)).toBeNull();
+    expect(findCubeProfile(undefined, undefined)).toBeNull();
   });
 });
 

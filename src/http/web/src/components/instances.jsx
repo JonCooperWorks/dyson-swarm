@@ -65,7 +65,8 @@ export function InstancesView({ view }) {
 // ─── List ─────────────────────────────────────────────────────────
 
 function InstanceList({ selectedId, onNew }) {
-  const { client } = useApi();
+  const { client, auth } = useApi();
+  const cubeProfiles = auth?.config?.cube_profiles || [];
   const { byId, order } = useAppState(s => s.instances);
   const [refreshing, setRefreshing] = React.useState(false);
 
@@ -115,6 +116,7 @@ function InstanceList({ selectedId, onNew }) {
                 <div className="rail-row-id muted small">{shortId(id)}</div>
                 <div className="rail-row-meta">
                   <StatusBadge status={row.status}/>
+                  <CubeSizeBadge row={row} cubeProfiles={cubeProfiles}/>
                 </div>
               </a>
             </li>
@@ -131,6 +133,23 @@ function StatusBadge({ status }) {
             : status === 'destroyed' ? 'faint'
             : 'warn';
   return <span className={`badge badge-${cls}`}>{status}</span>;
+}
+
+// Small badge that surfaces the cube tier the instance was hired
+// into.  Tooltip carries the full specs (`profileLabel`) so a user
+// scanning the rail sees just "default", but a hover reveals the
+// disk / vCPU / RAM tuple.  Renders nothing when the row has no
+// matching profile (legacy rows, retired tiers, or no
+// /auth/config.cube_profiles surfaced) — the absence is more honest
+// than a placeholder string.
+function CubeSizeBadge({ row, cubeProfiles }) {
+  const profile = findCubeProfile(row?.template_id, cubeProfiles);
+  if (!profile) return null;
+  return (
+    <span className="badge badge-size" title={profileLabel(profile)}>
+      {profile.name}
+    </span>
+  );
 }
 
 // Compact id presentation: shortened by default, click-to-copy.  The
@@ -182,6 +201,18 @@ const TaskProse = React.memo(function TaskProse({ markdown }) {
     </div>
   );
 });
+
+// Look up the `cube_profiles` entry whose template_id matches the
+// instance row's.  Returns null when the operator hasn't surfaced
+// profiles yet, when the row carries no template_id (legacy rows),
+// or when the row's template_id is no longer in the ladder (e.g. an
+// older tier has been retired).  Pure for testability.
+export function findCubeProfile(templateId, cubeProfiles) {
+  if (!templateId || !Array.isArray(cubeProfiles) || cubeProfiles.length === 0) {
+    return null;
+  }
+  return cubeProfiles.find(p => p.template_id === templateId) || null;
+}
 
 // Format a `cube_profiles` entry for the dropdown — `name — Xg disk
 // · Y vCPU · Zg RAM`.  Pure (no React, no DOM) so the unit test
@@ -1510,7 +1541,8 @@ function KvField({ label, value }) {
 // ─── Detail ───────────────────────────────────────────────────────
 
 function InstanceDetail({ id, onNew }) {
-  const { client } = useApi();
+  const { client, auth } = useApi();
+  const cubeProfiles = auth?.config?.cube_profiles || [];
   const row = useAppState(s => (id ? s.instances.byId[id] : null));
   const totalInstances = useAppState(s => s.instances.order.length);
   // Enabled-task count for the tasks button badge.  Source of truth is
@@ -1675,6 +1707,7 @@ function InstanceDetail({ id, onNew }) {
           <h2 className="employee-name">{displayName}</h2>
           <div className="detail-meta">
             <StatusBadge status={row.status}/>
+            <CubeSizeBadge row={row} cubeProfiles={cubeProfiles}/>
             <NetworkPolicyBadge instance={row}/>
             {row.pinned ? <span className="badge badge-info">pinned</span> : null}
             <IdChip id={row.id} openUrl={row.open_url}/>
@@ -1746,6 +1779,11 @@ function InstanceDetail({ id, onNew }) {
 
       <section className="panel">
         <div className="panel-title">runtime</div>
+        {(() => {
+          const profile = findCubeProfile(row.template_id, cubeProfiles);
+          if (!profile) return null;
+          return <KvRow label="size" value={profileLabel(profile)}/>;
+        })()}
         <KvRow label="created" value={fmtTime(row.created_at)}/>
         <KvRow label="last active" value={fmtTime(row.last_active_at)}/>
         <KvRow label="last probe" value={

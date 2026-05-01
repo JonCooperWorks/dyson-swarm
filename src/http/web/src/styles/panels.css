@@ -501,6 +501,9 @@
 .badge-warn  { background: color-mix(in srgb, var(--warn)  20%, transparent); color: var(--warn); }
 .badge-faint { background: var(--bg-2); color: var(--fg-faint); }
 .badge-info  { background: color-mix(in srgb, var(--accent) 20%, transparent); color: var(--accent); }
+/* Size = neutral fact about the cube tier; intentionally less loud
+ * than ok/warn/info so it sits next to status without competing. */
+.badge-size  { background: var(--bg-2); color: var(--fg-muted); border: 1px solid var(--border); }
 
 /* ── Buttons ─────────────────────────────────────────────────── */
 

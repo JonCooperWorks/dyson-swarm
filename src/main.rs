@@ -337,7 +337,11 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         proxy_base,
     )
     .with_llm_cidr(llm_cidr);
-    let secrets_svc = Arc::new(SecretsService::new(secrets_store, cipher_dir.clone()));
+    let secrets_svc = Arc::new(SecretsService::new(
+        secrets_store,
+        instances_store.clone(),
+        cipher_dir.clone(),
+    ));
     let user_secrets_svc = Arc::new(dyson_swarm::secrets::UserSecretsService::new(
         user_secrets_store,
         cipher_dir.clone(),

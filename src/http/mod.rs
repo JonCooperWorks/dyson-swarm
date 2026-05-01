@@ -273,7 +273,13 @@ mod tests {
         let keys_tmp = tempfile::tempdir().unwrap();
         let cipher_dir: Arc<dyn crate::envelope::CipherDirectory> =
             Arc::new(crate::envelope::AgeCipherDirectory::new(keys_tmp.path()).unwrap());
-        let svc = Arc::new(SecretsService::new(raw.clone(), cipher_dir.clone()));
+        let instances_store: Arc<dyn InstanceStore> =
+            Arc::new(SqlxInstanceStore::new(pool.clone()));
+        let svc = Arc::new(SecretsService::new(
+            raw.clone(),
+            instances_store.clone(),
+            cipher_dir.clone(),
+        ));
         let user_secrets_store: Arc<dyn crate::traits::UserSecretStore> =
             Arc::new(crate::db::secrets::SqlxUserSecretStore::new(pool.clone()));
         let system_secrets_store: Arc<dyn crate::traits::SystemSecretStore> =
@@ -287,8 +293,6 @@ mod tests {
             cipher_dir.clone(),
         ));
         let cube: Arc<dyn CubeClient> = Arc::new(StubCube);
-        let instances_store: Arc<dyn InstanceStore> =
-            Arc::new(SqlxInstanceStore::new(pool.clone()));
         let tokens_store: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(pool.clone()));
         let users_store: Arc<dyn crate::traits::UserStore> = Arc::new(
             crate::db::users::SqlxUserStore::new(pool.clone(), cipher_dir.clone()),

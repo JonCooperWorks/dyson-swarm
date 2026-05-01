@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use crate::envelope::{CipherDirectory, EnvelopeError, SYSTEM_KEY_ID};
 use crate::error::StoreError;
-use crate::traits::{SecretStore, SystemSecretStore, UserSecretStore};
+use crate::traits::{InstanceStore, SecretStore, SystemSecretStore, UserSecretStore};
 
 /// Errors a secrets call can surface to the API layer.  Wraps both
 /// store and envelope failures so HTTP handlers can map to the right
@@ -41,12 +41,17 @@ pub enum SecretsError {
 #[derive(Clone)]
 pub struct SecretsService {
     store: Arc<dyn SecretStore>,
+    instances: Arc<dyn InstanceStore>,
     ciphers: Arc<dyn CipherDirectory>,
 }
 
 impl SecretsService {
-    pub fn new(store: Arc<dyn SecretStore>, ciphers: Arc<dyn CipherDirectory>) -> Self {
-        Self { store, ciphers }
+    pub fn new(
+        store: Arc<dyn SecretStore>,
+        instances: Arc<dyn InstanceStore>,
+        ciphers: Arc<dyn CipherDirectory>,
+    ) -> Self {
+        Self { store, instances, ciphers }
     }
 
     /// Encrypt `value` with the owner's cipher and persist.
@@ -65,7 +70,16 @@ impl SecretsService {
         Ok(())
     }
 
-    pub async fn delete(&self, instance_id: &str, name: &str) -> Result<(), SecretsError> {
+    pub async fn delete(
+        &self,
+        owner_id: &str,
+        instance_id: &str,
+        name: &str,
+    ) -> Result<(), SecretsError> {
+        self.instances
+            .get_for_owner(owner_id, instance_id)
+            .await?
+            .ok_or(StoreError::NotFound)?;
         Ok(self.store.delete(instance_id, name).await?)
     }
 
@@ -273,7 +287,11 @@ mod tests {
 
     // ── Encryption-aware tests (instance / user / system services) ───
 
+    use crate::db::{instances::SqlxInstanceStore, open_in_memory};
     use crate::envelope::AgeCipherDirectory;
+    use crate::network_policy::NetworkPolicy;
+    use crate::now_secs;
+    use crate::traits::{InstanceRow, InstanceStatus};
     use std::sync::Mutex;
 
     /// In-memory SecretStore for testing the SecretsService without sqlite.
@@ -367,12 +385,60 @@ mod tests {
         format!("{:032x}", u128::from(seed) | (u128::from(seed) << 64))
     }
 
+    async fn instance_store() -> Arc<dyn InstanceStore> {
+        Arc::new(SqlxInstanceStore::new(open_in_memory().await.unwrap()))
+    }
+
+    async fn instance_store_with(owner_id: &str, instance_id: &str) -> Arc<dyn InstanceStore> {
+        let pool = open_in_memory().await.unwrap();
+        sqlx::query(
+            "INSERT INTO users (id, subject, display_name, status, created_at, activated_at) \
+             VALUES (?, ?, ?, 'active', ?, ?)",
+        )
+        .bind(owner_id)
+        .bind(format!("subject-{owner_id}"))
+        .bind(owner_id)
+        .bind(now_secs())
+        .bind(now_secs())
+        .execute(&pool)
+        .await
+        .unwrap();
+        let store: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(pool));
+        store
+            .create(InstanceRow {
+                id: instance_id.to_owned(),
+                owner_id: owner_id.to_owned(),
+                name: String::new(),
+                task: String::new(),
+                cube_sandbox_id: None,
+                template_id: "tpl".into(),
+                status: InstanceStatus::Live,
+                bearer_token: "bt".into(),
+                pinned: false,
+                expires_at: None,
+                last_active_at: now_secs(),
+                last_probe_at: None,
+                last_probe_status: None,
+                created_at: now_secs(),
+                destroyed_at: None,
+                rotated_to: None,
+                network_policy: NetworkPolicy::Open,
+                network_policy_cidrs: Vec::new(),
+                models: Vec::new(),
+                tools: Vec::new(),
+            })
+            .await
+            .unwrap();
+        store
+    }
+
     #[tokio::test]
     async fn instance_secret_round_trip_uses_owner_cipher() {
         let (_tmp, dir) = ciphers();
         let owner = user_id(0xa1);
         let svc = SecretsService::new(
             Arc::new(MemSecretStore(Mutex::new(Vec::new()))),
+            instance_store().await,
             dir.clone(),
         );
         svc.put(&owner, "inst-1", "GITHUB_TOKEN", "ghp_secret").await.unwrap();
@@ -391,6 +457,7 @@ mod tests {
         let bob = user_id(0xb0);
         let svc = SecretsService::new(
             Arc::new(MemSecretStore(Mutex::new(Vec::new()))),
+            instance_store().await,
             dir.clone(),
         );
         svc.put(&alice, "inst-1", "K", "alice-only").await.unwrap();
@@ -441,6 +508,7 @@ mod tests {
         let (_tmp, dir) = ciphers();
         let svc = SecretsService::new(
             Arc::new(MemSecretStore(Mutex::new(Vec::new()))),
+            instance_store().await,
             dir.clone(),
         );
         let owner = user_id(0xa1);
@@ -448,5 +516,27 @@ mod tests {
         svc.put(&owner, "inst-1", "K2", "v2").await.unwrap();
         let names = svc.list_names("inst-1").await.unwrap();
         assert_eq!(names, vec!["K1", "K2"]);
+    }
+
+    #[tokio::test]
+    async fn instance_secret_delete_requires_owner() {
+        let (_tmp, dir) = ciphers();
+        let alice = user_id(0xa1);
+        let bob = user_id(0xb0);
+        let secrets = Arc::new(MemSecretStore(Mutex::new(Vec::new())));
+        let svc = SecretsService::new(
+            secrets.clone(),
+            instance_store_with(&alice, "inst-1").await,
+            dir.clone(),
+        );
+        svc.put(&alice, "inst-1", "K", "alice-only").await.unwrap();
+
+        let err = svc.delete(&bob, "inst-1", "K").await.unwrap_err();
+        assert!(matches!(err, SecretsError::Store(StoreError::NotFound)));
+
+        let names = svc.list_names("inst-1").await.unwrap();
+        assert_eq!(names, vec!["K"]);
+        svc.delete(&alice, "inst-1", "K").await.unwrap();
+        assert!(svc.list_names("inst-1").await.unwrap().is_empty());
     }
 }

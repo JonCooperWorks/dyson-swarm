@@ -446,7 +446,7 @@ impl WebhookService {
         // secrets list because of the `_webhook_` prefix filter).
         if let Ok(Some(row)) = self.webhooks.get(instance_id, name).await
             && let Some(secret_name) = row.secret_name.as_deref()
-            && let Err(e) = self.secrets.delete(instance_id, secret_name).await
+            && let Err(e) = self.secrets.delete(owner_id, instance_id, secret_name).await
         {
             tracing::warn!(
                 instance = %instance_id, webhook = %name, error = %e,

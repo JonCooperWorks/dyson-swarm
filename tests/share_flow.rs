@@ -154,7 +154,11 @@ async fn build() -> Fixture {
     let user_secrets_svc = Arc::new(UserSecretsService::new(user_secrets_store, cipher_dir.clone()));
     let system_secrets_svc =
         Arc::new(SystemSecretsService::new(system_secrets_store, cipher_dir.clone()));
-    let secrets_svc = Arc::new(SecretsService::new(secrets_store.clone(), cipher_dir.clone()));
+    let secrets_svc = Arc::new(SecretsService::new(
+        secrets_store.clone(),
+        instances_store.clone(),
+        cipher_dir.clone(),
+    ));
     let backup: Arc<dyn BackupSink> = Arc::new(LocalDiskBackupSink::new(cube.clone()));
     let snapshots_store: Arc<dyn SnapshotStore> =
         Arc::new(dyson_swarm::db::snapshots::SqliteSnapshotStore::new(pool.clone()));

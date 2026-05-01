@@ -446,15 +446,15 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     // the cubeproxy upstream routing fully warm so the new restore's
     // configure-push doesn't race a cold nginx and lose to 502s.
     //
-    // Always run the rotate-binary sweep on startup, IN THE BACKGROUND
-    // so swarm starts accepting traffic immediately while rotations
-    // proceed.  Sequenced one at a time inside `rotate_binary_all` so
-    // the host never carries 2× cube memory at once.  The Phase 0
-    // quiesce gate inside `rotate_in_place` waits for each dyson to go
-    // naturally idle before snapshotting, so users mid-conversation
-    // aren't forced into a 503 — they pause, we swap silently, they
-    // resume on the new cube under the same subdomain.  Skipped only
-    // when `default_template_id` is unset (single-tenant test mode).
+    // Always run the rotate-binary sweep on startup.  The sequence
+    // serialises one instance at a time through `rotate_in_place`
+    // (snapshot + new cube + swap + destroy) so the host never carries
+    // 2× cube memory at once.  The Phase 0 quiesce gate inside
+    // `rotate_in_place` waits for each dyson to go naturally idle
+    // before snapshotting, so users mid-conversation aren't forced
+    // into a 503 — they pause, we swap silently, they resume on the
+    // new cube under the same subdomain.  Skipped only when
+    // `default_template_id` is unset (single-tenant test mode).
     {
         let target_template = cfg
             .default_template_id
@@ -465,10 +465,6 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
             let ssvc = snapshot_svc.clone();
             tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_secs(30)).await;
-                tracing::info!(
-                    target_template = %target,
-                    "rotate-binary: startup sweep starting (background)"
-                );
                 match isvc.rotate_binary_all(&ssvc, &target).await {
                     Ok(report) => {
                         tracing::info!(

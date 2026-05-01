@@ -1,17 +1,20 @@
 //! Snapshot/backup/restore routes:
-//! - `POST /v1/instances/:id/snapshot` → take a snapshot, kind=manual
-//! - `POST /v1/instances/:id/backup`   → take a snapshot then promote, kind=backup
-//! - `POST /v1/instances/:id/restore`  → restore from a snapshot id supplied
+//! - `POST   /v1/instances/:id/snapshot`  → take a snapshot, kind=manual
+//! - `POST   /v1/instances/:id/backup`    → take a snapshot then promote, kind=backup
+//! - `POST   /v1/instances/:id/restore`   → restore from a snapshot id supplied
 //!   in the body. The path `:id` is the source instance and is currently
 //!   informational; the actual snapshot to restore is in the body so the
 //!   caller can pick any snapshot of any instance to fork from.
+//! - `DELETE /v1/snapshots/:id`           → permanently delete a snapshot.
+//!   Removes on-disk bytes (and remote bytes for backup-class rows) and
+//!   tombstones the row.  Idempotent: 204 even if already deleted.
 
 use std::collections::BTreeMap;
 
 use axum::extract::{Extension, Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 
@@ -37,6 +40,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/instances/:id/backup", post(backup))
         .route("/v1/instances/:id/restore", post(restore))
         .route("/v1/snapshots/:id/pull", post(pull))
+        .route("/v1/snapshots/:id", delete(delete_snapshot))
         .with_state(state)
 }
 
@@ -134,6 +138,17 @@ async fn pull(
 ) -> Result<Json<SnapshotView>, StatusCode> {
     match state.snapshots.pull(&caller.user_id, &id).await {
         Ok(row) => Ok(Json(SnapshotView::from(row))),
+        Err(e) => Err(swarm_err_to_status(e)),
+    }
+}
+
+async fn delete_snapshot(
+    State(state): State<AppState>,
+    Extension(caller): Extension<CallerIdentity>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, StatusCode> {
+    match state.snapshots.delete(&caller.user_id, &id).await {
+        Ok(()) => Ok(StatusCode::NO_CONTENT),
         Err(e) => Err(swarm_err_to_status(e)),
     }
 }

@@ -159,6 +159,14 @@ export class SwarmClient {
     return this._json(`/v1/snapshots/${encodeURIComponent(id)}/pull`, { method: 'POST' });
   }
 
+  /// Permanent delete: removes on-disk bytes (and remote backup bytes
+  /// when promoted) and tombstones the row.  Idempotent on the server
+  /// — calling twice on the same id returns 204 both times — so the
+  /// SPA can safely optimistic-remove without disambiguating races.
+  deleteSnapshot(id) {
+    return this._json(`/v1/snapshots/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  }
+
   listSnapshotsForInstance(instanceId) {
     return this._json(
       `/v1/instances/${encodeURIComponent(instanceId)}/snapshots`,

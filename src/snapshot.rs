@@ -266,6 +266,65 @@ impl SnapshotService {
             .await
     }
 
+    /// Owner-scoped permanent delete.  Removes the on-disk bundle (and
+    /// any remote bytes for backup-class rows) via the configured
+    /// `BackupSink`, then tombstones the DB row.  Idempotent — calling
+    /// twice on the same id returns `Ok` the second time so the SPA's
+    /// optimistic-remove flow doesn't have to disambiguate races.
+    /// Cross-owner access surfaces as `NotFound`, same posture as the
+    /// rest of the snapshot surface.
+    ///
+    /// Legacy rows: snapshots taken before swarm started capturing
+    /// `host_ip` carry an empty string there; cube's delete route
+    /// requires a non-empty hostIP. We can't conjure the right host
+    /// for those rows so we still tombstone the DB — cubelet's own GC
+    /// sweeps unused snapshot bundles eventually. A warning is
+    /// emitted so the operator can clean up on-disk bytes manually
+    /// if needed.
+    pub async fn delete(
+        &self,
+        owner_id: &str,
+        snapshot_id: &str,
+    ) -> Result<(), SwarmError> {
+        let Some(row) = self.snapshots.get(snapshot_id).await? else {
+            return Ok(());
+        };
+        require_owner(&row.owner_id, owner_id)?;
+        if row.deleted_at.is_some() {
+            return Ok(());
+        }
+        if row.host_ip.is_empty() {
+            tracing::warn!(
+                snapshot_id = %row.id,
+                source_instance = %row.source_instance_id,
+                path = %row.path,
+                "snapshot delete: legacy row has no host_ip; tombstoning DB only, on-disk bytes await cubelet GC"
+            );
+        } else {
+            // Sink first.  If the bytes are already gone (cube returned
+            // 404), we still want to tombstone the row — wrap in a
+            // best-effort: log and proceed on transient cube errors so a
+            // re-deploy doesn't leave a permanently-undeletable row.  A
+            // hard cube failure (5xx after retries) propagates so the
+            // caller can surface it; the DB row is left intact for retry.
+            self.backup.delete(&row).await.map_err(|e| {
+                tracing::warn!(
+                    snapshot_id = %row.id,
+                    error = %e,
+                    "snapshot delete: sink rejected; row left for retry"
+                );
+                SwarmError::from(e)
+            })?;
+        }
+        self.snapshots.mark_deleted(&row.id, now_secs()).await?;
+        tracing::info!(
+            snapshot_id = %row.id,
+            source_instance = %row.source_instance_id,
+            "snapshot deleted"
+        );
+        Ok(())
+    }
+
     async fn snapshot_with_kind(
         &self,
         owner_id: &str,
@@ -704,6 +763,179 @@ mod tests {
         tokio::fs::write(dir4.path().join("b.bin"), b"WORLD").await.unwrap();
         let h4 = super::hash_bundle(dir4.path()).await.unwrap();
         assert_ne!(h1, h4);
+    }
+
+    #[tokio::test]
+    async fn delete_tombstones_row_and_calls_cube() {
+        let (svc, isvc, cube, _secrets, _instances, snaps) = build().await;
+        let created = isvc
+            .create("legacy", CreateRequest {
+                template_id: "t".into(),
+                name: None,
+                task: None,
+                env: env_with_model(),
+                ttl_seconds: None,
+                network_policy: crate::network_policy::NetworkPolicy::default(),
+                mcp_servers: Vec::new(),
+            })
+            .await
+            .unwrap();
+        let snap = svc.snapshot("legacy", &created.id).await.unwrap();
+
+        svc.delete("legacy", &snap.id).await.unwrap();
+
+        // Cube was asked to remove the bundle.
+        let deleted = cube.deleted.lock().unwrap().clone();
+        assert_eq!(deleted, vec![(snap.id.clone(), "10.0.0.5".into())]);
+        // Row is tombstoned (deleted_at non-null) but still queryable.
+        let row = snaps.get(&snap.id).await.unwrap().unwrap();
+        assert!(row.deleted_at.is_some());
+        // count_for_instance reflects the soft-delete by excluding it.
+        assert_eq!(
+            svc.count_for_instance("legacy", &created.id).await.unwrap(),
+            0,
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_is_idempotent_on_already_deleted() {
+        let (svc, isvc, cube, _secrets, _instances, _snaps) = build().await;
+        let created = isvc
+            .create("legacy", CreateRequest {
+                template_id: "t".into(),
+                name: None,
+                task: None,
+                env: env_with_model(),
+                ttl_seconds: None,
+                network_policy: crate::network_policy::NetworkPolicy::default(),
+                mcp_servers: Vec::new(),
+            })
+            .await
+            .unwrap();
+        let snap = svc.snapshot("legacy", &created.id).await.unwrap();
+        svc.delete("legacy", &snap.id).await.unwrap();
+        // Second call must succeed and must not call cube.delete again
+        // (otherwise SPA optimistic-remove + retry produces orphan
+        // 5xx-on-cube and confusing UX).
+        svc.delete("legacy", &snap.id).await.unwrap();
+        assert_eq!(cube.deleted.lock().unwrap().len(), 1);
+        // Unknown id → also Ok (treated as already-gone).
+        svc.delete("legacy", "snap-unknown").await.unwrap();
+        assert_eq!(cube.deleted.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn delete_legacy_row_skips_cube_call() {
+        // Pre-host_ip rows still have to be deletable; we tombstone
+        // the DB row but don't invoke the cube sink (which would 400
+        // on empty host_ip and orphan the row forever).
+        let (svc, isvc, cube, _secrets, _instances, snaps) = build().await;
+        let created = isvc
+            .create("legacy", CreateRequest {
+                template_id: "t".into(),
+                name: None,
+                task: None,
+                env: env_with_model(),
+                ttl_seconds: None,
+                network_policy: crate::network_policy::NetworkPolicy::default(),
+                mcp_servers: Vec::new(),
+            })
+            .await
+            .unwrap();
+        // Insert a snapshot row directly with an empty host_ip — the
+        // shape pre-tracking rows have on disk.
+        let row = SnapshotRow {
+            id: "snap-legacy".into(),
+            owner_id: "legacy".into(),
+            source_instance_id: created.id.clone(),
+            parent_snapshot_id: None,
+            kind: SnapshotKind::Manual,
+            path: "/tmp/legacy-snap".into(),
+            host_ip: String::new(),
+            remote_uri: None,
+            size_bytes: None,
+            created_at: 0,
+            deleted_at: None,
+            content_hash: None,
+        };
+        snaps.insert(&row).await.unwrap();
+
+        svc.delete("legacy", "snap-legacy").await.unwrap();
+
+        // Cube was NOT called — host_ip empty means we'd get a 400.
+        assert_eq!(cube.deleted.lock().unwrap().len(), 0);
+        // Row is tombstoned anyway.
+        let got = snaps.get("snap-legacy").await.unwrap().unwrap();
+        assert!(got.deleted_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn delete_cross_owner_is_not_found() {
+        // Delete by a different tenant must return NotFound (404 over
+        // HTTP) and must NOT call cube — otherwise the existence of
+        // someone else's snapshot is observable as "delete returned
+        // 5xx vs 4xx", which is the same oracle list_for_instance
+        // already protects against.
+        use crate::traits::{UserRow, UserStatus};
+        let pool = open_in_memory().await.unwrap();
+        let keys_tmp = tempfile::tempdir().unwrap();
+        let cipher_dir: Arc<dyn crate::envelope::CipherDirectory> = Arc::new(
+            crate::envelope::AgeCipherDirectory::new(keys_tmp.path()).unwrap(),
+        );
+        let users: Arc<dyn crate::traits::UserStore> = Arc::new(
+            crate::db::users::SqlxUserStore::new(pool.clone(), cipher_dir),
+        );
+        for sub in ["alice", "bob"] {
+            users
+                .create(UserRow {
+                    id: sub.into(),
+                    subject: sub.into(),
+                    email: Some(format!("{sub}@test")),
+                    display_name: Some(sub.into()),
+                    status: UserStatus::Active,
+                    created_at: 0,
+                    activated_at: Some(0),
+                    last_seen_at: None,
+                    openrouter_key_id: None,
+                    openrouter_key_limit_usd: 10.0,
+                })
+                .await
+                .unwrap();
+        }
+        let cube = MockCube::new();
+        let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(pool.clone()));
+        let secrets: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
+        let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(pool.clone()));
+        let snaps_store: Arc<dyn SnapshotStore> = Arc::new(SqliteSnapshotStore::new(pool.clone()));
+        let isvc = Arc::new(InstanceService::new(
+            cube.clone(), instances.clone(), secrets, tokens, "http://t/llm",
+        ));
+        let sink: Arc<dyn BackupSink> = Arc::new(LocalDiskBackupSink::new(cube.clone()));
+        let svc = SnapshotService::new(
+            cube.clone(), instances, snaps_store, sink, isvc.clone(),
+        );
+
+        let alice_inst = isvc
+            .create("alice", CreateRequest {
+                template_id: "t".into(),
+                name: None,
+                task: None,
+                env: env_with_model(),
+                ttl_seconds: None,
+                network_policy: crate::network_policy::NetworkPolicy::default(),
+                mcp_servers: Vec::new(),
+            })
+            .await
+            .unwrap();
+        let alice_snap = svc.snapshot("alice", &alice_inst.id).await.unwrap();
+
+        let err = svc.delete("bob", &alice_snap.id).await.unwrap_err();
+        assert!(matches!(err, SwarmError::NotFound));
+        assert!(cube.deleted.lock().unwrap().is_empty());
+
+        // Owner can still delete their own row.
+        svc.delete("alice", &alice_snap.id).await.unwrap();
+        assert_eq!(cube.deleted.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]

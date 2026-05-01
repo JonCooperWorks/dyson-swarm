@@ -2263,6 +2263,30 @@ function SnapshotsPanel({ instanceId, disabled }) {
     }
   };
 
+  // Permanent delete with explicit confirm. We optimistically remove
+  // the row from the table BEFORE the network call so the UI feels
+  // instant; on error we restore from the previous list and surface
+  // the message. Mirrors the same posture as deleteSecret in the
+  // SecretsPanel below.
+  const remove = async (row) => {
+    const promoted = !!row.remote_uri;
+    const msg = promoted
+      ? `Delete snapshot ${row.id.slice(0, 12)}…? This removes the on-disk bundle AND the promoted backup bytes. Cannot be undone.`
+      : `Delete snapshot ${row.id.slice(0, 12)}…? This removes the on-disk bundle. Cannot be undone.`;
+    if (!confirm(msg)) return;
+    const prev = rows;
+    setRows((rs) => (rs ? rs.filter((r) => r.id !== row.id) : rs));
+    setBusy(true); setErr(null);
+    try {
+      await client.deleteSnapshot(row.id);
+    } catch (e) {
+      setErr(e?.detail || e?.message || 'delete failed');
+      setRows(prev);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <section className="panel">
       <div className="panel-header">
@@ -2306,6 +2330,14 @@ function SnapshotsPanel({ instanceId, disabled }) {
                   ) : null}
                   <button className="btn btn-ghost btn-sm" onClick={() => restore(r.id)} disabled={busy}>
                     restore
+                  </button>
+                  <button
+                    className="btn btn-ghost btn-sm btn-danger"
+                    onClick={() => remove(r)}
+                    disabled={busy}
+                    title="permanently delete this snapshot"
+                  >
+                    delete
                   </button>
                 </td>
               </tr>

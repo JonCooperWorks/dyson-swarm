@@ -118,3 +118,34 @@ Authorisation: instance owner OR admin (`SYSTEM_OWNER` / `"*"`).
 `swarm.toml`.  Hires using those profiles return 400 with a clear
 config-help message when it's missing.  `Open` and `Denylist` work
 without it (they include `0.0.0.0/0`).
+
+### Operator escape hatch: minting an api-key without an admin bearer
+
+Some flows assume you already hold a bearer (the SPA mints user
+api-keys, the IdP issues admin JWTs).  When neither is reachable —
+fresh deploy, IdP outage, you're SSH-only on the host — the swarm
+binary mints an opaque user api-key directly through the DB +
+cipher, bypassing the HTTP surface entirely:
+
+```sh
+sudo -u dyson-swarm /usr/local/bin/swarm \
+  mint-api-key --label "ops-foo" <users.id>
+```
+
+Prints the plaintext token (e.g. `dy_…`) to stdout; capture it
+immediately, never log.  Same posture as `secrets system-set`:
+direct DB access, host-operator only.
+
+The token authenticates against tenant routes (`/v1/instances`,
+PATCH, DELETE, `/reset`).  It does **not** unlock admin routes —
+`/v1/instances/:id/clone` and friends require OIDC role claims and
+api-keys carry none, by design (see `auth/admin.rs`).
+
+Revoke with:
+
+```sh
+sudo sqlite3 /var/lib/dyson-swarm/state.db \
+  "UPDATE user_api_keys SET revoked_at=$(date +%s) WHERE id='<row id>';"
+```
+
+Or via the SPA's api-key panel once you have a regular bearer.

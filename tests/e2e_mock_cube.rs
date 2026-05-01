@@ -280,6 +280,12 @@ async fn full_walkthrough() {
         dyson_swarm::shares::ShareMetrics::new(),
         None,
     ));
+    let cache_dir = tempfile::tempdir().unwrap();
+    let artefact_cache = Arc::new(dyson_swarm::artefacts::ArtefactCacheService::new(
+        pool.clone(),
+        cache_dir.path().to_path_buf(),
+    ));
+    std::mem::forget(cache_dir);
     let app_state = http::AppState {
         secrets: secrets_svc,
         user_secrets: user_secrets_svc,
@@ -301,6 +307,7 @@ async fn full_walkthrough() {
         providers: std::sync::Arc::new(dyson_swarm::config::Providers::default()),
         webhooks: webhooks_svc,
         shares: shares_svc,
+        artefact_cache,
     };
     // Stage 5 retired the legacy `admin-token` shared bearer; this e2e
     // exercises admin endpoints via `--dangerous-no-auth`, the same

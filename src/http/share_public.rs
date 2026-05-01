@@ -112,62 +112,50 @@ async fn serve_token(
 
     let raw_path = format!("{V1_PATH_PREFIX}{token}/raw");
 
-    // Fetch the artefact body from dyson.  Reuses the same per-instance
-    // bearer the dyson_proxy stamps for normal requests, so the agent
-    // sees an identical authentication shape.
-    let body_resp = match crate::instance_client::fetch_artefact(
-        &state.dyson_http,
-        &state.sandbox_domain,
-        &verified.instance,
-        &format!("/api/artefacts/{}", verified.row.artefact_id),
-    )
-    .await
-    {
-        Ok(r) => r,
-        Err(_) => {
+    // Resolve (bytes, content_type, title, kind) — read-through and
+    // write-through cache.  Cache hit serves immediately; cache miss
+    // pulls from cube and writes through so the next reset doesn't
+    // break this share URL.
+    let resolved = match resolve_artefact(&state, &verified).await {
+        Some(r) => r,
+        None => {
             state
                 .shares
-                .record_access(&verified.row.jti, remote_addr.as_deref(), user_agent.as_deref(), 502)
+                .record_access(
+                    &verified.row.jti,
+                    remote_addr.as_deref(),
+                    user_agent.as_deref(),
+                    502,
+                )
                 .await;
             return not_found();
         }
     };
-    let upstream_status = body_resp.status();
-    if !upstream_status.is_success() {
-        state
-            .shares
-            .record_access(
-                &verified.row.jti,
-                remote_addr.as_deref(),
-                user_agent.as_deref(),
-                upstream_status.as_u16().into(),
-            )
-            .await;
-        return not_found();
-    }
-    let upstream_ct = body_resp
-        .headers()
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_owned);
+    let upstream_ct = resolved.mime.clone();
 
-    // Branch on render mode.  Raw streams the upstream body straight
-    // through; HTML buffers (markdown is small) and renders a page.
+    // Branch on render mode.  Raw serves cached/buffered bytes; HTML
+    // renders a page using the same body buffer.
     //
     // For image (and other "send_file") artefacts the dyson agent
     // stores the raw artefact body as the relative URL `/api/files/<id>`
     // — the `metadata.file_url` shape — rather than the bytes
     // themselves.  Streaming that through to the viewer's browser
     // would land them on a broken-image placeholder; we have to
-    // double-hop through the instance to fetch the actual bytes.
+    // double-hop through the instance to fetch the actual bytes when
+    // the cache only knows about the pointer.
     let response = match mode {
         ServeMode::Raw => {
-            match resolve_raw_body(&state, &verified, body_resp, upstream_ct.as_deref()).await {
+            match resolve_raw_bytes(&state, &verified, &resolved).await {
                 Some(r) => r,
                 None => {
                     state
                         .shares
-                        .record_access(&verified.row.jti, remote_addr.as_deref(), user_agent.as_deref(), 502)
+                        .record_access(
+                            &verified.row.jti,
+                            remote_addr.as_deref(),
+                            user_agent.as_deref(),
+                            502,
+                        )
                         .await;
                     return not_found();
                 }
@@ -175,19 +163,11 @@ async fn serve_token(
         }
         ServeMode::Html => {
             let mime = upstream_ct.as_deref();
-            // Title + kind come from a sibling list endpoint.  Best
-            // effort: if the dyson listing fails, we render with a
-            // generic title rather than 404 — the *body* is what the
-            // viewer actually wants.
-            let (title, kind_label) = lookup_title_and_kind(&state, &verified, &remote_addr).await;
-            // Determine which renderer to call from kind + mime.
+            let title = resolved.title.clone();
+            let kind_label = resolved.kind.clone();
             let render = match RenderKind::classify(&kind_label, mime) {
                 RenderKind::Markdown => {
-                    let bytes = match body_resp.bytes().await {
-                        Ok(b) => b,
-                        Err(_) => return not_found(),
-                    };
-                    let body = String::from_utf8_lossy(&bytes);
+                    let body = String::from_utf8_lossy(&resolved.bytes);
                     render_markdown_page(&title, &kind_label, &body)
                 }
                 RenderKind::Image => render_image_page(&title, &kind_label, &raw_path),
@@ -209,75 +189,153 @@ async fn serve_token(
     response
 }
 
-/// Resolve the bytes that should be streamed back from `/raw`.
+/// Buffered artefact body + descriptive metadata.  Returned by
+/// `resolve_artefact` once the cache or cube has produced bytes; the
+/// HTML and Raw paths consume from here.
+struct ResolvedArtefact {
+    bytes: Vec<u8>,
+    mime: Option<String>,
+    title: String,
+    kind: String,
+}
+
+/// Read-through, write-through artefact resolver.
 ///
-/// Most artefacts (markdown reviews, plain text) store the body
-/// inline, so the upstream response is what the viewer wants.  But
-/// dyson's `send_file` path — used for images and any other
-/// agent-emitted file — stores the body as the relative URL
-/// `/api/files/<id>` and stamps the same path on `metadata.file_url`.
-/// In that case we double-hop: fetch the file id from dyson and
-/// stream those real bytes back, with the file's actual content-type.
+/// Order of operations:
+/// 1. Cache lookup — if the row exists AND its on-disk body is still
+///    there, serve it directly.  This is the post-cube-reset path:
+///    once we've cached an artefact, the share URL keeps working
+///    even if its source cube is destroyed.
+/// 2. Upstream fetch from the live cube via the per-instance bearer.
+/// 3. Discover title / kind via the cube's
+///    `/api/conversations/:chat/artefacts` listing (best effort).
+/// 4. Write-through: persist meta + bytes into the cache so step 1
+///    short-circuits next time.
 ///
-/// Returns `None` on upstream error so the caller can record an
-/// audit row and 404.
-async fn resolve_raw_body(
+/// Returns `None` on full miss (no cache + cube unreachable / 4xx).
+async fn resolve_artefact(
     state: &AppState,
     verified: &crate::shares::service::VerifiedShare,
-    body_resp: reqwest::Response,
-    upstream_ct: Option<&str>,
+) -> Option<ResolvedArtefact> {
+    // 1. Cache lookup.  We require BOTH the row and an on-disk body
+    // to be present; a row without a body falls through to upstream
+    // (and re-ingests on the way back).
+    if let Ok(Some(row)) = state
+        .artefact_cache
+        .find(
+            &verified.row.instance_id,
+            &verified.row.chat_id,
+            &verified.row.artefact_id,
+        )
+        .await
+        && let Ok(Some(bytes)) = state.artefact_cache.read_body(&row).await
+    {
+        return Some(ResolvedArtefact {
+            bytes,
+            mime: row.mime,
+            title: row.title,
+            kind: row.kind,
+        });
+    }
+
+    // 2. Upstream fetch.
+    let resp = match crate::instance_client::fetch_artefact(
+        &state.dyson_http,
+        &state.sandbox_domain,
+        &verified.instance,
+        &format!("/api/artefacts/{}", verified.row.artefact_id),
+    )
+    .await
+    {
+        Ok(r) if r.status().is_success() => r,
+        _ => return None,
+    };
+    let upstream_ct = resp
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    let bytes = resp.bytes().await.ok()?.to_vec();
+
+    // 3. Discover title / kind from the cube's listing endpoint.
+    // Best-effort — fall back to the share row's label if dyson
+    // doesn't answer.  The cube being slow to list shouldn't block
+    // serving the body.
+    let (title, kind) = lookup_title_and_kind(state, verified).await;
+
+    // 4. Write-through into the swarm cache.  Failures here are
+    // non-fatal — the response goes out either way; the next request
+    // will retry the ingest.
+    let _ = state
+        .artefact_cache
+        .ingest(
+            crate::artefacts::IngestMeta {
+                instance_id: &verified.row.instance_id,
+                owner_id: &verified.instance.owner_id,
+                chat_id: &verified.row.chat_id,
+                artefact_id: &verified.row.artefact_id,
+                kind: &kind,
+                title: &title,
+                mime: upstream_ct.as_deref(),
+                created_at: crate::now_secs(),
+                metadata_json: None,
+            },
+            Some(&bytes),
+        )
+        .await;
+
+    Some(ResolvedArtefact {
+        bytes,
+        mime: upstream_ct,
+        title,
+        kind,
+    })
+}
+
+/// Build a `/raw` response from already-resolved bytes.  Handles
+/// dyson's `send_file` pointer shape: when the body is a small text
+/// blob containing `/api/files/<id>`, refetch the underlying file
+/// from the cube and stream those bytes instead.  When the cube is
+/// gone, treat that as a miss — pointer artefacts haven't been
+/// fully cached.
+async fn resolve_raw_bytes(
+    state: &AppState,
+    verified: &crate::shares::service::VerifiedShare,
+    resolved: &ResolvedArtefact,
 ) -> Option<Response<Body>> {
-    // Only inspect the body when it could plausibly be a redirect-style
-    // pointer — small text bodies.  Anything large (>2 KiB) is
-    // definitely not a `/api/files/<id>` path; stream it directly to
-    // avoid buffering the artefact in memory.
-    let ct_lower = upstream_ct.unwrap_or("").to_ascii_lowercase();
+    let ct_lower = resolved.mime.as_deref().unwrap_or("").to_ascii_lowercase();
     let probably_pointer = ct_lower.starts_with("text/")
         || ct_lower.is_empty()
         || ct_lower.starts_with("image/")
         || ct_lower.starts_with("application/octet-stream");
-    if !probably_pointer {
-        return Some(stream_raw(body_resp, upstream_ct));
-    }
-    // Read up to 2 KiB to inspect.  If the body is bigger, we know
-    // it's not a pointer — fall back to streaming.
-    let limit = 2048;
-    let bytes = match body_resp.bytes().await {
-        Ok(b) => b,
-        Err(_) => return None,
-    };
-    if bytes.len() > limit {
-        // Large body that "looked" like text — probably an inline
-        // text/markdown artefact.  Reconstitute as a single-shot
-        // response since we can't restream a consumed reqwest body.
-        return Some(inline_response(bytes, upstream_ct));
-    }
-    let trimmed = std::str::from_utf8(&bytes).map(str::trim).unwrap_or("");
-    if let Some(file_path) = parse_files_pointer(trimmed) {
-        // Refetch the underlying file via the same per-instance bearer.
-        let resp = match crate::instance_client::fetch_artefact(
-            &state.dyson_http,
-            &state.sandbox_domain,
-            &verified.instance,
-            &file_path,
-        )
-        .await
-        {
-            Ok(r) => r,
-            Err(_) => return None,
-        };
-        if !resp.status().is_success() {
-            return None;
+    if probably_pointer && resolved.bytes.len() <= 2048 {
+        let trimmed = std::str::from_utf8(&resolved.bytes)
+            .map(str::trim)
+            .unwrap_or("");
+        if let Some(file_path) = parse_files_pointer(trimmed) {
+            let resp = crate::instance_client::fetch_artefact(
+                &state.dyson_http,
+                &state.sandbox_domain,
+                &verified.instance,
+                &file_path,
+            )
+            .await;
+            let resp = match resp {
+                Ok(r) if r.status().is_success() => r,
+                _ => return None,
+            };
+            let inner_ct = resp
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned);
+            return Some(stream_raw(resp, inner_ct.as_deref()));
         }
-        let inner_ct = resp
-            .headers()
-            .get(header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_owned);
-        return Some(stream_raw(resp, inner_ct.as_deref()));
     }
-    // Plain inline body — stream it back as-is.
-    Some(inline_response(bytes, upstream_ct))
+    Some(inline_response(
+        axum::body::Bytes::from(resolved.bytes.clone()),
+        resolved.mime.as_deref(),
+    ))
 }
 
 /// Recognise dyson's `send_file` pointer shape: an ASCII string
@@ -322,7 +380,6 @@ fn inline_response(bytes: axum::body::Bytes, content_type: Option<&str>) -> Resp
 async fn lookup_title_and_kind(
     state: &AppState,
     verified: &crate::shares::service::VerifiedShare,
-    remote_addr: &Option<String>,
 ) -> (String, String) {
     let path = format!("/api/conversations/{}/artefacts", verified.row.chat_id);
     let resp = crate::instance_client::fetch_artefact(
@@ -352,7 +409,6 @@ async fn lookup_title_and_kind(
         Ok(v) => v,
         Err(_) => return fallback_title_kind(verified),
     };
-    let _ = remote_addr; // unused; kept in signature for future per-IP rate-limit hooks
     if let Some(items) = arr.as_array() {
         for item in items {
             if item.get("id").and_then(|v| v.as_str()) == Some(verified.row.artefact_id.as_str()) {

@@ -701,6 +701,15 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         cfg.hostname.clone(),
     ));
 
+    // Swarm-side artefact cache.  Bytes live under
+    // `<local_cache_dir>/artefacts/`; metadata in the `artefact_cache`
+    // table.  Reused by share_public (so still-shared artefacts
+    // outlive their cube) and the swarm-side artefact list endpoint.
+    let artefact_cache = std::sync::Arc::new(dyson_swarm::artefacts::ArtefactCacheService::new(
+        pool.clone(),
+        cfg.backup.local_cache_dir.clone(),
+    ));
+
     let app_state = http::AppState {
         secrets: secrets_svc,
         user_secrets: user_secrets_svc,
@@ -730,6 +739,7 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         providers: providers_for_app,
         webhooks: webhooks_svc,
         shares: shares_svc,
+        artefact_cache,
     };
     let app = http::router(app_state, auth, user_auth, llm_router, mcp_user_router);
 

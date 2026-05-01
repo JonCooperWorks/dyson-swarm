@@ -285,12 +285,18 @@ mod tests {
             Arc::new(crate::webhooks::NullWebhookDispatcher),
         ));
         let shares_svc = Arc::new(crate::shares::ShareService::new(
-            pool,
+            pool.clone(),
             user_secrets.clone(),
             instance_svc.clone(),
             crate::shares::ShareMetrics::new(),
             None,
         ));
+        let cache_dir = tempfile::tempdir().unwrap();
+        let artefact_cache = Arc::new(crate::artefacts::ArtefactCacheService::new(
+            pool,
+            cache_dir.path().to_path_buf(),
+        ));
+        std::mem::forget(cache_dir);
         let state = AppState {
             secrets: svc,
             user_secrets,
@@ -312,6 +318,7 @@ mod tests {
             providers: Arc::new(crate::config::Providers::default()),
             webhooks: webhooks_svc,
             shares: shares_svc,
+            artefact_cache,
         };
         (state, raw, user_auth, user_id)
     }

@@ -1,4 +1,5 @@
 pub mod api_client;
+pub mod artefacts;
 pub mod auth;
 pub mod backup;
 pub mod cli;

@@ -228,6 +228,12 @@ async fn build() -> Fixture {
         dyson_swarm::shares::ShareMetrics::new(),
         Some(apex.clone()),
     ));
+    let cache_dir = tempfile::tempdir().unwrap();
+    let artefact_cache = Arc::new(dyson_swarm::artefacts::ArtefactCacheService::new(
+        pool.clone(),
+        cache_dir.path().to_path_buf(),
+    ));
+    std::mem::forget(cache_dir);
 
     let app_state = http::AppState {
         secrets: secrets_svc,
@@ -254,6 +260,7 @@ async fn build() -> Fixture {
         providers: Arc::new(Providers::default()),
         webhooks: webhooks_svc,
         shares: shares_svc,
+        artefact_cache,
     };
     let app = http::router(
         app_state,

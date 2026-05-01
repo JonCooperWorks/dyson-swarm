@@ -18,6 +18,7 @@ pub mod auth_config;
 pub mod byok;
 pub mod dyson_proxy;
 pub mod healthz;
+pub mod instance_artefacts;
 pub mod instances;
 pub mod models;
 pub mod proxy_admin;
@@ -102,6 +103,12 @@ pub struct AppState {
     /// the SQLite pool, the per-user-secrets handle, and the metrics
     /// counters; stateless across requests.
     pub shares: Arc<crate::shares::ShareService>,
+    /// Swarm-side cache of dyson-emitted artefacts.  Read-through and
+    /// write-through: the share public path consults this before
+    /// hitting the live cube, and ingests every cube response into it,
+    /// so destroyed/reset cubes don't break still-active share URLs
+    /// or the swarm UI's artefact list.
+    pub artefact_cache: crate::artefacts::ArtefactCache,
 }
 
 /// Build the public `Router`.
@@ -161,6 +168,7 @@ pub fn router(
         .merge(models::router(state.clone()))
         .merge(webhooks::router(state.clone()))
         .merge(shares::router(state.clone()))
+        .merge(instance_artefacts::router(state.clone()))
         .merge(mcp_user_router)
         .layer(middleware::from_fn_with_state(user_auth.clone(), user_middleware));
 
@@ -318,6 +326,14 @@ mod tests {
             crate::shares::ShareMetrics::new(),
             None,
         ));
+        let cache_dir = tempfile::tempdir().unwrap();
+        let artefact_cache = Arc::new(crate::artefacts::ArtefactCacheService::new(
+            pool.clone(),
+            cache_dir.path().to_path_buf(),
+        ));
+        // Leak the tempdir so the body files outlive the test scope —
+        // the test harness exits soon after either way.
+        std::mem::forget(cache_dir);
         let state = AppState {
             secrets: svc,
             user_secrets,
@@ -339,6 +355,7 @@ mod tests {
             providers: Arc::new(crate::config::Providers::default()),
             webhooks: webhooks_svc,
             shares: shares_svc,
+            artefact_cache,
         };
         (state, users_store)
     }

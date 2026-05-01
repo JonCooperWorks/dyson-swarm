@@ -16,6 +16,7 @@ use sqlx::SqlitePool;
 
 use crate::error::StoreError;
 
+pub mod artefacts;
 pub mod audit;
 pub mod instances;
 pub mod policies;

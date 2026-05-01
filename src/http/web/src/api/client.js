@@ -359,6 +359,28 @@ export class SwarmClient {
     return `/v1/instances/${encodeURIComponent(instanceId)}/artefacts/${encodeURIComponent(artefactId)}/raw`;
   }
 
+  /// Open the raw artefact in a new tab.  A plain `<a href>` to the
+  /// /raw endpoint 401s — that surface is bearer-gated and a browser
+  /// click can't carry the SPA's session token.  Workaround: fetch
+  /// with the bearer, wrap the bytes in a blob URL, open that.  The
+  /// blob URL is short-lived (revoked when the new tab closes) so
+  /// the bytes don't leak to the address bar or referrer headers.
+  /// Returns the blob URL so the caller can revoke it on cleanup.
+  async openInstanceArtefactRaw(instanceId, artefactId) {
+    const url = this.instanceArtefactRawUrl(instanceId, artefactId);
+    const r = await this._authedFetch(url, { method: 'GET' });
+    if (!r.ok) {
+      const detail = await r.text().catch(() => '');
+      throw httpError(`GET ${url}`, r.status, detail);
+    }
+    const blob = await r.blob();
+    const objectUrl = URL.createObjectURL(blob);
+    window.open(objectUrl, '_blank', 'noopener,noreferrer');
+    // Revoke after a beat — the new tab has already loaded by then.
+    setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
+    return objectUrl;
+  }
+
   /// Drop a row + its on-disk body.  Idempotent — 204 even when no
   /// row existed or the row wasn't owned by the caller.
   deleteInstanceArtefact(instanceId, artefactId) {

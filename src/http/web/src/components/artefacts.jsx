@@ -129,26 +129,23 @@ export function InstanceArtefactsPage({ instanceId }) {
       {minted ? <MintedBanner minted={minted} onDismiss={() => setMinted(null)}/> : null}
 
       <section className="panel">
-        <div className="panel-header">
-          <div className="panel-title">filters</div>
-        </div>
-        <div className="form" style={{ display: 'flex', gap: 12, alignItems: 'flex-end', padding: 12 }}>
-          <label className="field" style={{ flex: 1 }}>
-            <span>chat id (filter)</span>
-            <input
-              value={chatFilter}
-              onChange={e => setChatFilter(e.target.value)}
-              placeholder="leave blank to show every chat"
-            />
-          </label>
-          <label className="field" style={{ flex: 1 }}>
-            <span>chat id (sweep cube → cache)</span>
-            <input
-              value={sweepChat}
-              onChange={e => setSweepChat(e.target.value)}
-              placeholder="paste a chat id then click sweep"
-            />
-          </label>
+        <div
+          className="panel-header"
+          style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}
+        >
+          <div className="panel-title" style={{ marginRight: 4 }}>filters</div>
+          <input
+            value={chatFilter}
+            onChange={e => setChatFilter(e.target.value)}
+            placeholder="filter chat id (blank = all)"
+            style={{ flex: 1, minWidth: 160 }}
+          />
+          <input
+            value={sweepChat}
+            onChange={e => setSweepChat(e.target.value)}
+            placeholder="sweep chat id (cube → cache)"
+            style={{ flex: 1, minWidth: 160 }}
+          />
           <button className="btn btn-sm" onClick={sweep} disabled={busy}>
             {busy ? 'sweeping…' : 'sweep'}
           </button>
@@ -244,13 +241,17 @@ function ArtefactTable({ rows, client, busy, setBusy, setErr, setMinted, refresh
               <td data-label="size" className="muted small">{fmtBytes(r.bytes)}</td>
               <td data-label="cached" className="muted small">{fmtTime(r.cached_at)}</td>
               <td className="row-actions">
-                <a
+                <button
                   className="btn btn-ghost btn-sm"
-                  href={client.instanceArtefactRawUrl(r.instance_id, r.id)}
-                  target="_blank"
-                  rel="noopener noreferrer"
+                  onClick={async () => {
+                    try {
+                      await client.openInstanceArtefactRaw(r.instance_id, r.id);
+                    } catch (e) {
+                      setErr(e?.detail || e?.message || 'open failed');
+                    }
+                  }}
                   title="open the cached body in a new tab"
-                >open</a>
+                >open</button>
                 <button
                   className="btn btn-ghost btn-sm"
                   onClick={() => share(r)}

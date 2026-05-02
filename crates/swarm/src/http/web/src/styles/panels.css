@@ -1337,8 +1337,22 @@
     color: var(--fg-muted);
     margin-bottom: 2px;
   }
+  .artefact-rows tr {
+    display: flex;
+    flex-direction: column;
+  }
+  .artefact-rows td.row-actions {
+    order: -1;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    border-bottom: 1px dashed var(--border);
+    padding: 8px 8px 10px;
+  }
   .rows td.row-actions { text-align: left; }
   .rows td.row-actions .btn { margin-left: 0; margin-right: 4px; }
+  .artefact-rows td.row-actions .btn { margin: 0; }
+  .artefact-rows td[data-label="cached"] { border-bottom: none; }
   /* Some long inline styles on tasks.jsx audit rows force max-width
      + nowrap — undo those on mobile so the user-agent string wraps
      instead of clipping. */

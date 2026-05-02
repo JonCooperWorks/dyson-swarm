@@ -222,7 +222,7 @@ function ArtefactTable({
           them appear as artefacts are read through swarm.
         </p>
       ) : (
-        <table className="rows">
+        <table className="rows artefact-rows">
           <thead><tr>
             <th>title</th>
             <th>kind</th>

@@ -254,6 +254,40 @@ pub async fn push_with_retry(
     Err(last_err)
 }
 
+/// Same cubeproxy warm-up race as [`push_with_retry`], but for the
+/// reset replay endpoint.  Reset calls this before the final configure
+/// push enables the background state-sync worker, so losing the first
+/// `/api/admin/state/file` POST to a transient 502 would otherwise
+/// abort an otherwise healthy reset.
+async fn restore_state_file_with_retry(
+    r: &dyn DysonReconfigurer,
+    instance_id: &str,
+    sandbox_id: &str,
+    body: &RestoreStateFileBody,
+) -> Result<(), String> {
+    let mut delay = std::time::Duration::from_millis(500);
+    let mut last_err = String::new();
+    for attempt in 0..12 {
+        match r.restore_state_file(instance_id, sandbox_id, body).await {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                last_err = e;
+                tracing::debug!(
+                    attempt,
+                    instance = %instance_id,
+                    namespace = %body.namespace,
+                    path = %body.path,
+                    error = %last_err,
+                    "restore-state-file: retrying"
+                );
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(std::time::Duration::from_secs(8));
+            }
+        }
+    }
+    Err(last_err)
+}
+
 #[derive(Clone)]
 pub struct InstanceService {
     cube: Arc<dyn CubeClient>,
@@ -2147,8 +2181,7 @@ impl InstanceService {
                 deleted,
                 body_b64,
             };
-            reconfigurer
-                .restore_state_file(instance_id, sandbox_id, &body)
+            restore_state_file_with_retry(reconfigurer.as_ref(), instance_id, sandbox_id, &body)
                 .await
                 .map_err(|e| {
                     SwarmError::Internal(format!(
@@ -4245,6 +4278,55 @@ mod tests {
                 .push(format!("restore:{}:{}", body.namespace, body.path));
             Ok(())
         }
+    }
+
+    #[derive(Default)]
+    struct FlakyRestoreReconfigurer {
+        attempts: Mutex<usize>,
+    }
+
+    #[async_trait]
+    impl DysonReconfigurer for FlakyRestoreReconfigurer {
+        async fn push(
+            &self,
+            _instance_id: &str,
+            _sandbox_id: &str,
+            _body: &ReconfigureBody,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn restore_state_file(
+            &self,
+            _instance_id: &str,
+            _sandbox_id: &str,
+            _body: &RestoreStateFileBody,
+        ) -> Result<(), String> {
+            let mut attempts = self.attempts.lock().unwrap();
+            *attempts += 1;
+            if *attempts == 1 {
+                return Err("dyson /api/admin/state/file 502 Bad Gateway".into());
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn restore_state_file_retry_survives_transient_cubeproxy_502() {
+        let reconfigurer = FlakyRestoreReconfigurer::default();
+        let body = RestoreStateFileBody {
+            namespace: "workspace".into(),
+            path: "memory/SOUL.md".into(),
+            mime: Some("text/markdown".into()),
+            deleted: false,
+            body_b64: Some("cmVtZW1iZXI=".into()),
+        };
+
+        restore_state_file_with_retry(&reconfigurer, "inst-a", "sandbox-a", &body)
+            .await
+            .unwrap();
+
+        assert_eq!(*reconfigurer.attempts.lock().unwrap(), 2);
     }
 
     /// Regression for the chat-hang-then-`upstream HTTP error` bug.

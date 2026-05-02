@@ -34,7 +34,7 @@ const PROVIDER_META = {
   deepseek:   { label: 'DeepSeek',     blurb: 'DeepSeek — api.deepseek.com'            },
   xai:        { label: 'xAI',          blurb: 'Grok — api.x.ai'                        },
   ollama:     { label: 'Ollama Cloud', blurb: 'Hosted Ollama — ollama.com'             },
-  byo:        { label: 'Custom (BYO)', blurb: 'Any OpenAI-compatible endpoint or local Ollama' },
+  byo:        { label: 'Custom (BYO)', blurb: 'Any OpenAI-compatible endpoint' },
 };
 
 const PROVIDER_ORDER = [
@@ -256,7 +256,7 @@ function explainStatus(p) {
     return 'No key on file yet. Your first OpenRouter call will mint one automatically when the operator has the Provisioning API enabled. Add your own key to skip the mint and bill yourself.';
   }
   if (p.name === 'byo') {
-    return 'Set an upstream URL + key to point swarm at any OpenAI-compatible endpoint — including a local Ollama daemon.';
+    return 'Set an upstream URL + key to point swarm at any OpenAI-compatible endpoint.';
   }
   // Every other provider is BYOK-or-503: no platform fallback.
   return 'BYOK only — the operator does not backstop spend on this provider. Calls 503 until you paste a key. Your spend, your account.';

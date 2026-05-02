@@ -333,6 +333,9 @@
   }
   .detail-header .detail-actions { order: -2; }
   .detail-pane > .instance-subpage { order: -1; }
+  /* Hide the title block on mobile when a subpage is open — it'd
+     otherwise sit at the bottom of the viewport as dead weight. */
+  .detail-pane:has(> .instance-subpage) .employee-card { display: none; }
   .detail-actions {
     position: sticky;
     top: 0;

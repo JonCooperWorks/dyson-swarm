@@ -140,7 +140,7 @@ function ArtefactsView({ backHref, subtitle, load, onSweep, showInstance, instan
         sweepClick={sweepClick}
         shareRows={shareRows}
       />
-      {instanceId ? <SharesPanel instanceId={instanceId}/> : null}
+      {instanceId ? <SharesPanel instanceId={instanceId} artefactRows={rows || []}/> : null}
     </main>
   );
 }

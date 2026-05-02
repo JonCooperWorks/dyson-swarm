@@ -29,6 +29,27 @@ export const TTL_OPTIONS = [
   { value: 'never', label: 'never (revoke manually)' },
 ];
 
+export function shareAccessLogHref(instanceId, jti) {
+  return `#/i/${encodeURIComponent(instanceId)}/shares/${encodeURIComponent(jti)}/log`;
+}
+
+export function artefactFilenameMap(artefactRows) {
+  const out = new Map();
+  for (const row of artefactRows || []) {
+    if (!row?.id) continue;
+    const title = typeof row.title === 'string' && row.title.trim()
+      ? row.title.trim()
+      : row.id;
+    out.set(row.id, title);
+  }
+  return out;
+}
+
+export function shareFilename(row, namesByArtefactId) {
+  if (!row) return '—';
+  return namesByArtefactId?.get(row.artefact_id) || row.artefact_id || '—';
+}
+
 export function SharesPage({ instanceId }) {
   const backHref = `#/i/${encodeURIComponent(instanceId)}`;
   return (
@@ -46,10 +67,14 @@ export function SharesPage({ instanceId }) {
   );
 }
 
-export function SharesPanel({ instanceId }) {
+export function SharesPanel({ instanceId, artefactRows = [] }) {
   const { client } = useApi();
   const slot = useAppState(s => s.shares.byInstance[instanceId]);
   const rows = slot?.rows || null;
+  const namesByArtefactId = React.useMemo(
+    () => artefactFilenameMap(artefactRows),
+    [artefactRows],
+  );
   const [refreshing, setRefreshing] = React.useState(false);
   const [err, setErr] = React.useState(null);
   const [busy, setBusy] = React.useState(false);
@@ -185,7 +210,7 @@ export function SharesPanel({ instanceId }) {
         ) : (
           <table className="rows">
             <thead><tr>
-              <th>jti</th>
+              <th>filename</th>
               <th>artefact</th>
               <th>label</th>
               <th>state</th>
@@ -194,34 +219,39 @@ export function SharesPanel({ instanceId }) {
               <th></th>
             </tr></thead>
             <tbody>
-              {rows.map(r => (
-                <tr key={r.jti}>
-                  <td data-label="jti"><code className="mono-sm" title={r.jti}>{r.jti.slice(0, 12)}…</code></td>
-                  <td data-label="artefact"><code className="mono-sm">{r.artefact_id}</code></td>
-                  <td data-label="label" className="muted small">{r.label || '—'}</td>
-                  <td data-label="state">
-                    {r.revoked_at
-                      ? <span className="badge badge-faint">revoked</span>
-                      : (r.active
-                          ? <span className="badge badge-ok">active</span>
-                          : <span className="badge badge-warn">expired</span>)}
-                  </td>
-                  <td data-label="created" className="muted small">{fmtTime(r.created_at)}</td>
-                  <td data-label="expires" className="muted small">{fmtTime(r.expires_at)}</td>
-                  <td className="row-actions">
-                    {!r.revoked_at && r.active ? (
-                      <CopyUrlButton jti={r.jti} client={client}/>
-                    ) : null}
-                    {!r.revoked_at && r.active ? (
-                      <button className="btn btn-ghost btn-sm" onClick={() => revoke(r.jti)} disabled={busy}>
-                        revoke
-                      </button>
-                    ) : null}
-                    <ReissueButton jti={r.jti} onReissue={reissue} disabled={busy}/>
-                    <AccessesButton jti={r.jti} client={client}/>
-                  </td>
-                </tr>
-              ))}
+              {rows.map(r => {
+                const filename = shareFilename(r, namesByArtefactId);
+                return (
+                  <tr key={r.jti}>
+                    <td data-label="filename">
+                      <span className="share-file-name" title={r.artefact_id}>{filename}</span>
+                    </td>
+                    <td data-label="artefact"><code className="mono-sm">{r.artefact_id}</code></td>
+                    <td data-label="label" className="muted small">{r.label || '—'}</td>
+                    <td data-label="state">
+                      {r.revoked_at
+                        ? <span className="badge badge-faint">revoked</span>
+                        : (r.active
+                            ? <span className="badge badge-ok">active</span>
+                            : <span className="badge badge-warn">expired</span>)}
+                    </td>
+                    <td data-label="created" className="muted small">{fmtTime(r.created_at)}</td>
+                    <td data-label="expires" className="muted small">{fmtTime(r.expires_at)}</td>
+                    <td className="row-actions">
+                      {!r.revoked_at && r.active ? (
+                        <CopyUrlButton jti={r.jti} client={client}/>
+                      ) : null}
+                      {!r.revoked_at && r.active ? (
+                        <button className="btn btn-ghost btn-sm" onClick={() => revoke(r.jti)} disabled={busy}>
+                          revoke
+                        </button>
+                      ) : null}
+                      <ReissueButton jti={r.jti} onReissue={reissue} disabled={busy}/>
+                      <AccessLogLink instanceId={instanceId} jti={r.jti}/>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         )}
@@ -243,6 +273,67 @@ export function SharesPanel({ instanceId }) {
         />
       ) : null}
     </>
+  );
+}
+
+export function ShareAccessLogPage({ instanceId, jti }) {
+  const { client } = useApi();
+  const [rows, setRows] = React.useState(null);
+  const [share, setShare] = React.useState(null);
+  const [artefacts, setArtefacts] = React.useState([]);
+  const [err, setErr] = React.useState(null);
+  const backHref = `#/i/${encodeURIComponent(instanceId)}/artefacts`;
+
+  React.useEffect(() => {
+    let cancelled = false;
+    setRows(null); setShare(null); setArtefacts([]); setErr(null);
+    client.listShareAccesses(jti)
+      .then(list => { if (!cancelled) setRows(Array.isArray(list) ? list : []); })
+      .catch(e => { if (!cancelled) setErr(e?.detail || e?.message || 'list failed'); });
+    client.listShares(instanceId)
+      .then(list => {
+        if (cancelled) return;
+        const shareRows = Array.isArray(list) ? list : [];
+        setSharesFor(instanceId, shareRows);
+        setShare(shareRows.find(r => r.jti === jti) || null);
+      })
+      .catch(() => { /* access rows are the page's critical path */ });
+    client.listInstanceArtefacts(instanceId)
+      .then(list => { if (!cancelled) setArtefacts(Array.isArray(list) ? list : []); })
+      .catch(() => { /* filename falls back to artefact id */ });
+    return () => { cancelled = true; };
+  }, [client, instanceId, jti]);
+
+  const namesByArtefactId = React.useMemo(() => artefactFilenameMap(artefacts), [artefacts]);
+  const filename = share ? shareFilename(share, namesByArtefactId) : `share ${jti.slice(0, 12)}…`;
+
+  return (
+    <main className="page page-edit page-share-log">
+      <header className="page-header">
+        <a className="btn btn-ghost btn-sm" href={backHref}>← all artefacts</a>
+        <h1 className="page-title">access log</h1>
+        <p className="page-sub muted">
+          <span>{filename}</span>
+          {share?.artefact_id ? <> · <code className="mono-sm">{share.artefact_id}</code></> : null}
+        </p>
+      </header>
+
+      <section className="panel">
+        <div className="panel-header">
+          <div>
+            <div className="panel-title">log</div>
+            <div className="muted small"><code className="mono-sm">{jti.slice(0, 12)}…</code></div>
+          </div>
+          <div className="panel-actions">
+            <a className="btn btn-ghost btn-sm" href={backHref}>done</a>
+          </div>
+        </div>
+        {err ? <div className="error">{err}</div> : null}
+        {rows === null && !err ? <p className="muted small">loading…</p> : null}
+        {rows && rows.length === 0 ? <ShareLogEmpty/> : null}
+        {rows && rows.length > 0 ? <ShareAccessTable rows={rows}/> : null}
+      </section>
+    </main>
   );
 }
 
@@ -311,59 +402,47 @@ function ReissueButton({ jti, onReissue, disabled }) {
   );
 }
 
-function AccessesButton({ jti, client }) {
-  const [open, setOpen] = React.useState(false);
-  const [rows, setRows] = React.useState(null);
-  const [err, setErr] = React.useState(null);
-  React.useEffect(() => {
-    if (!open) return;
-    let cancelled = false;
-    setRows(null); setErr(null);
-    client.listShareAccesses(jti)
-      .then(list => { if (!cancelled) setRows(Array.isArray(list) ? list : []); })
-      .catch(e => { if (!cancelled) setErr(e?.detail || e?.message || 'list failed'); });
-    return () => { cancelled = true; };
-  }, [open, jti, client]);
+function AccessLogLink({ instanceId, jti }) {
   return (
-    <>
-      <button className="btn btn-ghost btn-sm" onClick={() => setOpen(true)} title="recent accesses">
-        log
-      </button>
-      {open ? (
-        <div className="modal-scrim" onClick={() => setOpen(false)}>
-          <div className="modal" onClick={e => e.stopPropagation()} role="dialog" aria-label="share access log">
-            <h3 style={{ marginTop: 0 }}>access log <code className="mono-sm muted">{jti.slice(0, 12)}…</code></h3>
-            {err ? <div className="error">{err}</div> : null}
-            {rows === null && !err ? <p className="muted small">loading…</p> : null}
-            {rows && rows.length === 0 ? <p className="muted small">no accesses yet.</p> : null}
-            {rows && rows.length > 0 ? (
-              <table className="rows">
-                <thead><tr><th>when</th><th>status</th><th>IP</th><th>user-agent</th></tr></thead>
-                <tbody>
-                  {rows.map(r => (
-                    <tr key={r.id}>
-                      <td data-label="when" className="muted small">{fmtTime(r.accessed_at)}</td>
-                      <td data-label="status">
-                        <span className={`badge ${r.status >= 200 && r.status < 300 ? 'badge-ok' : 'badge-warn'}`}>
-                          {r.status}
-                        </span>
-                      </td>
-                      <td data-label="IP" className="mono-sm">{r.remote_addr || '—'}</td>
-                      <td data-label="user-agent" className="mono-sm muted" style={{ maxWidth: 360, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={r.user_agent || ''}>
-                        {r.user_agent || '—'}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            ) : null}
-            <div className="modal-actions">
-              <button className="btn btn-ghost btn-sm" onClick={() => setOpen(false)}>close</button>
-            </div>
-          </div>
-        </div>
-      ) : null}
-    </>
+    <a className="btn btn-ghost btn-sm" href={shareAccessLogHref(instanceId, jti)} title="recent accesses">
+      log
+    </a>
+  );
+}
+
+function ShareLogEmpty() {
+  return (
+    <div className="share-log-empty">
+      <div className="share-log-empty-mark">0</div>
+      <div>
+        <div className="share-log-empty-title">No accesses yet</div>
+        <div className="muted small">This shared link has not been opened.</div>
+      </div>
+    </div>
+  );
+}
+
+function ShareAccessTable({ rows }) {
+  return (
+    <table className="rows">
+      <thead><tr><th>when</th><th>status</th><th>IP</th><th>user-agent</th></tr></thead>
+      <tbody>
+        {rows.map(r => (
+          <tr key={r.id}>
+            <td data-label="when" className="muted small">{fmtTime(r.accessed_at)}</td>
+            <td data-label="status">
+              <span className={`badge ${r.status >= 200 && r.status < 300 ? 'badge-ok' : 'badge-warn'}`}>
+                {r.status}
+              </span>
+            </td>
+            <td data-label="IP" className="mono-sm">{r.remote_addr || '—'}</td>
+            <td data-label="user-agent" className="mono-sm muted" style={{ maxWidth: 520, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={r.user_agent || ''}>
+              {r.user_agent || '—'}
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
   );
 }
 

@@ -1227,6 +1227,40 @@
   margin-left: 8px;
   vertical-align: middle;
 }
+.share-file-name {
+  display: inline-block;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+.share-log-empty {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-height: 96px;
+  padding: 18px 12px;
+  color: var(--fg);
+}
+.share-log-empty-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 42px;
+  height: 42px;
+  border: 1px solid color-mix(in srgb, var(--accent) 36%, var(--border));
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  color: var(--accent);
+  font-family: var(--mono);
+  font-size: 18px;
+  font-weight: 700;
+}
+.share-log-empty-title {
+  font-size: 14px;
+  font-weight: 600;
+}
 
 /* Mobile: stack `.rows` into one card per row.  Each <td> becomes a
    labelled line; the label comes from `data-label` on the td (added
@@ -1287,6 +1321,10 @@
   .rows td[style*="white-space: nowrap"] {
     white-space: normal !important;
     max-width: none !important;
+  }
+  .share-file-name {
+    max-width: 100%;
+    white-space: normal;
   }
 }
 

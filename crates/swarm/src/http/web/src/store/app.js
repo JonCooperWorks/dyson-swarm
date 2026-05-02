@@ -228,6 +228,12 @@ export function parseHashView() {
   };
   const tasks = h.match(/^#\/i\/([^/?#]+)\/tasks/);
   if (tasks) return { name: 'instance-tasks', id: decodeURIComponent(tasks[1]), taskName: null };
+  const shareLog = h.match(/^#\/i\/([^/?#]+)\/shares\/([^/?#]+)\/log/);
+  if (shareLog) return {
+    name: 'share-access-log',
+    id: decodeURIComponent(shareLog[1]),
+    jti: decodeURIComponent(shareLog[2]),
+  };
   const shares = h.match(/^#\/i\/([^/?#]+)\/shares/);
   if (shares) return { name: 'instance-shares', id: decodeURIComponent(shares[1]) };
   // Deep-linked single-artefact reader.  Must come before the bare

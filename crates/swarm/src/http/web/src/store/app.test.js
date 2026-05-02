@@ -98,4 +98,13 @@ describe('parseHashView', () => {
       taskName: 'github-deploy',
     });
   });
+
+  test('"#/i/<id>/shares/<jti>/log" routes to the share access log page', () => {
+    window.location.hash = '#/i/abc/shares/jti%2D123/log';
+    expect(parseHashView()).toEqual({
+      name: 'share-access-log',
+      id: 'abc',
+      jti: 'jti-123',
+    });
+  });
 });

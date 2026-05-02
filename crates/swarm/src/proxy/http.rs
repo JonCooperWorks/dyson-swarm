@@ -32,13 +32,28 @@ use crate::proxy::adapters::anthropic as anthropic_adapter;
 use crate::proxy::byok::{self, KeySource};
 use crate::proxy::policy_check::{EnforceContext, enforce};
 use crate::proxy::recording_body::RecordingBody;
-use crate::proxy::upstream_policy::{ByoUpstreamError, validate_byo_upstream};
+use crate::proxy::upstream_policy::{
+    ByoUpstreamError, ValidatedByoUpstream, validate_byo_upstream,
+};
 use crate::traits::{AuditEntry, TokenRecord};
 
 /// Wallclock duration → audit-row millis.  `Duration::as_millis()` returns
 /// `u128`; saturating to `i64::MAX` (~292M years) is safer than wrapping.
 fn elapsed_ms(started: Instant) -> i64 {
     i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX)
+}
+
+fn build_pinned_byo_client(
+    validated: &ValidatedByoUpstream,
+) -> Result<reqwest::Client, reqwest::Error> {
+    let Some(host) = validated.url.host_str() else {
+        return reqwest::Client::builder().build();
+    };
+    reqwest::Client::builder()
+        .pool_idle_timeout(Some(std::time::Duration::from_secs(90)))
+        .redirect(reqwest::redirect::Policy::none())
+        .resolve_to_addrs(host, &validated.resolved_addrs)
+        .build()
 }
 
 /// Build the `/llm/*` router. Carries its own state and per-instance-bearer
@@ -96,15 +111,13 @@ async fn handle(
     // 3. Policy + usage are keyed on owner_id, not instance_id, so a user
     // with N instances shares one budget envelope.
     //
-    // Race: between reading `daily_tokens` here and the audit insert at
-    // step 6, two concurrent requests can both pass the budget check
-    // before either inserts a row.  The atomic version wants:
-    //   `tx = pool.begin_immediate()` → `daily_tokens(...)` (inside tx)
-    //   → enforce → `tx.insert(audit_entry)` → `tx.commit()`.
-    // This is D2 in the security review and requires a new
-    // `AuditStore::insert_with_tx` method (trait surgery owned by
-    // Agent 1).  Until that's plumbed, the window stays — typical
-    // exposure is a single extra request slipping past the cap.
+    // Keep the per-owner budget check and the eventual audit insert in one
+    // in-process critical section. That closes the common concurrent-request
+    // race where two requests both observe the same daily total before either
+    // writes its audit row. A future multi-process deployment should move this
+    // into a DB transaction/advisory lock; the current service model is one
+    // swarm process per host.
+    let budget_guard = state.budget_guard(&owner_id).await;
     let policy = match state.policies.get(&owner_id).await {
         Ok(Some(p)) => p,
         Ok(None) => state.default_policy.clone(),
@@ -178,9 +191,22 @@ async fn handle(
     let real_key = resolved.key.clone();
     let key_source_str = resolved.source.as_str().to_owned();
 
+    let mut pinned_byo_client: Option<reqwest::Client> = None;
     let upstream_base: String = match resolved.upstream_override.as_deref() {
         Some(u) if provider == "byo" => match validate_byo_upstream(&state.byo, u).await {
-            Ok(url) => url.to_string(),
+            Ok(validated) => {
+                pinned_byo_client = match build_pinned_byo_client(&validated) {
+                    Ok(client) => Some(client),
+                    Err(err) => {
+                        tracing::warn!(error = %err, "byo upstream client build failed");
+                        return error_response(
+                            StatusCode::BAD_GATEWAY,
+                            "byo upstream not reachable",
+                        );
+                    }
+                };
+                validated.url.to_string()
+            }
             Err(ByoUpstreamError::Disabled) => {
                 return error_response(StatusCode::FORBIDDEN, "byo upstream disabled");
             }
@@ -249,8 +275,8 @@ async fn handle(
     } else {
         body_bytes.clone()
     };
-    let mut req_builder = state
-        .http
+    let request_client = pinned_byo_client.as_ref().unwrap_or(&state.http);
+    let mut req_builder = request_client
         .request(method, upstream_uri.to_string())
         .body(outbound_body);
     for (k, v) in &parts.headers {
@@ -339,6 +365,7 @@ async fn handle(
             None
         }
     };
+    drop(budget_guard);
 
     // 7. Stream response back through `RecordingBody` so the audit
     // row gets stamped with `output_tokens` + `completed=true` once

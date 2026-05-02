@@ -1,7 +1,9 @@
 use async_trait::async_trait;
 use sqlx::{Row, SqlitePool};
+use std::sync::Arc;
 
 use crate::db::map_sqlx;
+use crate::envelope::EnvelopeCipher;
 use crate::error::StoreError;
 use crate::network_policy::NetworkPolicy;
 use crate::now_secs;
@@ -46,15 +48,55 @@ fn vec_to_csv(v: &[String]) -> String {
 #[derive(Debug, Clone)]
 pub struct SqlxInstanceStore {
     pool: SqlitePool,
+    cipher: Option<Arc<dyn EnvelopeCipher>>,
 }
 
 impl SqlxInstanceStore {
     pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+        Self { pool, cipher: None }
+    }
+
+    pub fn sealed(pool: SqlitePool, cipher: Arc<dyn EnvelopeCipher>) -> Self {
+        Self {
+            pool,
+            cipher: Some(cipher),
+        }
     }
 }
 
-fn row_to_instance(row: &sqlx::sqlite::SqliteRow) -> Result<InstanceRow, StoreError> {
+fn is_legacy_bearer(stored: &str) -> bool {
+    stored.len() == 32 && stored.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn seal_bearer(cipher: Option<&dyn EnvelopeCipher>, bearer: &str) -> Result<String, StoreError> {
+    let Some(cipher) = cipher else {
+        return Ok(bearer.to_owned());
+    };
+    let sealed = cipher
+        .seal(bearer.as_bytes())
+        .map_err(|e| StoreError::Io(format!("seal instance bearer: {e}")))?;
+    String::from_utf8(sealed)
+        .map_err(|_| StoreError::Malformed("sealed instance bearer was not utf-8".into()))
+}
+
+fn open_bearer(cipher: Option<&dyn EnvelopeCipher>, stored: &str) -> Result<String, StoreError> {
+    if is_legacy_bearer(stored) {
+        return Ok(stored.to_owned());
+    }
+    let Some(cipher) = cipher else {
+        return Ok(stored.to_owned());
+    };
+    let plain = cipher
+        .open(stored.as_bytes())
+        .map_err(|e| StoreError::Malformed(format!("open instance bearer: {e}")))?;
+    String::from_utf8(plain)
+        .map_err(|_| StoreError::Malformed("instance bearer plaintext was not utf-8".into()))
+}
+
+fn row_to_instance(
+    row: &sqlx::sqlite::SqliteRow,
+    cipher: Option<&dyn EnvelopeCipher>,
+) -> Result<InstanceRow, StoreError> {
     let status_text: String = row.try_get("status").map_err(map_sqlx)?;
     let status = InstanceStatus::parse(&status_text)
         .ok_or_else(|| StoreError::Malformed(format!("status={status_text}")))?;
@@ -85,7 +127,10 @@ fn row_to_instance(row: &sqlx::sqlite::SqliteRow) -> Result<InstanceRow, StoreEr
         cube_sandbox_id: row.try_get("cube_sandbox_id").map_err(map_sqlx)?,
         template_id: row.try_get("template_id").map_err(map_sqlx)?,
         status,
-        bearer_token: row.try_get("bearer_token").map_err(map_sqlx)?,
+        bearer_token: open_bearer(
+            cipher,
+            &row.try_get::<String, _>("bearer_token").map_err(map_sqlx)?,
+        )?,
         pinned: pinned_int != 0,
         expires_at: row.try_get("expires_at").map_err(map_sqlx)?,
         last_active_at: row.try_get("last_active_at").map_err(map_sqlx)?,
@@ -115,6 +160,7 @@ impl InstanceStore for SqlxInstanceStore {
             .map_err(|e| StoreError::Io(format!("models encode: {e}")))?;
         let tools_json = serde_json::to_string(&row.tools)
             .map_err(|e| StoreError::Io(format!("tools encode: {e}")))?;
+        let bearer_token = seal_bearer(self.cipher.as_deref(), &row.bearer_token)?;
         sqlx::query(
             "INSERT INTO instances \
              (id, owner_id, name, task, cube_sandbox_id, template_id, status, bearer_token, \
@@ -130,7 +176,7 @@ impl InstanceStore for SqlxInstanceStore {
         .bind(&row.cube_sandbox_id)
         .bind(&row.template_id)
         .bind(row.status.as_str())
-        .bind(&row.bearer_token)
+        .bind(&bearer_token)
         .bind(row.pinned as i64)
         .bind(row.expires_at)
         .bind(row.last_active_at)
@@ -157,7 +203,7 @@ impl InstanceStore for SqlxInstanceStore {
             .await
             .map_err(map_sqlx)?;
         match row {
-            Some(r) => Ok(Some(row_to_instance(&r)?)),
+            Some(r) => Ok(Some(row_to_instance(&r, self.cipher.as_deref())?)),
             None => Ok(None),
         }
     }
@@ -177,7 +223,7 @@ impl InstanceStore for SqlxInstanceStore {
                 .await
                 .map_err(map_sqlx)?;
         match row {
-            Some(r) => Ok(Some(row_to_instance(&r)?)),
+            Some(r) => Ok(Some(row_to_instance(&r, self.cipher.as_deref())?)),
             None => Ok(None),
         }
     }
@@ -203,7 +249,9 @@ impl InstanceStore for SqlxInstanceStore {
         .fetch_all(&self.pool)
         .await
         .map_err(map_sqlx)?;
-        rows.iter().map(row_to_instance).collect()
+        rows.iter()
+            .map(|row| row_to_instance(row, self.cipher.as_deref()))
+            .collect()
     }
 
     async fn set_cube_sandbox_id(&self, id: &str, sandbox_id: &str) -> Result<(), StoreError> {
@@ -413,7 +461,9 @@ impl InstanceStore for SqlxInstanceStore {
         .fetch_all(&self.pool)
         .await
         .map_err(map_sqlx)?;
-        rows.iter().map(row_to_instance).collect()
+        rows.iter()
+            .map(|row| row_to_instance(row, self.cipher.as_deref()))
+            .collect()
     }
 }
 
@@ -421,6 +471,25 @@ impl InstanceStore for SqlxInstanceStore {
 mod tests {
     use super::*;
     use crate::db::open_in_memory;
+    use crate::envelope::EnvelopeError;
+
+    #[derive(Debug)]
+    struct TestCipher;
+
+    impl EnvelopeCipher for TestCipher {
+        fn seal(&self, plaintext: &[u8]) -> Result<Vec<u8>, EnvelopeError> {
+            let mut out = b"sealed:".to_vec();
+            out.extend_from_slice(plaintext);
+            Ok(out)
+        }
+
+        fn open(&self, ciphertext: &[u8]) -> Result<Vec<u8>, EnvelopeError> {
+            ciphertext
+                .strip_prefix(b"sealed:")
+                .map(|s| s.to_vec())
+                .ok_or(EnvelopeError::Corrupt)
+        }
+    }
 
     fn sample(id: &str) -> InstanceRow {
         InstanceRow {
@@ -458,6 +527,39 @@ mod tests {
         assert_eq!(got.cube_sandbox_id.as_deref(), Some("sb-a"));
         assert!(!got.pinned);
         assert!(store.get("missing").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn sealed_store_does_not_persist_plaintext_bearer() {
+        let pool = open_in_memory().await.unwrap();
+        let store = SqlxInstanceStore::sealed(pool.clone(), Arc::new(TestCipher));
+        let row = sample("a");
+        let bearer = row.bearer_token.clone();
+        store.create(row).await.unwrap();
+
+        let raw = sqlx::query("SELECT bearer_token FROM instances WHERE id = 'a'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let stored: String = raw.get("bearer_token");
+        assert_ne!(stored, bearer);
+        assert_eq!(stored, format!("sealed:{bearer}"));
+
+        let got = store.get("a").await.unwrap().expect("present");
+        assert_eq!(got.bearer_token, bearer);
+    }
+
+    #[tokio::test]
+    async fn sealed_store_still_reads_legacy_plaintext_bearer() {
+        let pool = open_in_memory().await.unwrap();
+        let legacy = SqlxInstanceStore::new(pool.clone());
+        let mut row = sample("a");
+        row.bearer_token = "0123456789abcdef0123456789abcdef".to_string();
+        legacy.create(row).await.unwrap();
+
+        let sealed = SqlxInstanceStore::sealed(pool, Arc::new(TestCipher));
+        let got = sealed.get("a").await.unwrap().expect("present");
+        assert_eq!(got.bearer_token, "0123456789abcdef0123456789abcdef");
     }
 
     #[tokio::test]

@@ -378,6 +378,69 @@ fn managed_env(
     out
 }
 
+fn is_reserved_env_name(name: &str) -> bool {
+    if matches!(name, ENV_MODEL | ENV_MODELS | ENV_TOOLS) {
+        return false;
+    }
+    let upper = name.to_ascii_uppercase();
+    if upper.starts_with("SWARM_") || upper.starts_with("DYSON_") {
+        return true;
+    }
+    matches!(
+        upper.as_str(),
+        "HTTP_PROXY"
+            | "HTTPS_PROXY"
+            | "NO_PROXY"
+            | "ALL_PROXY"
+            | "HTTP_PROXY_REQUEST_FULLURI"
+            | "HTTPS_PROXY_REQUEST_FULLURI"
+    )
+}
+
+fn validate_caller_env(env: &BTreeMap<String, String>) -> Result<(), SwarmError> {
+    let mut reserved: Vec<&str> = env
+        .keys()
+        .map(String::as_str)
+        .filter(|name| is_reserved_env_name(name))
+        .collect();
+    reserved.sort_unstable();
+    if reserved.is_empty() {
+        return Ok(());
+    }
+    Err(SwarmError::BadRequest(format!(
+        "reserved sandbox env keys may not be supplied by callers: {}",
+        reserved.join(", ")
+    )))
+}
+
+fn compose_sandbox_env(
+    managed: &BTreeMap<String, String>,
+    caller: &BTreeMap<String, String>,
+    existing: &[(String, String)],
+) -> Result<BTreeMap<String, String>, SwarmError> {
+    validate_caller_env(caller)?;
+    let filtered_existing: Vec<(String, String)> = existing
+        .iter()
+        .filter_map(|(name, value)| {
+            if is_reserved_env_name(name) {
+                tracing::warn!(
+                    env = %name,
+                    "sandbox env: ignoring reserved instance_secret override"
+                );
+                None
+            } else {
+                Some((name.clone(), value.clone()))
+            }
+        })
+        .collect();
+    Ok(compose_env(
+        &BTreeMap::new(),
+        managed,
+        caller,
+        &filtered_existing,
+    ))
+}
+
 /// Build the `SWARM_INGEST_URL` value from the operator's `proxy_base`
 /// (the same value already exposed as `SWARM_PROXY_URL`).  An empty
 /// `proxy_base` falls through as an empty URL — dyson reads that as
@@ -1211,7 +1274,7 @@ impl InstanceService {
             &source.task,
             &target_policy,
         );
-        let env = compose_env(&BTreeMap::new(), &managed, &BTreeMap::new(), &existing);
+        let env = compose_sandbox_env(&managed, &BTreeMap::new(), &existing)?;
 
         // Phase 3: spin up a fresh cube under the new template using
         // the snapshot we just took.
@@ -1433,7 +1496,7 @@ impl InstanceService {
             &source.task,
             &source.network_policy,
         );
-        let env = compose_env(&BTreeMap::new(), &managed, &BTreeMap::new(), &existing);
+        let env = compose_sandbox_env(&managed, &BTreeMap::new(), &existing)?;
 
         let info = self
             .cube
@@ -1611,7 +1674,7 @@ impl InstanceService {
             &source.task,
             &target_policy,
         );
-        let env = compose_env(&BTreeMap::new(), &managed, &BTreeMap::new(), &existing);
+        let env = compose_sandbox_env(&managed, &BTreeMap::new(), &existing)?;
 
         let info = self
             .cube
@@ -2092,7 +2155,7 @@ impl InstanceService {
         // Templates aren't materialised inside swarm — they live in Cube.
         // The "template" half of the merge is empty here; operators set per-
         // instance values via PUT /secrets and they win as `existing`.
-        let env = compose_env(&BTreeMap::new(), &managed, &req.env, &[]);
+        let env = compose_sandbox_env(&managed, &req.env, &[])?;
 
         let info = match self
             .cube
@@ -2857,7 +2920,7 @@ impl InstanceService {
             &req.network_policy,
         );
 
-        let env = compose_env(&BTreeMap::new(), &managed, &req.env, &existing);
+        let env = compose_sandbox_env(&managed, &req.env, &existing)?;
 
         let info = match self
             .cube
@@ -3040,6 +3103,50 @@ mod tests {
         fn fail_snapshots(&self) {
             *self.fail_snapshot.lock().unwrap() = true;
         }
+    }
+
+    #[test]
+    fn caller_env_rejects_reserved_control_keys() {
+        let env = BTreeMap::from([
+            (ENV_MODEL.to_string(), "openrouter/ok".to_string()),
+            (ENV_PROXY_TOKEN.to_string(), "attacker".to_string()),
+            (
+                "HTTP_PROXY".to_string(),
+                "http://example.invalid:3128".to_string(),
+            ),
+        ]);
+        let err = validate_caller_env(&env).expect_err("reserved keys rejected");
+        assert!(
+            err.to_string().contains(ENV_PROXY_TOKEN),
+            "error names the reserved SWARM key: {err}"
+        );
+        assert!(
+            err.to_string().contains("HTTP_PROXY"),
+            "error names the proxy key: {err}"
+        );
+    }
+
+    #[test]
+    fn compose_sandbox_env_ignores_reserved_existing_overrides() {
+        let managed = BTreeMap::from([
+            (ENV_PROXY_TOKEN.to_string(), "managed-token".to_string()),
+            (ENV_BEARER_TOKEN.to_string(), "managed-bearer".to_string()),
+        ]);
+        let caller = BTreeMap::from([
+            (ENV_MODEL.to_string(), "openrouter/model".to_string()),
+            ("APP_SETTING".to_string(), "caller".to_string()),
+        ]);
+        let existing = vec![
+            (ENV_PROXY_TOKEN.to_string(), "stale-user-secret".to_string()),
+            ("API_TOKEN".to_string(), "existing-secret".to_string()),
+        ];
+        let env = compose_sandbox_env(&managed, &caller, &existing).expect("valid env");
+
+        assert_eq!(env[ENV_PROXY_TOKEN], "managed-token");
+        assert_eq!(env[ENV_BEARER_TOKEN], "managed-bearer");
+        assert_eq!(env[ENV_MODEL], "openrouter/model");
+        assert_eq!(env["APP_SETTING"], "caller");
+        assert_eq!(env["API_TOKEN"], "existing-secret");
     }
 
     #[async_trait]
@@ -3428,12 +3535,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn caller_env_overrides_managed_when_keys_collide() {
-        // Per the brief's priority: template < managed < caller < existing.
-        // The caller can override managed values (we trust the operator).
+    async fn caller_env_cannot_override_managed_control_keys() {
         let (svc, cube, _tokens, _secrets, _instances) = build().await;
         let mut caller = env_with_model();
         caller.insert(ENV_PROXY_URL.into(), "http://override".into());
+        let err = svc
+            .create(
+                "legacy",
+                CreateRequest {
+                    template_id: "tpl".into(),
+                    name: None,
+                    task: None,
+                    env: caller,
+                    ttl_seconds: None,
+                    network_policy: NetworkPolicy::default(),
+                    mcp_servers: Vec::new(),
+                },
+            )
+            .await
+            .expect_err("reserved env override rejected");
+        assert!(err.to_string().contains(ENV_PROXY_URL));
+        assert!(
+            cube.last_create.lock().unwrap().is_none(),
+            "sandbox must not be created after reserved env rejection"
+        );
+    }
+
+    #[tokio::test]
+    async fn caller_env_still_allows_non_reserved_keys() {
+        let (svc, cube, _tokens, _secrets, _instances) = build().await;
+        let mut caller = env_with_model();
+        caller.insert("APP_SETTING".into(), "caller-value".into());
         svc.create(
             "legacy",
             CreateRequest {
@@ -3449,7 +3581,7 @@ mod tests {
         .await
         .unwrap();
         let captured = cube.last_create();
-        assert_eq!(captured.env[ENV_PROXY_URL], "http://override");
+        assert_eq!(captured.env["APP_SETTING"], "caller-value");
     }
 
     #[tokio::test]

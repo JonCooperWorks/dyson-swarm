@@ -180,7 +180,7 @@ async fn put_byok(
             return (StatusCode::BAD_REQUEST, "upstream is empty").into_response();
         }
         let normalized = match validate_byo_upstream(&state.byo, u).await {
-            Ok(url) => url.to_string(),
+            Ok(validated) => validated.url.to_string(),
             Err(ByoUpstreamError::Disabled) => {
                 return (
                     StatusCode::FORBIDDEN,

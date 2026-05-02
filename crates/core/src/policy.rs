@@ -69,16 +69,14 @@ pub fn within_daily_token_budget(budget: Option<u64>, used_tokens: u64) -> bool 
 
 /// `used_usd` is the running total for the calendar month.
 ///
-/// **Pricing is intentionally not implemented in this build (demo
-/// deployment).**  The proxy passes `used_usd = 0.0` on every call, so
-/// any operator-configured `monthly_usd_budget` is effectively a no-op
-/// — the comparison `0.0 < budget` is always true.  The well-typed
-/// entry point is kept so a future pricing layer can land without
-/// re-plumbing every call site.  Daily token budgets ARE enforced via
-/// `within_daily_token_budget` and `audit::daily_tokens`.
+/// Pricing is intentionally not implemented in this build.  Callers that
+/// cannot compute a real USD total pass `NaN`; any configured budget then
+/// fails closed instead of silently allowing spend against a fake `0.0`.
+/// Daily token budgets ARE enforced via `within_daily_token_budget` and
+/// `audit::daily_tokens`.
 pub fn within_monthly_usd_budget(budget: Option<f64>, used_usd: f64) -> bool {
     match budget {
-        Some(b) => used_usd < b,
+        Some(b) => used_usd.is_finite() && used_usd < b,
         None => true,
     }
 }
@@ -180,5 +178,6 @@ mod tests {
         assert!(within_monthly_usd_budget(Some(100.0), 99.99));
         assert!(!within_monthly_usd_budget(Some(100.0), 100.0));
         assert!(!within_monthly_usd_budget(Some(100.0), 100.01));
+        assert!(!within_monthly_usd_budget(Some(100.0), f64::NAN));
     }
 }

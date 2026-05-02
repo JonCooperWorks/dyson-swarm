@@ -124,7 +124,6 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let instances_store: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(pool.clone()));
     let secrets_store: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
     let user_secrets_store: Arc<dyn dyson_swarm::traits::UserSecretStore> = Arc::new(
         dyson_swarm::db::secrets::SqlxUserSecretStore::new(pool.clone()),
@@ -132,8 +131,6 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     let system_secrets_store: Arc<dyn dyson_swarm::traits::SystemSecretStore> = Arc::new(
         dyson_swarm::db::secrets::SqlxSystemSecretStore::new(pool.clone()),
     );
-    let tokens_store: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(pool.clone()));
-
     // Per-user envelope encryption directory.  Lazy-creates an age
     // identity per user inside `keys_dir` on first secret seal/open.
     let cipher_dir: Arc<dyn dyson_swarm::envelope::CipherDirectory> =
@@ -144,6 +141,19 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
                 return ExitCode::from(2);
             }
         };
+    let token_cipher = match cipher_dir.system() {
+        Ok(c) => c,
+        Err(err) => {
+            tracing::error!(error = %err, "token envelope init failed");
+            return ExitCode::from(2);
+        }
+    };
+    let instances_store: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::sealed(
+        pool.clone(),
+        token_cipher.clone(),
+    ));
+    let tokens_store: Arc<dyn TokenStore> =
+        Arc::new(SqlxTokenStore::sealed(pool.clone(), token_cipher));
     let snapshots_store: Arc<dyn SnapshotStore> =
         Arc::new(db::snapshots::SqliteSnapshotStore::new(pool.clone()));
     let policies_store: Arc<dyn PolicyStore> =

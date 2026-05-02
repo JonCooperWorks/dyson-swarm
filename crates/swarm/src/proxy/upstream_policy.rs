@@ -1,6 +1,6 @@
 //! Operator policy for user-selected BYO upstream URLs.
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use crate::config::ByoConfig;
 
@@ -26,6 +26,12 @@ pub enum ByoUpstreamError {
     InternalNotAllowed,
 }
 
+#[derive(Debug, Clone)]
+pub struct ValidatedByoUpstream {
+    pub url: reqwest::Url,
+    pub resolved_addrs: Vec<SocketAddr>,
+}
+
 /// Parse and authorize a BYO upstream base URL. BYO is enabled by
 /// default because it is a core feature; the conservative default is
 /// blocking internal/private addresses unless the operator opts in for
@@ -33,7 +39,7 @@ pub enum ByoUpstreamError {
 pub async fn validate_byo_upstream(
     policy: &ByoConfig,
     upstream: &str,
-) -> Result<reqwest::Url, ByoUpstreamError> {
+) -> Result<ValidatedByoUpstream, ByoUpstreamError> {
     if !policy.enabled {
         return Err(ByoUpstreamError::Disabled);
     }
@@ -54,32 +60,34 @@ pub async fn validate_byo_upstream(
         return Err(ByoUpstreamError::QueryOrFragment);
     }
     let host = url.host_str().ok_or(ByoUpstreamError::MissingHost)?;
-    if !policy.allow_internal && resolves_internal(host, url.port_or_known_default()).await? {
+    let resolved_addrs = resolve_addrs(host, url.port_or_known_default()).await?;
+    if !policy.allow_internal && resolved_addrs.iter().any(|addr| is_internal_ip(addr.ip())) {
         return Err(ByoUpstreamError::InternalNotAllowed);
     }
-    Ok(url)
+    Ok(ValidatedByoUpstream {
+        url,
+        resolved_addrs,
+    })
 }
 
-async fn resolves_internal(host: &str, port: Option<u16>) -> Result<bool, ByoUpstreamError> {
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        return Ok(is_internal_ip(ip));
-    }
+async fn resolve_addrs(host: &str, port: Option<u16>) -> Result<Vec<SocketAddr>, ByoUpstreamError> {
     let port = port.unwrap_or(443);
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return Ok(vec![SocketAddr::new(ip, port)]);
+    }
     let addrs = tokio::net::lookup_host((host, port))
         .await
         .map_err(|e| ByoUpstreamError::Resolve(e.to_string()))?;
-    let mut saw_addr = false;
+    let mut out = Vec::new();
     for addr in addrs {
-        saw_addr = true;
-        if is_internal_ip(addr.ip()) {
-            return Ok(true);
-        }
+        out.push(addr);
     }
-    if saw_addr {
-        Ok(false)
-    } else {
-        Err(ByoUpstreamError::Resolve("no addresses returned".into()))
+    out.sort();
+    out.dedup();
+    if out.is_empty() {
+        return Err(ByoUpstreamError::Resolve("no addresses returned".into()));
     }
+    Ok(out)
 }
 
 fn is_internal_ip(ip: IpAddr) -> bool {
@@ -119,7 +127,11 @@ mod tests {
         let url = validate_byo_upstream(&ByoConfig::default(), "http://8.8.8.8/v1")
             .await
             .expect("public host allowed");
-        assert_eq!(url.scheme(), "http");
+        assert_eq!(url.url.scheme(), "http");
+        assert_eq!(
+            url.resolved_addrs,
+            vec!["8.8.8.8:80".parse::<SocketAddr>().unwrap()]
+        );
     }
 
     #[tokio::test]

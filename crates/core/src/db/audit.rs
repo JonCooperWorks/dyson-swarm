@@ -33,10 +33,9 @@ impl SqliteAuditStore {
         Self { pool }
     }
 
-    /// Pricing is intentionally not implemented (demo deployment);
-    /// `monthly_usd_budget` enforcement is a no-op.  Kept as a
-    /// well-typed entry point so a future pricing layer can land
-    /// without re-plumbing every call site.
+    /// Pricing is intentionally not implemented. Kept as a well-typed
+    /// entry point so a future pricing layer can land without re-plumbing
+    /// every call site.
     #[allow(dead_code, clippy::unused_async)]
     pub async fn monthly_usd(&self, _owner_id: &str, _now: i64) -> Result<f64, StoreError> {
         Ok(0.0)

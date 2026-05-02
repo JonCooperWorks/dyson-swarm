@@ -24,6 +24,7 @@ use std::time::{Duration, Instant};
 use crate::config::{ByoConfig, ProviderConfig, Providers};
 use crate::proxy::policy_check::{InstancePolicy, UsageSnapshot};
 use crate::traits::{AuditStore, InstanceStore, PolicyStore, ProviderAdapter, TokenStore};
+use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 
 /// Wires the proxy together. Cheap to clone — every field is `Arc` or
 /// scalar.
@@ -56,6 +57,7 @@ pub struct ProxyService {
     /// Operator startup gate for user-selected `byo` upstream hosts.
     pub byo: ByoConfig,
     rate: Arc<RateWindow>,
+    budget_locks: Arc<Mutex<HashMap<String, Arc<AsyncMutex<()>>>>>,
 }
 
 impl ProxyService {
@@ -84,6 +86,7 @@ impl ProxyService {
             user_secrets: None,
             byo: ByoConfig::default(),
             rate: Arc::new(RateWindow::default()),
+            budget_locks: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -116,12 +119,11 @@ impl ProxyService {
         self.providers.get(name).cloned()
     }
 
-    /// Build a [`UsageSnapshot`] for `subject` (instance_id today,
-    /// owner_id after phase 6).  RPS comes from an in-memory rolling
-    /// window; daily tokens come from the audit store.
+    /// Build a [`UsageSnapshot`] for an owner id. RPS comes from an
+    /// in-memory rolling window; daily tokens come from the audit store.
     ///
-    /// Pricing tables are intentionally not implemented (single-user
-    /// demo deployment); `monthly_usd_budget` enforcement is a no-op.
+    /// Pricing tables are intentionally not implemented; configured
+    /// `monthly_usd_budget` values fail closed until a pricing layer exists.
     /// Daily token budgets ARE enforced via `daily_tokens` (which now
     /// correctly sums `prompt_tokens + output_tokens` after Agent 1's
     /// audit-completion plumbing — `update_completion` stamps the
@@ -138,11 +140,22 @@ impl ProxyService {
         UsageSnapshot {
             recent_rps,
             daily_tokens,
-            // See doc comment above: pricing intentionally absent.
-            // `enforce` keeps `within_monthly_usd_budget` returning
-            // Ok unconditionally.
-            monthly_usd: 0.0,
+            // See doc comment above: pricing intentionally absent.  NaN
+            // makes configured USD budgets fail closed instead of silently
+            // passing against a fake 0.0 spend total.
+            monthly_usd: f64::NAN,
         }
+    }
+
+    pub async fn budget_guard(&self, subject: &str) -> OwnedMutexGuard<()> {
+        let lock = {
+            let mut locks = self.budget_locks.lock().expect("budget lock map poisoned");
+            locks
+                .entry(subject.to_owned())
+                .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+                .clone()
+        };
+        lock.lock_owned().await
     }
 }
 

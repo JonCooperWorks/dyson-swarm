@@ -269,16 +269,22 @@ async fn build_ops_services(cfg: &config::Config) -> Result<OpsServices, String>
     let cube = Arc::new(
         cube_client::HttpCubeClient::new(&cfg.cube).map_err(|e| format!("cube client: {e:#}"))?,
     ) as Arc<dyn CubeClient>;
-    let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(pool.clone()));
-    let secrets: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
-    let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(pool.clone()));
-    let snapshots_store: Arc<dyn SnapshotStore> =
-        Arc::new(db::snapshots::SqliteSnapshotStore::new(pool.clone()));
-
     let cipher_dir: Arc<dyn dyson_swarm_core::envelope::CipherDirectory> = Arc::new(
         dyson_swarm_core::envelope::AgeCipherDirectory::new(cfg.resolved_keys_dir())
             .map_err(|e| format!("envelope key directory init: {e:#}"))?,
     );
+    let system_cipher = cipher_dir
+        .system()
+        .map_err(|e| format!("system envelope init: {e:#}"))?;
+    let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::sealed(
+        pool.clone(),
+        system_cipher.clone(),
+    ));
+    let secrets: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
+    let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::sealed(pool.clone(), system_cipher));
+    let snapshots_store: Arc<dyn SnapshotStore> =
+        Arc::new(db::snapshots::SqliteSnapshotStore::new(pool.clone()));
+
     let system_secrets_store: Arc<dyn dyson_swarm_core::traits::SystemSecretStore> = Arc::new(
         dyson_swarm_core::db::secrets::SqlxSystemSecretStore::new(pool.clone()),
     );

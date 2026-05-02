@@ -1,8 +1,11 @@
 use async_trait::async_trait;
 use sqlx::{Row, SqlitePool};
+use std::sync::Arc;
+use subtle::ConstantTimeEq;
 use uuid::Uuid;
 
 use crate::db::map_sqlx;
+use crate::envelope::EnvelopeCipher;
 use crate::error::StoreError;
 use crate::now_secs;
 use crate::traits::{TokenRecord, TokenStore};
@@ -10,11 +13,47 @@ use crate::traits::{TokenRecord, TokenStore};
 #[derive(Debug, Clone)]
 pub struct SqlxTokenStore {
     pool: SqlitePool,
+    cipher: Option<Arc<dyn EnvelopeCipher>>,
 }
 
 impl SqlxTokenStore {
     pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+        Self { pool, cipher: None }
+    }
+
+    pub fn sealed(pool: SqlitePool, cipher: Arc<dyn EnvelopeCipher>) -> Self {
+        Self {
+            pool,
+            cipher: Some(cipher),
+        }
+    }
+
+    fn seal_token(&self, token: &str) -> Result<String, StoreError> {
+        let Some(cipher) = self.cipher.as_ref() else {
+            return Ok(token.to_owned());
+        };
+        let sealed = cipher
+            .seal(token.as_bytes())
+            .map_err(|e| StoreError::Io(format!("seal proxy token: {e}")))?;
+        String::from_utf8(sealed)
+            .map_err(|_| StoreError::Malformed("sealed proxy token was not utf-8".into()))
+    }
+
+    fn open_token(&self, stored: &str) -> Result<String, StoreError> {
+        // Backwards compatibility for rows minted before token sealing.
+        if stored.starts_with("pt_") || stored.starts_with("it_") {
+            return Ok(stored.to_owned());
+        }
+        let Some(cipher) = self.cipher.as_ref() else {
+            return Err(StoreError::Malformed(
+                "proxy token row is sealed but token store has no cipher".into(),
+            ));
+        };
+        let plain = cipher
+            .open(stored.as_bytes())
+            .map_err(|e| StoreError::Malformed(format!("open proxy token: {e}")))?;
+        String::from_utf8(plain)
+            .map_err(|_| StoreError::Malformed("proxy token plaintext was not utf-8".into()))
     }
 }
 
@@ -36,11 +75,12 @@ impl SqlxTokenStore {
         provider: &str,
     ) -> Result<String, StoreError> {
         let token = format!("{prefix}{}", Uuid::new_v4().simple());
+        let stored_token = self.seal_token(&token)?;
         sqlx::query(
             "INSERT INTO proxy_tokens (token, instance_id, provider, created_at, revoked_at) \
              VALUES (?, ?, ?, ?, NULL)",
         )
-        .bind(&token)
+        .bind(&stored_token)
         .bind(instance_id)
         .bind(provider)
         .bind(now_secs())
@@ -72,21 +112,27 @@ impl TokenStore for SqlxTokenStore {
     }
 
     async fn resolve(&self, token: &str) -> Result<Option<TokenRecord>, StoreError> {
-        let row = sqlx::query(
+        let rows = sqlx::query(
             "SELECT token, instance_id, provider, created_at, revoked_at \
-             FROM proxy_tokens WHERE token = ? AND revoked_at IS NULL",
+             FROM proxy_tokens WHERE revoked_at IS NULL",
         )
-        .bind(token)
-        .fetch_optional(&self.pool)
+        .fetch_all(&self.pool)
         .await
         .map_err(map_sqlx)?;
-        Ok(row.map(|r| TokenRecord {
-            token: r.get("token"),
-            instance_id: r.get("instance_id"),
-            provider: r.get("provider"),
-            created_at: r.get("created_at"),
-            revoked_at: r.get("revoked_at"),
-        }))
+        for row in rows {
+            let stored: String = row.get("token");
+            let plain = self.open_token(&stored)?;
+            if bool::from(plain.as_bytes().ct_eq(token.as_bytes())) {
+                return Ok(Some(TokenRecord {
+                    token: plain,
+                    instance_id: row.get("instance_id"),
+                    provider: row.get("provider"),
+                    created_at: row.get("created_at"),
+                    revoked_at: row.get("revoked_at"),
+                }));
+            }
+        }
+        Ok(None)
     }
 
     async fn revoke_for_instance(&self, instance_id: &str) -> Result<(), StoreError> {
@@ -107,16 +153,28 @@ impl TokenStore for SqlxTokenStore {
         // job, called by the destroy path.  Already-revoked rows
         // return `false` (no-op) rather than an error so a duplicate
         // revoke is idempotent at the API boundary.
-        let r = sqlx::query(
-            "UPDATE proxy_tokens SET revoked_at = ? \
-             WHERE token = ? AND revoked_at IS NULL",
-        )
-        .bind(now_secs())
-        .bind(token)
-        .execute(&self.pool)
-        .await
-        .map_err(map_sqlx)?;
-        Ok(r.rows_affected() > 0)
+        let rows = sqlx::query("SELECT token FROM proxy_tokens WHERE revoked_at IS NULL")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+        for row in rows {
+            let stored: String = row.get("token");
+            let plain = self.open_token(&stored)?;
+            if !bool::from(plain.as_bytes().ct_eq(token.as_bytes())) {
+                continue;
+            }
+            let r = sqlx::query(
+                "UPDATE proxy_tokens SET revoked_at = ? \
+                 WHERE token = ? AND revoked_at IS NULL",
+            )
+            .bind(now_secs())
+            .bind(stored)
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+            return Ok(r.rows_affected() > 0);
+        }
+        Ok(false)
     }
 
     async fn lookup_by_instance(&self, instance_id: &str) -> Result<Option<String>, StoreError> {
@@ -148,7 +206,11 @@ impl TokenStore for SqlxTokenStore {
         .fetch_optional(&self.pool)
         .await
         .map_err(map_sqlx)?;
-        Ok(row.map(|r| r.get::<String, _>("token")))
+        row.map(|r| {
+            let stored: String = r.get("token");
+            self.open_token(&stored)
+        })
+        .transpose()
     }
 }
 
@@ -157,7 +219,26 @@ mod tests {
     use super::*;
     use crate::db::instances::SqlxInstanceStore;
     use crate::db::open_in_memory;
+    use crate::envelope::EnvelopeError;
     use crate::traits::{InstanceRow, InstanceStatus, InstanceStore};
+
+    #[derive(Debug)]
+    struct TestCipher;
+
+    impl EnvelopeCipher for TestCipher {
+        fn seal(&self, plaintext: &[u8]) -> Result<Vec<u8>, EnvelopeError> {
+            let mut out = b"sealed:".to_vec();
+            out.extend_from_slice(plaintext);
+            Ok(out)
+        }
+
+        fn open(&self, ciphertext: &[u8]) -> Result<Vec<u8>, EnvelopeError> {
+            ciphertext
+                .strip_prefix(b"sealed:")
+                .map(|s| s.to_vec())
+                .ok_or(EnvelopeError::Corrupt)
+        }
+    }
 
     async fn seed(pool: &SqlitePool, id: &str) {
         let store = SqlxInstanceStore::new(pool.clone());
@@ -313,5 +394,54 @@ mod tests {
         assert!(pt.starts_with("pt_"));
         assert!(it.starts_with("it_"));
         assert_ne!(pt, it);
+    }
+
+    #[tokio::test]
+    async fn sealed_store_does_not_persist_plaintext_tokens() {
+        let pool = open_in_memory().await.unwrap();
+        seed(&pool, "i1").await;
+        let store = SqlxTokenStore::sealed(pool.clone(), Arc::new(TestCipher));
+        let tok = store
+            .mint("i1", crate::instance::SHARED_PROVIDER)
+            .await
+            .unwrap();
+
+        let row = sqlx::query("SELECT token FROM proxy_tokens WHERE instance_id = 'i1'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let stored: String = row.get("token");
+        assert_ne!(stored, tok);
+        assert_eq!(stored, format!("sealed:{tok}"));
+
+        let resolved = store
+            .resolve(&tok)
+            .await
+            .unwrap()
+            .expect("sealed token resolves");
+        assert_eq!(resolved.token, tok);
+        assert_eq!(
+            store.lookup_by_instance("i1").await.unwrap(),
+            Some(tok.clone())
+        );
+
+        assert!(store.revoke_token(&tok).await.unwrap());
+        assert!(store.resolve(&tok).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn sealed_store_still_reads_legacy_plaintext_rows() {
+        let pool = open_in_memory().await.unwrap();
+        seed(&pool, "i1").await;
+        let legacy = SqlxTokenStore::new(pool.clone());
+        let tok = legacy.mint("i1", "openai").await.unwrap();
+
+        let sealed = SqlxTokenStore::sealed(pool, Arc::new(TestCipher));
+        let resolved = sealed
+            .resolve(&tok)
+            .await
+            .unwrap()
+            .expect("legacy plaintext token resolves");
+        assert_eq!(resolved.token, tok);
     }
 }

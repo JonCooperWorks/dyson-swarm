@@ -52,7 +52,8 @@ spa_scopes = ["profile", "email"]
 allowed_providers = ["openrouter"]
 allowed_models = ["*"]
 daily_token_budget = 1_000_000
-monthly_usd_budget = 100.0
+# USD pricing is not implemented yet; leave unset so spend gates rely on
+# token budgets. Setting monthly_usd_budget fails closed until pricing lands.
 rps_limit = 10
 
 # Optional custom OpenAI-compatible BYO upstreams. Enabled by default.

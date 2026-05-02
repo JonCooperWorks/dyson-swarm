@@ -18,7 +18,7 @@ use hyper_util::rt::TokioIo;
 use serde::Deserialize;
 use tokio::io::copy_bidirectional;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, Semaphore};
 use tracing::{debug, info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -27,6 +27,8 @@ use dyson_swarm_core::network_policy::NetworkPolicy;
 const DEFAULT_POLICY_PATH: &str = "/run/dyson-egress/policies.json";
 const DEFAULT_LISTEN: &str = "192.168.0.1:3128";
 const POLICY_RELOAD_INTERVAL: Duration = Duration::from_secs(30);
+const DEFAULT_MAX_CONNECTIONS: usize = 2048;
+const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 10;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 type ProxyBody = BoxBody<Bytes, BoxError>;
@@ -39,6 +41,15 @@ struct Args {
     listen: SocketAddr,
     #[arg(long, default_value = DEFAULT_POLICY_PATH)]
     policy: PathBuf,
+    #[arg(long, default_value_t = DEFAULT_MAX_CONNECTIONS)]
+    max_connections: usize,
+    #[arg(long, default_value_t = DEFAULT_CONNECT_TIMEOUT_SECS)]
+    connect_timeout_secs: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ProxyLimits {
+    connect_timeout: Duration,
 }
 
 #[tokio::main]
@@ -60,19 +71,41 @@ async fn main() -> Result<(), BoxError> {
     tokio::spawn(policy_reload_task(store.clone()));
 
     let listener = TcpListener::bind(args.listen).await?;
-    info!(listen = %args.listen, policy = %args.policy.display(), "dyson egress proxy listening");
-    serve(listener, store).await
+    let max_connections = args.max_connections.max(1);
+    let limits = ProxyLimits {
+        connect_timeout: Duration::from_secs(args.connect_timeout_secs.max(1)),
+    };
+    info!(
+        listen = %args.listen,
+        policy = %args.policy.display(),
+        max_connections,
+        connect_timeout_secs = args.connect_timeout_secs.max(1),
+        "dyson egress proxy listening"
+    );
+    serve(listener, store, max_connections, limits).await
 }
 
-async fn serve(listener: TcpListener, store: PolicyStore) -> Result<(), BoxError> {
+async fn serve(
+    listener: TcpListener,
+    store: PolicyStore,
+    max_connections: usize,
+    limits: ProxyLimits,
+) -> Result<(), BoxError> {
+    let permits = Arc::new(Semaphore::new(max_connections));
     loop {
         let (stream, peer) = listener.accept().await?;
+        let Ok(permit) = permits.clone().try_acquire_owned() else {
+            warn!(peer = %peer, max_connections, "proxy connection rejected: limit reached");
+            drop(stream);
+            continue;
+        };
         let store = store.clone();
         tokio::spawn(async move {
+            let _permit = permit;
             let peer_ip = peer.ip();
             let service = service_fn(move |req| {
                 let store = store.clone();
-                async move { Ok::<_, Infallible>(handle_request(req, peer_ip, store).await) }
+                async move { Ok::<_, Infallible>(handle_request(req, peer_ip, store, limits).await) }
             });
             let io = TokioIo::new(stream);
             if let Err(err) = http1::Builder::new()
@@ -137,15 +170,16 @@ async fn handle_request(
     req: Request<Incoming>,
     source_ip: IpAddr,
     store: PolicyStore,
+    limits: ProxyLimits,
 ) -> Response<ProxyBody> {
     if req.version() != hyper::Version::HTTP_11 {
         return text_response(StatusCode::BAD_REQUEST, "bad request");
     }
 
     if req.method() == Method::CONNECT {
-        handle_connect(req, source_ip, store).await
+        handle_connect(req, source_ip, store, limits).await
     } else {
-        handle_http(req, source_ip, store).await
+        handle_http(req, source_ip, store, limits).await
     }
 }
 
@@ -153,6 +187,7 @@ async fn handle_http(
     mut req: Request<Incoming>,
     source_ip: IpAddr,
     store: PolicyStore,
+    limits: ProxyLimits,
 ) -> Response<ProxyBody> {
     let dest = match Destination::from_absolute_uri(req.uri()) {
         Ok(dest) => dest,
@@ -174,7 +209,7 @@ async fn handle_http(
         }
     };
 
-    let stream = match TcpStream::connect(connect_addr).await {
+    let stream = match connect_with_timeout(connect_addr, limits).await {
         Ok(stream) => stream,
         Err(err) => {
             debug!(
@@ -225,6 +260,7 @@ async fn handle_connect(
     mut req: Request<Incoming>,
     source_ip: IpAddr,
     store: PolicyStore,
+    limits: ProxyLimits,
 ) -> Response<ProxyBody> {
     let dest = match Destination::from_connect_uri(req.uri()) {
         Ok(dest) => dest,
@@ -246,7 +282,7 @@ async fn handle_connect(
         }
     };
 
-    let upstream = match TcpStream::connect(connect_addr).await {
+    let upstream = match connect_with_timeout(connect_addr, limits).await {
         Ok(stream) => stream,
         Err(err) => {
             debug!(
@@ -275,6 +311,19 @@ async fn handle_connect(
     });
 
     empty_response(StatusCode::OK)
+}
+
+async fn connect_with_timeout(
+    addr: SocketAddrV4,
+    limits: ProxyLimits,
+) -> Result<TcpStream, std::io::Error> {
+    match tokio::time::timeout(limits.connect_timeout, TcpStream::connect(addr)).await {
+        Ok(result) => result,
+        Err(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "connect timeout",
+        )),
+    }
 }
 
 fn rewrite_to_origin_form(req: &mut Request<Incoming>, dest: &Destination) -> Result<(), String> {
@@ -949,7 +998,15 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let store = store_with_source("127.0.0.1", sandbox_policy);
         tokio::spawn(async move {
-            let _ = serve(listener, store).await;
+            let _ = serve(
+                listener,
+                store,
+                DEFAULT_MAX_CONNECTIONS,
+                ProxyLimits {
+                    connect_timeout: Duration::from_secs(DEFAULT_CONNECT_TIMEOUT_SECS),
+                },
+            )
+            .await;
         });
         addr
     }

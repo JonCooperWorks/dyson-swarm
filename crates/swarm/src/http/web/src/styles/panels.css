@@ -324,12 +324,15 @@
 }
 @media (max-width: 720px) {
   /* Hoist action buttons above the title block on mobile and keep
-     them pinned to the top of the scrolling detail pane. */
+     them pinned to the top of the scrolling detail pane.  When a
+     subpage (tasks / edit / artefacts) is open, lift it above the
+     employee card too — the subpage is what the user actually came
+     to see, the title block is just orientation. */
   .detail-header {
     display: contents;
   }
-  .detail-header .employee-card { order: -1; }
   .detail-header .detail-actions { order: -2; }
+  .detail-pane > .instance-subpage { order: -1; }
   .detail-actions {
     position: sticky;
     top: 0;

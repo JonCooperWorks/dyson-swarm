@@ -20,7 +20,6 @@ publish = false
 # a code review and a security/breakage check.
 age = { version = "0.10.1", default-features = false, features = ["armor"] }
 ammonia = "4"
-argon2 = "0.5.3"
 async-trait = "0.1.89"
 axum = { version = "0.7.9", default-features = false, features = ["http1", "json", "tokio", "matched-path"] }
 base64 = "0.22.1"
@@ -29,6 +28,7 @@ clap = { version = "4.6", default-features = false, features = ["derive", "std",
 futures = { version = "0.3.32", default-features = false, features = ["std"] }
 hex = { version = "0.4", default-features = false, features = ["std"] }
 hmac = { version = "0.12", default-features = false, features = ["std"] }
+http = "1.4.0"
 http-body-util = "0.1.3"
 hyper = { version = "1.9.0", default-features = false, features = ["client", "http1", "server"] }
 hyper-util = { version = "0.1.20", default-features = false, features = ["tokio"] }

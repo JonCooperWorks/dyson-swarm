@@ -736,8 +736,8 @@ pub trait ProviderAdapter: Send + Sync {
     fn upstream_base_url<'a>(&self, config: &'a ProviderConfig) -> &'a str;
     fn rewrite_auth(
         &self,
-        headers: &mut axum::http::HeaderMap,
-        url: &mut axum::http::Uri,
+        headers: &mut http::HeaderMap,
+        url: &mut http::Uri,
         real_key: &str,
     );
 }

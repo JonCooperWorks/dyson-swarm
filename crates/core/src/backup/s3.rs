@@ -134,7 +134,7 @@ impl BackupSink for S3BackupSink {
                 .put_object_stream_builder(&key)
                 .with_content_type("application/octet-stream")
                 .with_header(
-                    axum::http::HeaderName::from_static("x-amz-server-side-encryption"),
+                    http::HeaderName::from_static("x-amz-server-side-encryption"),
                     "AES256",
                 )
                 .map_err(map_s3)?

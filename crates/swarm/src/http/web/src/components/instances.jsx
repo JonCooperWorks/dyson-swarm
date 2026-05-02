@@ -1765,6 +1765,15 @@ function InstanceDetail({ id, onNew, view }) {
             open ↗
           </a>
           <a
+            className={`btn btn-ghost ${activeSection === 'overview' ? 'btn-active' : ''}`}
+            href={`#/i/${encodeURIComponent(id)}`}
+            aria-disabled={busy}
+            onClick={(e) => { if (busy) e.preventDefault(); }}
+            title="instance data, runtime, snapshots, network, tools, secrets, and instructions"
+          >
+            data
+          </a>
+          <a
             className={`btn btn-ghost ${activeSection === 'edit' ? 'btn-active' : ''}`}
             href={`#/i/${encodeURIComponent(id)}/edit`}
             aria-disabled={busy}

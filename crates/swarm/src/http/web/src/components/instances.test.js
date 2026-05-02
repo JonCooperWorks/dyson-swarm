@@ -84,6 +84,40 @@ describe('instance subpage rail routing', () => {
     expect(screen.getByText('Beta').closest('a')).toHaveAttribute('href', '#/i/b/tasks');
   });
 
+  test('offers a data tab back to the instance overview', () => {
+    const row = {
+      id: 'a',
+      name: 'Alpha',
+      status: 'live',
+      task: 'Run useful work.',
+      created_at: 0,
+      last_active_at: 0,
+      last_probe_at: null,
+      open_url: 'https://a.example.test',
+      network_policy: { kind: 'nolocalnet', entries: [] },
+    };
+    setInstances([row]);
+    const client = {
+      getInstance: () => Promise.resolve(row),
+      listInstances: () => Promise.resolve([row]),
+      listWebhooks: () => Promise.resolve([]),
+      listShares: () => Promise.resolve([]),
+      listSnapshotsForInstance: () => Promise.resolve([]),
+      listSecrets: () => Promise.resolve([]),
+      listMcpServers: () => Promise.resolve([]),
+    };
+
+    render(
+      React.createElement(ApiProvider, { client, auth: { config: { cube_profiles: [] } } },
+        React.createElement(InstancesView, { view: { name: 'instance', id: 'a' } }),
+      ),
+    );
+
+    const data = screen.getByRole('link', { name: 'data' });
+    expect(data).toHaveAttribute('href', '#/i/a');
+    expect(data).toHaveClass('btn-active');
+  });
+
   test('does not highlight artefacts solely because shared links exist', async () => {
     const row = {
       id: 'a',

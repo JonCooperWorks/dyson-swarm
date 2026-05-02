@@ -16,6 +16,8 @@ stores encrypted state, brokers LLM and MCP traffic, and serves the web UI.
 | [Architecture Overview](architecture-overview.md) | Workspace layout, startup wiring, major services, request/data flow |
 | [Configuration](configuration.md) | `config.toml`, provider config, OIDC, OpenRouter provisioning, backups, cube profiles |
 | [Auth and Keys](auth-and-keys.md) | OIDC, user API keys, proxy tokens, admin-role gate, host-side break-glass mint |
+| [Artefacts](artefacts.md) | Cache layout, ingest path, cold reads, sweep, owner scoping, SPA artefact surfaces |
+| [Shares](shares.md) | Public share host, token verification, cache-first reads, rendering, access audit |
 | [LLM Proxy](llm-proxy.md) | `/llm/*` request path, policy enforcement, BYOK, OpenRouter lazy mint, audit |
 | [MCP and OAuth](mcp-and-oauth.md) | MCP server storage, proxying, OAuth start/callback, path-scoped discovery, operator expectations |
 | [Network Policies](network-policies.md) | `nolocalnet`, `open`, `airgap`, `allowlist`, `denylist`, egress proxy behaviour |

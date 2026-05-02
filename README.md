@@ -29,6 +29,8 @@ Swarm now has a dedicated docs tree, mirroring the structure used in
 - [Architecture Overview](docs/architecture-overview.md)
 - [Configuration](docs/configuration.md)
 - [Auth and Keys](docs/auth-and-keys.md)
+- [Artefacts](docs/artefacts.md)
+- [Shares](docs/shares.md)
 - [LLM Proxy](docs/llm-proxy.md)
 - [MCP and OAuth](docs/mcp-and-oauth.md)
 - [Network Policies](docs/network-policies.md)

@@ -31,8 +31,8 @@ const initial = {
     byInstance: {},
   },
   // Per-instance share roster — same shape as webhooks.  Backs the
-  // "shared" button's count badge in the detail header and the
-  // SharesPage roster.
+  // all-artefacts button's shared count, artefact row highlights, and
+  // the shared-links panel.
   shares: {
     byInstance: {},
   },

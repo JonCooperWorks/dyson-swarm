@@ -23,6 +23,9 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkBreaks from 'remark-breaks';
 import { useApi } from '../hooks/useApi.jsx';
+import { useAppState } from '../hooks/useAppState.js';
+import { setSharesFor } from '../store/app.js';
+import { SharesPanel } from './shares.jsx';
 
 const QUICK_TTL = '7d';
 const PAGE_SIZE = 25;
@@ -60,9 +63,10 @@ export function InstanceArtefactsPage({ instanceId }) {
   return (
     <ArtefactsView
       backHref={`#/i/${encodeURIComponent(instanceId)}`}
-      subtitle="Cached artefacts for this instance.  Reads come from swarm first; cube is only hit on cache miss.  Survives reset."
+      subtitle="Cached artefacts for this instance, plus every anonymous link currently shared from them.  Reads come from swarm first; cube is only hit on cache miss."
       load={load}
       onSweep={sweep}
+      instanceId={instanceId}
     />
   );
 }
@@ -72,8 +76,11 @@ export function InstanceArtefactsPage({ instanceId }) {
 /// variant.  Pagination is client-side over the loaded rows; the
 /// underlying list endpoints already cap at 1000 (cross-instance) /
 /// per-instance listings are short by construction.
-function ArtefactsView({ backHref, subtitle, load, onSweep, showInstance }) {
+function ArtefactsView({ backHref, subtitle, load, onSweep, showInstance, instanceId }) {
   const { client } = useApi();
+  const shareRows = useAppState(s => (
+    instanceId ? (s.shares.byInstance[instanceId]?.rows || null) : null
+  ));
   const [rows, setRows] = React.useState(null);
   const [err, setErr] = React.useState(null);
   const [busy, setBusy] = React.useState(false);
@@ -112,7 +119,7 @@ function ArtefactsView({ backHref, subtitle, load, onSweep, showInstance }) {
     <main className="page page-edit page-artefacts">
       <header className="page-header">
         <a className="btn btn-ghost btn-sm" href={backHref}>← back</a>
-        <h1 className="page-title">artefacts</h1>
+        <h1 className="page-title">all artefacts</h1>
         <p className="page-sub muted">{subtitle}</p>
       </header>
 
@@ -131,7 +138,9 @@ function ArtefactsView({ backHref, subtitle, load, onSweep, showInstance }) {
         refresh={refresh}
         showInstance={showInstance}
         sweepClick={sweepClick}
+        shareRows={shareRows}
       />
+      {instanceId ? <SharesPanel instanceId={instanceId}/> : null}
     </main>
   );
 }
@@ -145,23 +154,16 @@ function artefactHref(instanceId, artefactId) {
 
 function ArtefactTable({
   rows, page, setPage, client, busy, setBusy, setErr, setMinted, refresh,
-  showInstance, sweepClick,
+  showInstance, sweepClick, shareRows,
 }) {
   if (rows === null) return <p className="muted small">loading…</p>;
-  if (rows.length === 0) {
-    return (
-      <p className="muted small">
-        no cached artefacts yet — they appear here as soon as one is read through swarm
-        (e.g. via an existing share link or via <em>sweep</em> on a per-instance view).
-      </p>
-    );
-  }
 
   const total = rows.length;
   const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const safePage = Math.min(Math.max(1, page), pageCount);
   const start = (safePage - 1) * PAGE_SIZE;
   const visible = rows.slice(start, start + PAGE_SIZE);
+  const activeShares = activeSharesByArtefact(shareRows);
 
   const remove = async (row) => {
     if (!confirm(`Remove cached copy of "${row.title}"?  This drops the swarm row + on-disk body; the live cube still has it (until reset).`)) return;
@@ -185,6 +187,10 @@ function ArtefactTable({
         label: null,
       });
       setMinted(m);
+      try {
+        const shares = await client.listShares(row.instance_id);
+        setSharesFor(row.instance_id, shares || []);
+      } catch { /* shared-links panel refresh can recover */ }
     } catch (e) {
       setErr(e?.detail || e?.message || 'share mint failed');
     } finally {
@@ -208,56 +214,74 @@ function ArtefactTable({
           <button className="btn btn-ghost btn-sm" onClick={refresh} title="refresh">↻</button>
         </div>
       </div>
-      <table className="rows">
-        <thead><tr>
-          <th>title</th>
-          <th>kind</th>
-          {showInstance ? <th>instance</th> : null}
-          <th>chat</th>
-          <th>size</th>
-          <th>cached</th>
-          <th></th>
-        </tr></thead>
-        <tbody>
-          {visible.map(r => (
-            <tr key={`${r.instance_id}/${r.id}`}>
-              <td data-label="title">
-                <span title={r.id}>{r.title || r.id}</span>
-              </td>
-              <td data-label="kind"><span className="badge badge-faint">{r.kind}</span></td>
-              {showInstance ? (
-                <td data-label="instance">
-                  <a className="mono-sm" href={`#/i/${encodeURIComponent(r.instance_id)}/artefacts`}>
-                    {shortId(r.instance_id)}
-                  </a>
+      {rows.length === 0 ? (
+        <p className="muted small">
+          no cached artefacts yet — sweep a chat into the swarm cache, or let
+          them appear as artefacts are read through swarm.
+        </p>
+      ) : (
+        <table className="rows">
+          <thead><tr>
+            <th>title</th>
+            <th>kind</th>
+            {showInstance ? <th>instance</th> : null}
+            <th>chat</th>
+            <th>size</th>
+            <th>cached</th>
+            <th></th>
+          </tr></thead>
+          <tbody>
+            {visible.map(r => (
+              <tr
+                key={`${r.instance_id}/${r.id}`}
+                className={activeShares.get(r.id) ? 'artefact-row-shared' : undefined}
+              >
+                <td data-label="title">
+                  <span title={r.id}>{r.title || r.id}</span>
+                  {activeShares.get(r.id) ? (
+                    <span
+                      className="badge badge-info artefact-shared-badge"
+                      title="active anonymous shared links"
+                    >
+                      shared {activeShares.get(r.id)}
+                    </span>
+                  ) : null}
                 </td>
-              ) : null}
-              <td data-label="chat" className="mono-sm muted">{shortId(r.chat_id)}</td>
-              <td data-label="size" className="muted small">{fmtBytes(r.bytes)}</td>
-              <td data-label="cached" className="muted small">{fmtTime(r.cached_at)}</td>
-              <td className="row-actions">
-                <a
-                  className="btn btn-ghost btn-sm"
-                  href={artefactHref(r.instance_id, r.id)}
-                  title="open the cached body in the reader"
-                >open</a>
-                <button
-                  className="btn btn-ghost btn-sm"
-                  onClick={() => share(r)}
-                  disabled={busy}
-                  title={`mint a ${QUICK_TTL} anonymous share link`}
-                >share</button>
-                <button
-                  className="btn btn-ghost btn-sm"
-                  onClick={() => remove(r)}
-                  disabled={busy}
-                  title="remove the swarm cache copy"
-                >drop</button>
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+                <td data-label="kind"><span className="badge badge-faint">{r.kind}</span></td>
+                {showInstance ? (
+                  <td data-label="instance">
+                    <a className="mono-sm" href={`#/i/${encodeURIComponent(r.instance_id)}/artefacts`}>
+                      {shortId(r.instance_id)}
+                    </a>
+                  </td>
+                ) : null}
+                <td data-label="chat" className="mono-sm muted">{shortId(r.chat_id)}</td>
+                <td data-label="size" className="muted small">{fmtBytes(r.bytes)}</td>
+                <td data-label="cached" className="muted small">{fmtTime(r.cached_at)}</td>
+                <td className="row-actions">
+                  <a
+                    className="btn btn-ghost btn-sm"
+                    href={artefactHref(r.instance_id, r.id)}
+                    title="open the cached body in the reader"
+                  >open</a>
+                  <button
+                    className="btn btn-ghost btn-sm"
+                    onClick={() => share(r)}
+                    disabled={busy}
+                    title={`mint a ${QUICK_TTL} anonymous share link`}
+                  >share</button>
+                  <button
+                    className="btn btn-ghost btn-sm"
+                    onClick={() => remove(r)}
+                    disabled={busy}
+                    title="remove the swarm cache copy"
+                  >drop</button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
       {pageCount > 1 ? (
         <Pagination
           page={safePage}
@@ -270,6 +294,15 @@ function ArtefactTable({
       ) : null}
     </section>
   );
+}
+
+export function activeSharesByArtefact(rows) {
+  const out = new Map();
+  for (const row of rows || []) {
+    if (!row || row.revoked_at || !row.active) continue;
+    out.set(row.artefact_id, (out.get(row.artefact_id) || 0) + 1);
+  }
+  return out;
 }
 
 function Pagination({ page, pageCount, total, start, shown, onPage }) {
@@ -556,7 +589,7 @@ function ShareMenu({ busy, onMint }) {
           <button
             className="btn btn-ghost btn-sm"
             onClick={() => pick('never')}
-            title="never expires (revoke manually from the shares panel)"
+            title="never expires (revoke manually from the shared links panel)"
           >never</button>
         </div>
       ) : null}
@@ -687,8 +720,8 @@ function MintedBanner({ minted, onDismiss }) {
   return (
     <div className="banner banner-info">
       <div>
-        share minted — capability is in the URL, copy it now (revoke from
-        the per-instance shares panel anytime):
+        share minted — capability is in the URL, copy it now.  The shared
+        links panel below can revoke, reissue, copy, and audit it anytime:
       </div>
       <code className="mono-sm" style={{ display: 'block', marginTop: 4, wordBreak: 'break-all' }}>
         {minted.url}

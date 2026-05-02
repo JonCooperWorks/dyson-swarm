@@ -1,20 +1,20 @@
-/* swarm — Shares page (anonymous artefact links).
+/* swarm — Shared artefact links.
  *
- * Reachable from the instance detail header's `shared <badge>`
- * button:
+ * The lifecycle controls live in <SharesPanel> so the artefacts screen
+ * can carry share status, copy, revoke, reissue, audit, rotate, and
+ * manual minting without bouncing the operator to a second page.
  *
- *   #/i/<id>/shares                                         → SharesPage
+ * Legacy route:
+ *   #/i/<id>/shares                                         -> SharesPage
  *
- * Mirrors the shape of TasksListPage (page-edit width, page-form
- * layout, single panel block, one row per share).  Capability lives
- * in the URL itself (per-user-signed HMAC); the server reconstructs
- * it on demand for active rows so a copy-link affordance can live
- * alongside revoke + reissue.
+ * Capability lives in the URL itself (per-user-signed HMAC); the
+ * server reconstructs it on demand for active rows so a copy-link
+ * affordance can live alongside revoke + reissue.
  *
  * Deep-links from the dyson SPA's "share…" affordance — sandboxes
  * carry a same-origin `/_swarm/share-mint` escape route now, so the
- * primary mint flow doesn't need to bounce here.  This page stays
- * the source of truth for an existing share's audit + lifecycle.
+ * primary mint flow doesn't need to bounce here.  The parser below is
+ * kept so links that landed in someone's history still work.
  */
 
 import React from 'react';
@@ -22,7 +22,7 @@ import { useApi } from '../hooks/useApi.jsx';
 import { useAppState } from '../hooks/useAppState.js';
 import { setSharesFor, removeShare } from '../store/app.js';
 
-const TTL_OPTIONS = [
+export const TTL_OPTIONS = [
   { value: '1d', label: '1 day' },
   { value: '7d', label: '7 days' },
   { value: '30d', label: '30 days' },
@@ -30,6 +30,23 @@ const TTL_OPTIONS = [
 ];
 
 export function SharesPage({ instanceId }) {
+  const backHref = `#/i/${encodeURIComponent(instanceId)}`;
+  return (
+    <main className="page page-edit page-artefacts">
+      <header className="page-header">
+        <a className="btn btn-ghost btn-sm" href={backHref}>← back</a>
+        <h1 className="page-title">all artefacts</h1>
+        <p className="page-sub muted">
+          Artefact sharing now lives with the artefacts list, so cached outputs
+          and active public links can be managed in one pass.
+        </p>
+      </header>
+      <SharesPanel instanceId={instanceId}/>
+    </main>
+  );
+}
+
+export function SharesPanel({ instanceId }) {
   const { client } = useApi();
   const slot = useAppState(s => s.shares.byInstance[instanceId]);
   const rows = slot?.rows || null;
@@ -38,7 +55,6 @@ export function SharesPage({ instanceId }) {
   const [busy, setBusy] = React.useState(false);
   const [mintOpen, setMintOpen] = React.useState(false);
   const [minted, setMinted] = React.useState(null);
-  const backHref = `#/i/${encodeURIComponent(instanceId)}`;
 
   // Hash-fragment params for deep-link mints from the dyson SPA's
   // legacy "share…" button: `#/i/<id>/shares?share_artefact=&share_chat=`.
@@ -78,12 +94,6 @@ export function SharesPage({ instanceId }) {
   }, [client, instanceId]);
 
   React.useEffect(() => { refresh(); }, [refresh]);
-
-  React.useEffect(() => {
-    const onKey = (e) => { if (e.key === 'Escape') window.location.hash = backHref; };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [backHref]);
 
   const revoke = async (jti) => {
     if (!confirm(`Revoke share ${jti.slice(0, 8)}…?  The URL stops working immediately.`)) return;
@@ -127,22 +137,17 @@ export function SharesPage({ instanceId }) {
   };
 
   return (
-    <main className="page page-edit">
-      <header className="page-header">
-        <a className="btn btn-ghost btn-sm" href={backHref}>← back</a>
-        <h1 className="page-title">shared</h1>
-        <p className="page-sub muted">
-          Anonymous links for individual artefacts.  Each URL is the capability:
-          per-user HMAC signature in the URL, server-side revocation list, expiry
-          enforced at fetch.  Rotate the signing key to invalidate every share at once.
-        </p>
-      </header>
-
+    <>
       {err ? <div className="error">{err}</div> : null}
 
       <section className="panel">
         <div className="panel-header">
-          <div className="panel-title">shares</div>
+          <div>
+            <div className="panel-title">shared links</div>
+            <div className="muted small">
+              Copy, revoke, reissue, audit, or mint anonymous artefact links here.
+            </div>
+          </div>
           <div className="panel-actions">
             <button
               className="btn btn-ghost btn-sm"
@@ -174,8 +179,8 @@ export function SharesPage({ instanceId }) {
           <p className="muted small">loading…</p>
         ) : rows.length === 0 ? (
           <p className="muted small">
-            no shares yet — click <em>+ new</em> to mint a link, or use the <em>share…</em>
-            button on an artefact inside the agent.
+            no shared links yet — click <em>+ new</em> to mint one, or use
+            an artefact row's share action above.
           </p>
         ) : (
           <table className="rows">
@@ -237,7 +242,7 @@ export function SharesPage({ instanceId }) {
           onDismiss={() => setMinted(null)}
         />
       ) : null}
-    </main>
+    </>
   );
 }
 
@@ -444,7 +449,7 @@ function MintedShareBanner({ minted, onDismiss }) {
         {minted.url}
       </code>
       <div className="muted small" style={{ marginTop: 6 }}>
-        expires {fmtTime(minted.expires_at)} · revoke anytime from this panel.
+        expires {fmtTime(minted.expires_at)} · revoke anytime from shared links.
       </div>
       <div style={{ marginTop: 10, display: 'flex', gap: 8 }}>
         <button className="btn btn-sm btn-primary" onClick={copy}>{copied ? 'copied' : 'copy link'}</button>

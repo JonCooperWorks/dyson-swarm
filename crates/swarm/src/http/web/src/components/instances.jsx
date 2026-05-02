@@ -1554,8 +1554,8 @@ function InstanceDetail({ id, onNew }) {
     if (!slot) return null;
     return slot.rows.filter(r => r.enabled).length;
   });
-  // Active share count for the "shared" button badge — same shape
-  // as the tasks badge.  Active = not revoked AND not expired.
+  // Active share count for the all-artefacts button badge — same
+  // shape as the tasks badge.  Active = not revoked AND not expired.
   const activeShareCount = useAppState(s => {
     const slot = id ? s.shares.byInstance[id] : null;
     if (!slot) return null;
@@ -1590,7 +1590,7 @@ function InstanceDetail({ id, onNew }) {
     return () => { cancelled = true; };
   }, [client, id]);
 
-  // Shares list — fed into the "shared" button's count badge.  Same
+  // Shares list — fed into the all-artefacts button's count badge.  Same
   // pattern as webhooks above.
   React.useEffect(() => {
     if (!id) return;
@@ -1751,24 +1751,15 @@ function InstanceDetail({ id, onNew }) {
               : null}
           </a>
           <a
-            className="btn btn-ghost"
+            className={`btn btn-ghost ${activeShareCount > 0 ? 'btn-shared-active' : ''}`}
             href={`#/i/${encodeURIComponent(id)}/artefacts`}
             aria-disabled={busy}
             onClick={(e) => { if (busy) e.preventDefault(); }}
-            title="artefacts cached on swarm — survive cube reset"
+            title="all artefacts cached on swarm, with active shared links highlighted"
           >
-            artefacts
-          </a>
-          <a
-            className="btn btn-ghost"
-            href={`#/i/${encodeURIComponent(id)}/shares`}
-            aria-disabled={busy}
-            onClick={(e) => { if (busy) e.preventDefault(); }}
-            title="anonymous artefact share links — copy, revoke, audit"
-          >
-            shared
+            all artefacts
             {activeShareCount > 0
-              ? <span className="btn-count-badge" aria-label={`${activeShareCount} active`}>{activeShareCount}</span>
+              ? <span className="btn-count-badge" aria-label={`${activeShareCount} active shared`}>{activeShareCount}</span>
               : null}
           </a>
           <button

@@ -11,6 +11,7 @@ import '@testing-library/jest-dom/vitest';
 
 import {
   ArtefactBody,
+  activeSharesByArtefact,
   contentTypeBase,
   isMarkdownArtefact,
 } from './artefacts.jsx';
@@ -38,6 +39,22 @@ describe('artefact markdown detection', () => {
       title: 'payload.json',
       text: '{"heading":"# not markdown"}',
     })).toBe(false);
+  });
+});
+
+describe('activeSharesByArtefact', () => {
+  test('counts only live shared links per artefact', () => {
+    const counts = activeSharesByArtefact([
+      { artefact_id: 'a1', active: true, revoked_at: null },
+      { artefact_id: 'a1', active: true, revoked_at: null },
+      { artefact_id: 'a1', active: false, revoked_at: null },
+      { artefact_id: 'a2', active: true, revoked_at: 123 },
+      { artefact_id: 'a3', active: true, revoked_at: null },
+    ]);
+
+    expect(counts.get('a1')).toBe(2);
+    expect(counts.has('a2')).toBe(false);
+    expect(counts.get('a3')).toBe(1);
   });
 });
 

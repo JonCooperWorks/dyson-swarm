@@ -526,6 +526,14 @@
 }
 .btn-danger:hover { background: color-mix(in srgb, var(--danger) 15%, transparent); }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-shared-active {
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  color: var(--fg);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+.btn-shared-active:hover {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
 
 /* ── Modal ───────────────────────────────────────────────────── */
 
@@ -1212,6 +1220,13 @@
 .row-actions { text-align: right; }
 .row-actions .btn { margin-left: 4px; }
 .mono-sm { font-family: var(--mono); font-size: 11px; }
+.artefact-row-shared td {
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
+}
+.artefact-shared-badge {
+  margin-left: 8px;
+  vertical-align: middle;
+}
 
 /* Mobile: stack `.rows` into one card per row.  Each <td> becomes a
    labelled line; the label comes from `data-label` on the td (added

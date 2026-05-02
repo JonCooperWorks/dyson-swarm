@@ -6,7 +6,7 @@
  */
 import { describe, expect, test, afterEach, vi } from 'vitest';
 import React from 'react';
-import { render, screen, cleanup, fireEvent } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 
 import {
@@ -127,6 +127,56 @@ describe('ArtefactTable pagination', () => {
 
     expect(screen.getByText('shared 2')).toBeInTheDocument();
     expect(screen.getByText('dyson.png').closest('tr')).toHaveClass('artefact-row-shared');
+  });
+
+  test('lets row sharing choose an expiry before minting', async () => {
+    const client = {
+      mintShare: vi.fn().mockResolvedValue({
+        url: 'https://share.example.test/a',
+        expires_at: 123,
+      }),
+      listShares: vi.fn().mockResolvedValue([]),
+    };
+    const setMinted = vi.fn();
+
+    render(
+      <ArtefactTable
+        rows={[{
+          id: 'art-1',
+          instance_id: 'inst-a',
+          chat_id: 'c-0001',
+          kind: 'other',
+          title: 'report.md',
+          bytes: 1024,
+          cached_at: 1000,
+        }]}
+        page={1}
+        client={client}
+        busy={false}
+        setBusy={() => {}}
+        setErr={() => {}}
+        setMinted={setMinted}
+        refresh={() => {}}
+        showInstance={false}
+        sweepClick={null}
+        shareRows={[]}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /share/i }));
+    fireEvent.click(screen.getByRole('button', { name: '30 days' }));
+
+    await waitFor(() => {
+      expect(client.mintShare).toHaveBeenCalledWith('inst-a', 'art-1', {
+        chat_id: 'c-0001',
+        ttl: '30d',
+        label: null,
+      });
+    });
+    expect(setMinted).toHaveBeenCalledWith({
+      url: 'https://share.example.test/a',
+      expires_at: 123,
+    });
   });
 });
 

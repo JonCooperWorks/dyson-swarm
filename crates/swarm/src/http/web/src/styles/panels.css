@@ -50,10 +50,29 @@
 }
 .topbar-nav a:hover { background: var(--bg-2); color: var(--fg); }
 .topbar-nav a.active { color: var(--fg); background: var(--bg-2); }
-.topbar-actions { display: flex; gap: 8px; flex-shrink: 0; }
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.topbar-signout {
+  margin: 0;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--fg-muted);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+  cursor: pointer;
+}
+.topbar-signout:hover { background: var(--bg-2); color: var(--fg); }
 @media (max-width: 480px) {
   .topbar { padding: 6px 10px; gap: 8px; }
   .topbar-nav a { padding: 4px 6px; font-size: 12px; }
+  .topbar-signout { padding: 4px 6px; font-size: 12px; }
 }
 
 /* ── Admin view ────────────────────────────────────────────── */
@@ -1247,6 +1266,29 @@
   vertical-align: middle;
   white-space: nowrap;
 }
+.share-menu {
+  position: relative;
+  display: inline-block;
+}
+.share-menu-popover {
+  position: absolute;
+  right: 0;
+  top: 100%;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  min-width: 132px;
+  margin-top: 4px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-1);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.38);
+}
+.share-menu-popover .btn {
+  margin: 0;
+  text-align: left;
+}
 /* Mobile: stack `.rows` into one card per row.  Each <td> becomes a
    labelled line; the label comes from `data-label` on the td (added
    per-component) or is omitted for unlabelled cells (e.g. action
@@ -1313,6 +1355,8 @@
   .rows td.row-actions { text-align: left; }
   .rows td.row-actions .btn { margin-left: 0; margin-right: 4px; }
   .artefact-rows td.row-actions .btn { margin: 0; }
+  .artefact-rows .share-menu { flex: 0 0 auto; }
+  .artefact-rows .share-menu-popover { left: 0; right: auto; }
   .artefact-rows td[data-label="cached"] { border-bottom: none; }
   /* Some long inline styles on tasks.jsx audit rows force max-width
      + nowrap — undo those on mobile so the user-agent string wraps

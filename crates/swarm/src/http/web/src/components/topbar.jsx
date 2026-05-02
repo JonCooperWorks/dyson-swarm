@@ -39,7 +39,7 @@ export function TopBar({ view }) {
       </nav>
       <div className="topbar-actions">
         {auth.mode === 'oidc' ? (
-          <button className="btn btn-ghost btn-sm" onClick={auth.logout}>sign out</button>
+          <button type="button" className="topbar-signout" onClick={auth.logout}>sign out</button>
         ) : null}
       </div>
     </header>

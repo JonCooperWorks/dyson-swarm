@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from 'vitest';
+import { afterEach, describe, expect, test, vi } from 'vitest';
 import React from 'react';
 import { cleanup, render, screen } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
@@ -19,5 +19,17 @@ describe('TopBar', () => {
     expect(screen.getByRole('link', { name: 'artefacts' })).toHaveAttribute('href', '#/artefacts');
     const retiredLabel = ['all', 'artefacts'].join(' ');
     expect(screen.queryByRole('link', { name: retiredLabel })).toBeNull();
+  });
+
+  test('renders sign out as a topbar nav-aligned control', () => {
+    const logout = vi.fn();
+    render(
+      <ApiProvider client={{}} auth={{ mode: 'oidc', logout }}>
+        <TopBar view={{ name: 'instances' }}/>
+      </ApiProvider>,
+    );
+
+    const button = screen.getByRole('button', { name: 'sign out' });
+    expect(button).toHaveClass('topbar-signout');
   });
 });

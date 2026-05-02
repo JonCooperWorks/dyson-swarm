@@ -14,7 +14,7 @@
  * Bytes live on swarm under [backup].local_cache_dir/artefacts/.
  * Each row exposes:
  *   - "open"  — authenticated fetch + blob URL window.open
- *   - "share" — quick-mint a 7d anonymous share link
+ *   - "share" — mint an anonymous share link with an expiry choice
  *   - "drop"  — remove the swarm cache copy
  */
 
@@ -25,11 +25,10 @@ import remarkBreaks from 'remark-breaks';
 import { useApi } from '../hooks/useApi.jsx';
 import { useAppState } from '../hooks/useAppState.js';
 import { setSharesFor } from '../store/app.js';
-import { SharesPanel } from './shares.jsx';
+import { SharesPanel, TTL_OPTIONS } from './shares.jsx';
 import { EmptyState, Pager } from './ui.jsx';
 import { fmtBytes, fmtTime, shortId } from '../utils/format.js';
 
-const QUICK_TTL = '7d';
 const PAGE_SIZE = 25;
 const MD_PLUGINS = [remarkGfm, remarkBreaks];
 const MARKDOWNISH_RE = /(^|\n)\s{0,3}(#{1,6}\s+\S|[-*+]\s+\[[ xX]\]\s+\S|[-*+]\s+\S|\d+\.\s+\S|>\s+\S|```|---+\s*$|\|.+\|)|\[[^\]]+\]\([^)]+\)|`[^`\n]+`|\*\*[^*\n]+\*\*/;
@@ -190,12 +189,12 @@ export function ArtefactTable({
     }
   };
 
-  const share = async (row) => {
+  const share = async (row, ttl) => {
     setBusy(true); setErr(null);
     try {
       const m = await client.mintShare(row.instance_id, row.id, {
         chat_id: row.chat_id,
-        ttl: QUICK_TTL,
+        ttl,
         label: null,
       });
       setMinted(m);
@@ -276,12 +275,10 @@ export function ArtefactTable({
                     href={artefactHref(r.instance_id, r.id)}
                     title="open the cached body in the reader"
                   >open</a>
-                  <button
-                    className="btn btn-ghost btn-sm"
-                    onClick={() => share(r)}
-                    disabled={busy}
-                    title={`mint a ${QUICK_TTL} anonymous share link`}
-                  >share</button>
+                  <ShareMenu
+                    busy={busy}
+                    onMint={(ttl) => share(r, ttl)}
+                  />
                   <button
                     className="btn btn-ghost btn-sm"
                     onClick={() => remove(r)}
@@ -551,8 +548,9 @@ function ShareMenu({ busy, onMint }) {
   }, [open]);
   const pick = (ttl) => { setOpen(false); onMint(ttl); };
   return (
-    <span ref={ref} style={{ position: 'relative', display: 'inline-block' }}>
+    <span ref={ref} className="share-menu">
       <button
+        type="button"
         className="btn btn-ghost btn-sm"
         onClick={() => setOpen(o => !o)}
         disabled={busy}
@@ -561,21 +559,18 @@ function ShareMenu({ busy, onMint }) {
         {busy ? 'minting…' : 'share…'}
       </button>
       {open ? (
-        <div role="menu" style={{
-          position: 'absolute', left: 0, top: '100%', marginTop: 4,
-          background: 'var(--panel, #1e1e1e)', border: '1px solid var(--line, #333)',
-          borderRadius: 6, padding: 4, zIndex: 20, display: 'flex',
-          flexDirection: 'column', minWidth: 110,
-          boxShadow: '0 4px 12px rgba(0,0,0,0.4)',
-        }}>
-          <button className="btn btn-ghost btn-sm" onClick={() => pick('1d')}>1 day</button>
-          <button className="btn btn-ghost btn-sm" onClick={() => pick('7d')}>7 days</button>
-          <button className="btn btn-ghost btn-sm" onClick={() => pick('30d')}>30 days</button>
-          <button
-            className="btn btn-ghost btn-sm"
-            onClick={() => pick('never')}
-            title="never expires (revoke manually from the shared links panel)"
-          >never</button>
+        <div className="share-menu-popover" role="menu">
+          {TTL_OPTIONS.map(opt => (
+            <button
+              type="button"
+              key={opt.value}
+              className="btn btn-ghost btn-sm"
+              onClick={() => pick(opt.value)}
+              title={opt.value === 'never' ? 'never expires (revoke manually from the shared links panel)' : undefined}
+            >
+              {opt.label}
+            </button>
+          ))}
         </div>
       ) : null}
     </span>

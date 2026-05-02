@@ -18,6 +18,7 @@ pub struct ShareRow {
     pub instance_id: String,
     pub chat_id: String,
     pub artefact_id: String,
+    pub artefact_title: Option<String>,
     pub created_by: String,
     pub created_at: i64,
     pub expires_at: i64,
@@ -68,6 +69,7 @@ pub async fn mint(pool: &SqlitePool, spec: ShareSpec<'_>) -> Result<ShareRow, St
         instance_id: spec.instance_id.to_owned(),
         chat_id: spec.chat_id.to_owned(),
         artefact_id: spec.artefact_id.to_owned(),
+        artefact_title: None,
         created_by: spec.created_by.to_owned(),
         created_at: now,
         expires_at: spec.expires_at,
@@ -85,7 +87,8 @@ pub async fn mint(pool: &SqlitePool, spec: ShareSpec<'_>) -> Result<ShareRow, St
 pub async fn find_by_jti(pool: &SqlitePool, jti: &str) -> Result<Option<ShareRow>, StoreError> {
     let row = sqlx::query(
         "SELECT jti, instance_id, chat_id, artefact_id, created_by, \
-                created_at, expires_at, revoked_at, label \
+                created_at, expires_at, revoked_at, label, \
+                NULL AS artefact_title \
          FROM artefact_shares WHERE jti = ?",
     )
     .bind(jti)
@@ -105,11 +108,17 @@ pub async fn list_for_instance(
     instance_id: &str,
 ) -> Result<Vec<ShareRow>, StoreError> {
     let rows = sqlx::query(
-        "SELECT jti, instance_id, chat_id, artefact_id, created_by, \
-                created_at, expires_at, revoked_at, label \
-         FROM artefact_shares \
-         WHERE instance_id = ? AND created_by = ? \
-         ORDER BY created_at DESC",
+        "SELECT s.jti, s.instance_id, s.chat_id, s.artefact_id, s.created_by, \
+                s.created_at, s.expires_at, s.revoked_at, s.label, \
+                ac.title AS artefact_title \
+         FROM artefact_shares s \
+         LEFT JOIN artefact_cache ac \
+           ON ac.owner_id = s.created_by \
+          AND ac.instance_id = s.instance_id \
+          AND ac.chat_id = s.chat_id \
+          AND ac.artefact_id = s.artefact_id \
+         WHERE s.instance_id = ? AND s.created_by = ? \
+         ORDER BY s.created_at DESC",
     )
     .bind(instance_id)
     .bind(user_id)
@@ -218,6 +227,7 @@ fn row_to_share(r: sqlx::sqlite::SqliteRow) -> Result<ShareRow, StoreError> {
         instance_id: r.try_get("instance_id").map_err(map_sqlx)?,
         chat_id: r.try_get("chat_id").map_err(map_sqlx)?,
         artefact_id: r.try_get("artefact_id").map_err(map_sqlx)?,
+        artefact_title: r.try_get("artefact_title").map_err(map_sqlx)?,
         created_by: r.try_get("created_by").map_err(map_sqlx)?,
         created_at: r.try_get("created_at").map_err(map_sqlx)?,
         expires_at: r.try_get("expires_at").map_err(map_sqlx)?,
@@ -396,6 +406,32 @@ mod tests {
         let got = list_for_instance(&pool, "alice", "inst-a").await.unwrap();
         let ids: Vec<_> = got.iter().map(|r| r.jti.as_str()).collect();
         assert_eq!(ids, vec!["aa"]);
+    }
+
+    #[tokio::test]
+    async fn list_for_instance_includes_cached_artefact_title() {
+        let pool = open_in_memory().await.unwrap();
+        seed_instance(&pool, "inst-a", "alice").await;
+        crate::db::artefacts::upsert_meta(
+            &pool,
+            crate::db::artefacts::UpsertSpec {
+                instance_id: "inst-a",
+                owner_id: "alice",
+                chat_id: "c",
+                artefact_id: "a",
+                kind: "other",
+                title: "report.md",
+                body_path_seed: "artefacts/inst-a/c/a.body",
+                metadata_json: Some("{}"),
+                created_at: 1,
+            },
+        )
+        .await
+        .unwrap();
+        mk(&pool, "aa", "inst-a", "alice").await;
+
+        let got = list_for_instance(&pool, "alice", "inst-a").await.unwrap();
+        assert_eq!(got[0].artefact_title.as_deref(), Some("report.md"));
     }
 
     #[tokio::test]

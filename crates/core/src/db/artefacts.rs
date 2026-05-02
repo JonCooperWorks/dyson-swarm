@@ -165,19 +165,38 @@ pub async fn list_for_instance(
     owner_id: &str,
     instance_id: &str,
 ) -> Result<Vec<CachedArtefact>, StoreError> {
-    let rows = sqlx::query(
+    list_for_instance_page(pool, owner_id, instance_id, None, u32::MAX, 0).await
+}
+
+/// Owner-scoped: one page of cached artefacts for an instance.
+/// Optional `chat_id` narrows to a single dyson conversation.
+pub async fn list_for_instance_page(
+    pool: &SqlitePool,
+    owner_id: &str,
+    instance_id: &str,
+    chat_id: Option<&str>,
+    limit: u32,
+    offset: u32,
+) -> Result<Vec<CachedArtefact>, StoreError> {
+    let mut sql = String::from(
         "SELECT id, instance_id, owner_id, chat_id, artefact_id, \
                 kind, title, mime, bytes, body_path, metadata_json, \
                 created_at, cached_at \
          FROM artefact_cache \
-         WHERE owner_id = ? AND instance_id = ? \
-         ORDER BY cached_at DESC",
-    )
-    .bind(owner_id)
-    .bind(instance_id)
-    .fetch_all(pool)
-    .await
-    .map_err(map_sqlx)?;
+         WHERE owner_id = ? AND instance_id = ?",
+    );
+    if chat_id.is_some() {
+        sql.push_str(" AND chat_id = ?");
+    }
+    sql.push_str(" ORDER BY cached_at DESC, id DESC LIMIT ? OFFSET ?");
+
+    let mut query = sqlx::query(&sql).bind(owner_id).bind(instance_id);
+    if let Some(chat_id) = chat_id {
+        query = query.bind(chat_id);
+    }
+    query = query.bind(i64::from(limit)).bind(i64::from(offset));
+
+    let rows = query.fetch_all(pool).await.map_err(map_sqlx)?;
     rows.into_iter().map(row_to_cached).collect()
 }
 
@@ -188,17 +207,28 @@ pub async fn list_for_owner(
     owner_id: &str,
     limit: u32,
 ) -> Result<Vec<CachedArtefact>, StoreError> {
+    list_for_owner_page(pool, owner_id, limit, 0).await
+}
+
+/// Owner-scoped: one page across every instance.
+pub async fn list_for_owner_page(
+    pool: &SqlitePool,
+    owner_id: &str,
+    limit: u32,
+    offset: u32,
+) -> Result<Vec<CachedArtefact>, StoreError> {
     let rows = sqlx::query(
         "SELECT id, instance_id, owner_id, chat_id, artefact_id, \
                 kind, title, mime, bytes, body_path, metadata_json, \
                 created_at, cached_at \
          FROM artefact_cache \
          WHERE owner_id = ? \
-         ORDER BY cached_at DESC \
-         LIMIT ?",
+         ORDER BY cached_at DESC, id DESC \
+         LIMIT ? OFFSET ?",
     )
     .bind(owner_id)
     .bind(i64::from(limit))
+    .bind(i64::from(offset))
     .fetch_all(pool)
     .await
     .map_err(map_sqlx)?;
@@ -342,6 +372,58 @@ mod tests {
             .unwrap();
         let list = list_for_owner(&pool, "alice", 100).await.unwrap();
         assert_eq!(list.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn paginated_lists_apply_offset_and_chat_filter() {
+        let pool = open_in_memory().await.unwrap();
+        for (idx, (chat, art)) in [("c1", "a1"), ("c2", "a2"), ("c1", "a3"), ("c2", "a4")]
+            .into_iter()
+            .enumerate()
+        {
+            upsert_meta(&pool, spec("inst-a", "alice", chat, art, "p"))
+                .await
+                .unwrap();
+            sqlx::query(
+                "UPDATE artefact_cache SET cached_at = ? \
+                 WHERE instance_id = 'inst-a' AND artefact_id = ?",
+            )
+            .bind(100 + idx as i64)
+            .bind(art)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let page = list_for_instance_page(&pool, "alice", "inst-a", None, 2, 1)
+            .await
+            .unwrap();
+        assert_eq!(
+            page.iter()
+                .map(|r| r.artefact_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a3", "a2"],
+        );
+
+        let chat_page = list_for_instance_page(&pool, "alice", "inst-a", Some("c1"), 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(
+            chat_page
+                .iter()
+                .map(|r| r.artefact_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a3", "a1"],
+        );
+
+        let owner_page = list_for_owner_page(&pool, "alice", 2, 2).await.unwrap();
+        assert_eq!(
+            owner_page
+                .iter()
+                .map(|r| r.artefact_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a2", "a1"],
+        );
     }
 
     #[tokio::test]

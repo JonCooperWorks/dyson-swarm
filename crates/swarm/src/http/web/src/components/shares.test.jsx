@@ -24,6 +24,7 @@ describe('share filename helpers', () => {
     expect(shareFilename({ artefact_id: 'a1' }, names)).toBe('report.md');
     expect(shareFilename({ artefact_id: 'a2' }, names)).toBe('a2');
     expect(shareFilename({ artefact_id: 'missing' }, names)).toBe('missing');
+    expect(shareFilename({ artefact_id: 'a1', artefact_title: ' api.md ' }, new Map())).toBe('api.md');
   });
 
   test('builds a stable access-log route', () => {

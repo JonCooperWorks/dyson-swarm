@@ -4,12 +4,13 @@
  * tests lock down the "render it like a document" path instead of
  * slipping back to a raw <pre>.
  */
-import { describe, expect, test, afterEach } from 'vitest';
+import { describe, expect, test, afterEach, vi } from 'vitest';
 import React from 'react';
-import { render, screen, cleanup } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 
 import {
+  ArtefactTable,
   ArtefactBody,
   activeSharesByArtefact,
   contentTypeBase,
@@ -55,6 +56,77 @@ describe('activeSharesByArtefact', () => {
     expect(counts.get('a1')).toBe(2);
     expect(counts.has('a2')).toBe(false);
     expect(counts.get('a3')).toBe(1);
+  });
+});
+
+describe('ArtefactTable pagination', () => {
+  test('shows one server page and advances through the pager', () => {
+    const rows = Array.from({ length: 26 }, (_, i) => ({
+      id: `art-${i}`,
+      instance_id: 'inst-a',
+      chat_id: 'c-0001',
+      kind: 'other',
+      title: `file-${i}.txt`,
+      bytes: 100 + i,
+      cached_at: 1000 + i,
+    }));
+    const onPage = vi.fn();
+
+    render(
+      <ArtefactTable
+        rows={rows}
+        page={1}
+        client={{}}
+        busy={false}
+        setBusy={() => {}}
+        setErr={() => {}}
+        setMinted={() => {}}
+        refresh={() => {}}
+        showInstance={false}
+        sweepClick={null}
+        shareRows={[]}
+        onPage={onPage}
+      />,
+    );
+
+    expect(screen.getByText('file-0.txt')).toBeInTheDocument();
+    expect(screen.queryByText('file-25.txt')).toBeNull();
+    expect(screen.getByText(/page 1 · showing 1–25/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /next/i }));
+    expect(onPage).toHaveBeenCalledWith(2);
+  });
+
+  test('marks rows with active shared links', () => {
+    render(
+      <ArtefactTable
+        rows={[{
+          id: 'art-1',
+          instance_id: 'inst-a',
+          chat_id: 'c-0001',
+          kind: 'image',
+          title: 'dyson.png',
+          bytes: 1024,
+          cached_at: 1000,
+        }]}
+        page={1}
+        client={{}}
+        busy={false}
+        setBusy={() => {}}
+        setErr={() => {}}
+        setMinted={() => {}}
+        refresh={() => {}}
+        showInstance={false}
+        sweepClick={null}
+        shareRows={[
+          { artefact_id: 'art-1', active: true, revoked_at: null },
+          { artefact_id: 'art-1', active: true, revoked_at: null },
+        ]}
+      />,
+    );
+
+    expect(screen.getByText('shared 2')).toBeInTheDocument();
+    expect(screen.getByText('dyson.png').closest('tr')).toHaveClass('artefact-row-shared');
   });
 });
 

@@ -1247,33 +1247,6 @@
   vertical-align: middle;
   white-space: nowrap;
 }
-.share-log-empty {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  min-height: 96px;
-  padding: 18px 12px;
-  color: var(--fg);
-}
-.share-log-empty-mark {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 42px;
-  height: 42px;
-  border: 1px solid color-mix(in srgb, var(--accent) 36%, var(--border));
-  border-radius: 50%;
-  background: color-mix(in srgb, var(--accent) 8%, transparent);
-  color: var(--accent);
-  font-family: var(--mono);
-  font-size: 18px;
-  font-weight: 700;
-}
-.share-log-empty-title {
-  font-size: 14px;
-  font-weight: 600;
-}
-
 /* Mobile: stack `.rows` into one card per row.  Each <td> becomes a
    labelled line; the label comes from `data-label` on the td (added
    per-component) or is omitted for unlabelled cells (e.g. action
@@ -1745,27 +1718,20 @@
   color: var(--bg-1);
 }
 
-.tasks-list {
-  list-style: none;
-  margin: 4px 0 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-}
-
-.tasks-empty {
+.ui-empty {
   display: flex;
   flex-direction: column;
   align-items: center;
   text-align: center;
   gap: 8px;
   margin: 6px 0 0;
-  padding: 28px 16px;
+  padding: 32px 16px;
   border: 1px dashed var(--border);
   border-radius: var(--radius);
-  background: color-mix(in srgb, var(--bg-2) 45%, transparent);
+  background: color-mix(in srgb, var(--bg-2) 42%, transparent);
 }
-.tasks-empty-glyph {
+
+.ui-empty-glyph {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1777,19 +1743,46 @@
   color: var(--accent);
   font-family: var(--mono);
   font-size: 18px;
+  line-height: 1;
 }
-.tasks-empty-title {
+
+.ui-empty-title {
   font-weight: 600;
   color: var(--fg);
 }
-.tasks-empty-body {
-  max-width: 340px;
+
+.ui-empty-body {
+  max-width: 360px;
   line-height: 1.45;
 }
-.tasks-empty-actions {
+
+.ui-empty-actions {
   display: flex;
   gap: 8px;
   margin-top: 4px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+.ui-pager {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.ui-pager .muted {
+  min-width: 88px;
+  text-align: center;
+}
+
+.tasks-list {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .tasks-row {
@@ -1953,10 +1946,6 @@
   flex-wrap: wrap;
   margin: 8px 0 12px;
 }
-.audit-search {
-  flex: 1 1 240px;
-  min-width: 0;
-}
 .audit-task-filter {
   flex: 0 0 auto;
 }
@@ -1972,39 +1961,7 @@
 }
 .audit-row-link:hover { text-decoration: underline; }
 .audit-deleted-task { margin-left: 6px; }
-.audit-pager {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 12px;
-  margin-top: 12px;
-}
-
-.audit-empty {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  text-align: center;
-  gap: 8px;
-  padding: 32px 16px;
-  border: 1px dashed var(--border);
-  border-radius: 6px;
-  margin: 4px 0 0;
-}
-.audit-empty-glyph {
-  font-size: 28px;
-  line-height: 1;
-  color: var(--fg-muted);
-  opacity: 0.6;
-}
-.audit-empty-title {
-  font-size: 0.95rem;
-  color: var(--fg);
-}
-.audit-empty-body {
-  max-width: 360px;
-  line-height: 1.4;
-}
+.audit-status-badge { margin-left: 6px; }
 
 /* Detail page metadata + body view. */
 .audit-meta {
@@ -2038,7 +1995,7 @@
 
 @media (max-width: 640px) {
   .audit-filters { flex-direction: column; align-items: stretch; }
-  .audit-search, .audit-task-filter { width: 100%; }
+  .audit-task-filter { width: 100%; }
   .audit-meta { grid-template-columns: 1fr; }
   .audit-meta dt { margin-top: 6px; }
 }

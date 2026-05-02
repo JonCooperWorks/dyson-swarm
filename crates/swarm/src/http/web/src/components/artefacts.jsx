@@ -26,6 +26,8 @@ import { useApi } from '../hooks/useApi.jsx';
 import { useAppState } from '../hooks/useAppState.js';
 import { setSharesFor } from '../store/app.js';
 import { SharesPanel } from './shares.jsx';
+import { EmptyState, Pager } from './ui.jsx';
+import { fmtBytes, fmtTime, shortId } from '../utils/format.js';
 
 const QUICK_TTL = '7d';
 const PAGE_SIZE = 25;
@@ -34,15 +36,15 @@ const MARKDOWNISH_RE = /(^|\n)\s{0,3}(#{1,6}\s+\S|[-*+]\s+\[[ xX]\]\s+\S|[-*+]\s
 
 export function MyArtefactsPage() {
   const { client } = useApi();
-  const load = React.useCallback(
-    () => client.listMyArtefacts({ limit: 1000 }),
+  const loadPage = React.useCallback(
+    ({ limit, offset }) => client.listMyArtefactsPage({ limit, offset }),
     [client],
   );
   return (
     <ArtefactsView
       backHref="#/"
       subtitle="Everything your agents have produced and that has reached swarm.  Stored on swarm, so they survive cube reset.  Pick any to share via an anonymous link."
-      load={load}
+      loadPage={loadPage}
       showInstance
     />
   );
@@ -50,8 +52,8 @@ export function MyArtefactsPage() {
 
 export function InstanceArtefactsPage({ instanceId, embedded = false }) {
   const { client } = useApi();
-  const load = React.useCallback(
-    () => client.listInstanceArtefacts(instanceId),
+  const loadPage = React.useCallback(
+    ({ limit, offset }) => client.listInstanceArtefactsPage(instanceId, { limit, offset }),
     [client, instanceId],
   );
   const sweep = React.useCallback(async () => {
@@ -64,7 +66,7 @@ export function InstanceArtefactsPage({ instanceId, embedded = false }) {
     <ArtefactsView
       backHref={`#/i/${encodeURIComponent(instanceId)}`}
       subtitle="Cached artefacts for this instance, plus every anonymous link currently shared from them.  Reads come from swarm first; cube is only hit on cache miss."
-      load={load}
+      loadPage={loadPage}
       onSweep={sweep}
       instanceId={instanceId}
       embedded={embedded}
@@ -72,12 +74,11 @@ export function InstanceArtefactsPage({ instanceId, embedded = false }) {
   );
 }
 
-/// Shared shell.  `load` is the source of rows (refreshable); `onSweep`
+/// Shared shell.  `loadPage` is the source of rows (refreshable); `onSweep`
 /// is the optional cube→cache button shown only on the per-instance
-/// variant.  Pagination is client-side over the loaded rows; the
-/// underlying list endpoints already cap at 1000 (cross-instance) /
-/// per-instance listings are short by construction.
-function ArtefactsView({ backHref, subtitle, load, onSweep, showInstance, instanceId, embedded = false }) {
+/// variant.  Pagination is server-side with a one-row lookahead so
+/// large caches do not land in the browser all at once.
+function ArtefactsView({ backHref, subtitle, loadPage, onSweep, showInstance, instanceId, embedded = false }) {
   const { client } = useApi();
   const shareRows = useAppState(s => (
     instanceId ? (s.shares.byInstance[instanceId]?.rows || null) : null
@@ -88,26 +89,35 @@ function ArtefactsView({ backHref, subtitle, load, onSweep, showInstance, instan
   const [minted, setMinted] = React.useState(null);
   const [page, setPage] = React.useState(1);
 
-  const refresh = React.useCallback(async () => {
+  const fetchPage = React.useCallback(async (targetPage) => {
     setErr(null);
+    setRows(null);
     try {
-      const list = await load();
-      setRows(Array.isArray(list) ? list : []);
+      let nextPage = Math.max(1, targetPage || 1);
+      let list = [];
+      for (;;) {
+        const offset = (nextPage - 1) * PAGE_SIZE;
+        const pageResult = await loadPage({ limit: PAGE_SIZE + 1, offset });
+        list = Array.isArray(pageResult?.rows) ? pageResult.rows : [];
+        if (list.length > 0 || nextPage === 1) break;
+        nextPage -= 1;
+      }
+      setRows(list);
+      setPage(nextPage);
     } catch (e) {
       setErr(e?.detail || e?.message || 'list failed');
+      setRows([]);
     }
-  }, [load]);
+  }, [loadPage]);
 
-  React.useEffect(() => { refresh(); }, [refresh]);
-  // Reset to page 1 whenever the row set changes (refresh, sweep).
-  React.useEffect(() => { setPage(1); }, [rows && rows.length]);
+  React.useEffect(() => { fetchPage(1); }, [fetchPage]);
 
   const sweepClick = onSweep
     ? async () => {
         setBusy(true); setErr(null);
         try {
           await onSweep();
-          await refresh();
+          await fetchPage(1);
         } catch (e) {
           setErr(e?.detail || e?.message || 'sweep failed');
         } finally {
@@ -131,16 +141,16 @@ function ArtefactsView({ backHref, subtitle, load, onSweep, showInstance, instan
       <ArtefactTable
         rows={rows}
         page={page}
-        setPage={setPage}
         client={client}
         busy={busy}
         setBusy={setBusy}
         setErr={setErr}
         setMinted={setMinted}
-        refresh={refresh}
+        refresh={() => fetchPage(page)}
         showInstance={showInstance}
         sweepClick={sweepClick}
         shareRows={shareRows}
+        onPage={fetchPage}
       />
       {instanceId ? <SharesPanel instanceId={instanceId} artefactRows={rows || []}/> : null}
     </Shell>
@@ -154,17 +164,17 @@ function artefactHref(instanceId, artefactId) {
   return `#/i/${encodeURIComponent(instanceId)}/artefacts/${encodeURIComponent(artefactId)}`;
 }
 
-function ArtefactTable({
-  rows, page, setPage, client, busy, setBusy, setErr, setMinted, refresh,
-  showInstance, sweepClick, shareRows,
+export function ArtefactTable({
+  rows, page, client, busy, setBusy, setErr, setMinted, refresh,
+  showInstance, sweepClick, shareRows, onPage = () => {},
 }) {
   if (rows === null) return <p className="muted small">loading…</p>;
 
-  const total = rows.length;
-  const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
-  const safePage = Math.min(Math.max(1, page), pageCount);
+  const safePage = Math.max(1, page);
   const start = (safePage - 1) * PAGE_SIZE;
-  const visible = rows.slice(start, start + PAGE_SIZE);
+  const visible = rows.slice(0, PAGE_SIZE);
+  const canNext = rows.length > PAGE_SIZE;
+  const canPrev = safePage > 1;
   const activeShares = activeSharesByArtefact(shareRows);
 
   const remove = async (row) => {
@@ -217,10 +227,10 @@ function ArtefactTable({
         </div>
       </div>
       {rows.length === 0 ? (
-        <p className="muted small">
-          no cached artefacts yet — sweep a chat into the swarm cache, or let
-          them appear as artefacts are read through swarm.
-        </p>
+        <EmptyState title="no cached artefacts yet">
+          Sweep a chat into the swarm cache, or let artefacts appear as they
+          are read through swarm.
+        </EmptyState>
       ) : (
         <table className="rows artefact-rows">
           <thead><tr>
@@ -236,11 +246,11 @@ function ArtefactTable({
             {visible.map(r => (
               <tr
                 key={`${r.instance_id}/${r.id}`}
-                className={activeShares.get(r.id) ? 'artefact-row-shared' : undefined}
+                className={activeShares.has(r.id) ? 'artefact-row-shared' : undefined}
               >
                 <td data-label="title">
                   <span title={r.id}>{r.title || r.id}</span>
-                  {activeShares.get(r.id) ? (
+                  {activeShares.has(r.id) ? (
                     <span
                       className="badge badge-info artefact-shared-badge"
                       title="active anonymous shared links"
@@ -284,14 +294,14 @@ function ArtefactTable({
           </tbody>
         </table>
       )}
-      {pageCount > 1 ? (
-        <Pagination
-          page={safePage}
-          pageCount={pageCount}
-          total={total}
-          start={start}
-          shown={visible.length}
-          onPage={setPage}
+      {(canPrev || canNext) ? (
+        <Pager
+          label={`page ${safePage} · showing ${start + 1}–${start + visible.length}`}
+          canPrev={canPrev}
+          canNext={canNext}
+          onPrev={() => onPage(safePage - 1)}
+          onNext={() => onPage(safePage + 1)}
+          disabled={busy}
         />
       ) : null}
     </section>
@@ -305,34 +315,6 @@ export function activeSharesByArtefact(rows) {
     out.set(row.artefact_id, (out.get(row.artefact_id) || 0) + 1);
   }
   return out;
-}
-
-function Pagination({ page, pageCount, total, start, shown, onPage }) {
-  return (
-    <div
-      className="panel-footer muted small"
-      style={{ display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'space-between', padding: '8px 12px' }}
-    >
-      <span>
-        showing {start + 1}–{start + shown} of {total}
-      </span>
-      <span style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-        <button
-          className="btn btn-ghost btn-sm"
-          onClick={() => onPage(page - 1)}
-          disabled={page <= 1}
-          title="previous page"
-        >‹ prev</button>
-        <span style={{ minWidth: 70, textAlign: 'center' }}>{page} / {pageCount}</span>
-        <button
-          className="btn btn-ghost btn-sm"
-          onClick={() => onPage(page + 1)}
-          disabled={page >= pageCount}
-          title="next page"
-        >next ›</button>
-      </span>
-    </div>
-  );
 }
 
 /// Deep-linkable artefact reader page.  Mounted at
@@ -738,23 +720,4 @@ function MintedBanner({ minted, onDismiss }) {
       </div>
     </div>
   );
-}
-
-function shortId(s) {
-  if (!s) return '—';
-  return s.length > 12 ? `${s.slice(0, 8)}…${s.slice(-3)}` : s;
-}
-
-function fmtBytes(n) {
-  if (!Number.isFinite(n) || n <= 0) return '—';
-  const units = ['B', 'KB', 'MB', 'GB'];
-  let i = 0; let v = n;
-  while (v >= 1024 && i < units.length - 1) { v /= 1024; i += 1; }
-  return `${v.toFixed(v < 10 && i > 0 ? 1 : 0)} ${units[i]}`;
-}
-
-function fmtTime(secs) {
-  if (!secs) return '—';
-  try { return new Date(secs * 1000).toISOString().replace('T', ' ').replace(/\.\d+Z$/, 'Z'); }
-  catch { return String(secs); }
 }

@@ -282,14 +282,12 @@ export class SwarmClient {
 
   /// Cross-task audit log for an instance — newest first, cursor-paginated
   /// by `fired_at` seconds.  `before` is the previous page's oldest
-  /// `fired_at`; `q` is a substring filter applied to the error text
-  /// server-side.  Each row also carries `webhook_name` so the
-  /// SPA can render which task fired it.
-  listInstanceDeliveries(instanceId, { limit = 50, before, q, webhook } = {}) {
+  /// `fired_at`; `webhook` filters to one task. Each row also carries
+  /// `webhook_name` so the SPA can render which task fired it.
+  listInstanceDeliveries(instanceId, { limit = 50, before, webhook } = {}) {
     const params = new URLSearchParams();
     if (limit) params.set('limit', String(limit));
     if (before != null) params.set('before', String(before));
-    if (q) params.set('q', q);
     if (webhook) params.set('webhook', webhook);
     const qs = params.toString();
     return this._json(
@@ -319,18 +317,36 @@ export class SwarmClient {
 
   /// Owner-wide listing across every instance.  Newest cached_at first.
   listMyArtefacts({ limit } = {}) {
-    const qs = limit ? `?limit=${encodeURIComponent(limit)}` : '';
-    return this._json(`/v1/artefacts${qs}`, { headers: { Accept: 'application/json' } });
+    return this.listMyArtefactsPage({ limit }).then(page => page.rows);
+  }
+
+  listMyArtefactsPage({ limit, offset } = {}) {
+    const params = new URLSearchParams();
+    if (limit) params.set('limit', String(limit));
+    if (offset) params.set('offset', String(offset));
+    const qs = params.toString();
+    return this._json(
+      `/v1/artefacts${qs ? `?${qs}` : ''}`,
+      { headers: { Accept: 'application/json' } },
+    ).then(rows => ({ rows: Array.isArray(rows) ? rows : [] }));
   }
 
   /// Per-instance listing, optionally narrowed to one chat (mirrors
   /// dyson's `/api/conversations/:chat/artefacts` shape).
   listInstanceArtefacts(instanceId, { chatId } = {}) {
-    const qs = chatId ? `?chat_id=${encodeURIComponent(chatId)}` : '';
+    return this.listInstanceArtefactsPage(instanceId, { chatId }).then(page => page.rows);
+  }
+
+  listInstanceArtefactsPage(instanceId, { chatId, limit, offset } = {}) {
+    const params = new URLSearchParams();
+    if (chatId) params.set('chat_id', chatId);
+    if (limit) params.set('limit', String(limit));
+    if (offset) params.set('offset', String(offset));
+    const qs = params.toString();
     return this._json(
-      `/v1/instances/${encodeURIComponent(instanceId)}/artefacts${qs}`,
+      `/v1/instances/${encodeURIComponent(instanceId)}/artefacts${qs ? `?${qs}` : ''}`,
       { headers: { Accept: 'application/json' } },
-    );
+    ).then(rows => ({ rows: Array.isArray(rows) ? rows : [] }));
   }
 
   /// Pre-populate the cache for one chat by walking the cube's listing.

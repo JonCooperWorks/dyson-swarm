@@ -180,6 +180,30 @@ impl ArtefactCacheService {
         Ok(store::list_for_instance(&self.pool, owner_id, instance_id).await?)
     }
 
+    /// Owner-scoped instance page.  `limit` and `offset` are applied
+    /// in SQLite so the SPA can walk large caches without pulling the
+    /// entire instance history into memory.
+    pub async fn list_for_instance_page(
+        &self,
+        owner_id: &str,
+        instance_id: &str,
+        chat_id: Option<&str>,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<CachedArtefact>, CacheError> {
+        Ok(
+            store::list_for_instance_page(
+                &self.pool,
+                owner_id,
+                instance_id,
+                chat_id,
+                limit,
+                offset,
+            )
+            .await?,
+        )
+    }
+
     /// Owner-scoped global listing.
     pub async fn list_for_owner(
         &self,
@@ -187,6 +211,16 @@ impl ArtefactCacheService {
         limit: u32,
     ) -> Result<Vec<CachedArtefact>, CacheError> {
         Ok(store::list_for_owner(&self.pool, owner_id, limit).await?)
+    }
+
+    /// Owner-scoped global page.
+    pub async fn list_for_owner_page(
+        &self,
+        owner_id: &str,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<CachedArtefact>, CacheError> {
+        Ok(store::list_for_owner_page(&self.pool, owner_id, limit, offset).await?)
     }
 
     /// Delete a cached row + its on-disk body.  Owner-scoped: returns

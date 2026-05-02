@@ -20,6 +20,8 @@ import { useAppState } from '../hooks/useAppState.js';
 import {
   setWebhooksFor, upsertWebhook, removeWebhook,
 } from '../store/app.js';
+import { EmptyState, Pager } from './ui.jsx';
+import { fmtBytes, fmtTime, shortId } from '../utils/format.js';
 
 const SCHEMES = [
   {
@@ -41,15 +43,6 @@ const SCHEMES = [
 
 function schemeLabel(s) {
   return SCHEMES.find(x => x.value === s)?.label || s;
-}
-
-function fmtTime(ts) {
-  if (!ts) return '—';
-  try { return new Date(ts * 1000).toLocaleString(); } catch { return String(ts); }
-}
-
-function shortId(id) {
-  return (id || '').slice(0, 8);
 }
 
 // ─── List page ────────────────────────────────────────────────────
@@ -158,17 +151,18 @@ export function TasksListPage({ instanceId, embedded = false }) {
 
 function TasksEmpty({ newHref, auditHref }) {
   return (
-    <div className="tasks-empty">
-      <div className="tasks-empty-glyph" aria-hidden="true">↯</div>
-      <div className="tasks-empty-title">no tasks yet</div>
-      <div className="tasks-empty-body muted small">
-        Create one webhook URL, then watch every delivery in audit.
-      </div>
-      <div className="tasks-empty-actions">
+    <EmptyState
+      glyph="↯"
+      title="no tasks yet"
+      actions={(
+        <>
         <a className="btn btn-primary btn-sm" href={newHref}>+ new</a>
         <a className="btn btn-ghost btn-sm" href={auditHref}>audit</a>
-      </div>
-    </div>
+        </>
+      )}
+    >
+      Create one webhook URL, then watch every delivery in audit.
+    </EmptyState>
   );
 }
 
@@ -520,7 +514,9 @@ function DeliveriesPanel({ instanceId, taskName }) {
       {loading ? (
         <p className="muted small">loading…</p>
       ) : rows.length === 0 ? (
-        <p className="muted small">no deliveries yet — fire the webhook to see it here.</p>
+        <EmptyState title="no deliveries yet">
+          Fire this task URL to see each delivery recorded here.
+        </EmptyState>
       ) : (
         <ul className="deliveries-list">
           {rows.map(d => (
@@ -529,7 +525,7 @@ function DeliveriesPanel({ instanceId, taskName }) {
                 <span className={`badge ${d.status_code < 400 ? 'badge-ok' : 'badge-warn'}`}>
                   {d.status_code}
                 </span>
-                <span className="muted small">{fmtTime(d.fired_at)}</span>
+                <span className="muted small">{fmtTime(d.fired_at, { style: 'locale' })}</span>
                 <span className="muted small">{d.latency_ms}ms</span>
                 {!d.signature_ok ? <span className="badge badge-warn small">bad signature</span> : null}
                 {d.request_id ? <code className="mono-sm muted">{shortId(d.request_id)}</code> : null}
@@ -546,8 +542,8 @@ function DeliveriesPanel({ instanceId, taskName }) {
 // ─── Audit list + detail ──────────────────────────────────────────
 //
 // `AuditListPage` is the cross-task delivery log: every fire across
-// every task on the instance, newest first, with body-substring search
-// and cursor pagination.  Detail pages link from here.
+// every task on the instance, newest first, with task filtering and
+// cursor pagination. Detail pages link from here.
 
 const AUDIT_PAGE_SIZE = 50;
 
@@ -561,11 +557,6 @@ export function AuditListPage({ instanceId, embedded = false }) {
   const [rows, setRows] = React.useState(null);
   const [loading, setLoading] = React.useState(true);
   const [err, setErr] = React.useState(null);
-  // The form input is committed to `committedQ` on submit so each
-  // keystroke doesn't re-fire the query.  Submitting also resets the
-  // cursor stack — search invalidates the existing pagination.
-  const [qInput, setQInput] = React.useState('');
-  const [committedQ, setCommittedQ] = React.useState('');
   const [webhookFilter, setWebhookFilter] = React.useState('');
   const slot = useAppState(s => s.webhooks.byInstance[instanceId]);
   const taskNames = React.useMemo(
@@ -600,7 +591,6 @@ export function AuditListPage({ instanceId, embedded = false }) {
       const list = await client.listInstanceDeliveries(instanceId, {
         limit: AUDIT_PAGE_SIZE,
         before: cursor ?? undefined,
-        q: committedQ || undefined,
         webhook: webhookFilter || undefined,
       });
       setRows(Array.isArray(list) ? list : []);
@@ -610,7 +600,7 @@ export function AuditListPage({ instanceId, embedded = false }) {
     } finally {
       setLoading(false);
     }
-  }, [client, instanceId, cursor, committedQ, webhookFilter]);
+  }, [client, instanceId, cursor, webhookFilter]);
 
   React.useEffect(() => { refresh(); }, [refresh]);
 
@@ -620,15 +610,7 @@ export function AuditListPage({ instanceId, embedded = false }) {
     return () => window.removeEventListener('keydown', onKey);
   }, [backHref]);
 
-  const submitSearch = (e) => {
-    e.preventDefault();
-    setCursors([null]);
-    setCommittedQ(qInput.trim());
-  };
-
-  const clearSearch = () => {
-    setQInput('');
-    setCommittedQ('');
+  const clearFilter = () => {
     setWebhookFilter('');
     setCursors([null]);
   };
@@ -674,15 +656,7 @@ export function AuditListPage({ instanceId, embedded = false }) {
           </div>
         </div>
 
-        <form className="audit-filters" onSubmit={submitSearch}>
-          <input
-            type="search"
-            className="audit-search"
-            placeholder="search errors…"
-            value={qInput}
-            onChange={e => setQInput(e.target.value)}
-            maxLength={256}
-          />
+        <div className="audit-filters">
           <select
             className="audit-task-filter"
             value={webhookFilter}
@@ -694,13 +668,12 @@ export function AuditListPage({ instanceId, embedded = false }) {
               <option key={n} value={n}>{n}</option>
             ))}
           </select>
-          <button type="submit" className="btn btn-sm">search</button>
-          {(committedQ || webhookFilter) ? (
-            <button type="button" className="btn btn-ghost btn-sm" onClick={clearSearch}>
+          {webhookFilter ? (
+            <button type="button" className="btn btn-ghost btn-sm" onClick={clearFilter}>
               clear
             </button>
           ) : null}
-        </form>
+        </div>
 
         {err ? <div className="error">{err}</div> : null}
 
@@ -708,8 +681,8 @@ export function AuditListPage({ instanceId, embedded = false }) {
           <p className="muted small">loading…</p>
         ) : rows.length === 0 ? (
           <AuditEmpty
-            filtered={!!(committedQ || webhookFilter)}
-            onClear={clearSearch}
+            filtered={!!webhookFilter}
+            onClear={clearFilter}
           />
         ) : (
           <table className="rows audit-table">
@@ -728,7 +701,7 @@ export function AuditListPage({ instanceId, embedded = false }) {
                 return (
                   <tr key={d.id} className={d.signature_ok ? '' : 'sig-bad'}>
                     <td data-label="when" className="muted small">
-                      <a className="audit-row-link" href={detailHref}>{fmtTime(d.fired_at)}</a>
+                      <a className="audit-row-link" href={detailHref}>{fmtTime(d.fired_at, { style: 'locale' })}</a>
                     </td>
                     <td data-label="task">
                       <code className="mono-sm">{d.webhook_name}</code>
@@ -741,7 +714,7 @@ export function AuditListPage({ instanceId, embedded = false }) {
                         {d.status_code}
                       </span>
                       {!d.signature_ok ? (
-                        <span className="badge badge-warn small" style={{ marginLeft: 6 }}>bad sig</span>
+                        <span className="badge badge-warn small audit-status-badge">bad sig</span>
                       ) : null}
                     </td>
                     <td data-label="latency" className="muted small">{d.latency_ms}ms</td>
@@ -756,25 +729,17 @@ export function AuditListPage({ instanceId, embedded = false }) {
           </table>
         )}
 
-        <div className="audit-pager">
-          <button
-            type="button"
-            className="btn btn-ghost btn-sm"
-            onClick={prevPage}
-            disabled={!canPrev || loading}
-          >
-            ← newer
-          </button>
-          <span className="muted small">page {onPage}</span>
-          <button
-            type="button"
-            className="btn btn-ghost btn-sm"
-            onClick={nextPage}
-            disabled={!canNext || loading}
-          >
-            older →
-          </button>
-        </div>
+        <Pager
+          className="audit-pager"
+          label={`page ${onPage}`}
+          canPrev={canPrev}
+          canNext={canNext}
+          onPrev={prevPage}
+          onNext={nextPage}
+          disabled={loading}
+          prevLabel="← newer"
+          nextLabel="older →"
+        />
       </section>
     </Shell>
   );
@@ -859,7 +824,7 @@ export function AuditDetailPage({ instanceId, deliveryId, embedded = false }) {
                   <span className="badge badge-faint small">deleted</span>
                 ) : null}
               </dd>
-              <dt>fired</dt><dd>{fmtTime(row.fired_at)}</dd>
+              <dt>fired</dt><dd>{fmtTime(row.fired_at, { style: 'locale' })}</dd>
               <dt>status</dt>
               <dd>
                 <span className={`badge ${row.status_code < 400 ? 'badge-ok' : 'badge-warn'}`}>
@@ -955,35 +920,19 @@ function DeliveryBodyPanel({ row }) {
   );
 }
 
-function fmtBytes(n) {
-  if (n == null) return '—';
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KiB`;
-  return `${(n / 1024 / 1024).toFixed(2)} MiB`;
-}
-
 function AuditEmpty({ filtered, onClear }) {
   return (
-    <div className="audit-empty">
-      <div className="audit-empty-glyph" aria-hidden="true">∅</div>
-      <div className="audit-empty-title">
-        {filtered ? 'no deliveries match' : 'no deliveries yet'}
-      </div>
-      <div className="audit-empty-body muted small">
-        {filtered ? (
-          <>Try a different search term, or pick a different task.</>
-        ) : (
-          <>
-            Each successful or failed webhook fire records a row here.
-            POST to a task URL to see one show up.
-          </>
-        )}
-      </div>
-      {filtered ? (
+    <EmptyState
+      title={filtered ? 'no deliveries match' : 'no deliveries yet'}
+      actions={filtered ? (
         <button type="button" className="btn btn-ghost btn-sm" onClick={onClear}>
           clear filters
         </button>
       ) : null}
-    </div>
+    >
+      {filtered
+        ? 'Pick a different task, or clear the filter.'
+        : 'Each successful or failed webhook fire records a row here. POST to a task URL to see one show up.'}
+    </EmptyState>
   );
 }

@@ -30,6 +30,9 @@ use crate::auth::CallerIdentity;
 use crate::error::SwarmError;
 use crate::http::AppState;
 
+const DEFAULT_ARTEFACT_PAGE_SIZE: u32 = 100;
+const MAX_ARTEFACT_PAGE_SIZE: u32 = 1000;
+
 fn parse_query(s: &str) -> std::collections::HashMap<String, String> {
     s.split('&')
         .filter(|p| !p.is_empty())
@@ -38,6 +41,19 @@ fn parse_query(s: &str) -> std::collections::HashMap<String, String> {
             Some((k.to_owned(), v.to_owned()))
         })
         .collect()
+}
+
+fn parse_limit_offset(q: &std::collections::HashMap<String, String>) -> (u32, u32) {
+    let limit = q
+        .get("limit")
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(DEFAULT_ARTEFACT_PAGE_SIZE)
+        .clamp(1, MAX_ARTEFACT_PAGE_SIZE);
+    let offset = q
+        .get("offset")
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(0);
+    (limit, offset)
 }
 
 pub fn router(state: AppState) -> Router {
@@ -101,14 +117,18 @@ async fn list_for_instance(
         .map_err(swarm_to_status)?;
     let q = parse_query(uri.query().unwrap_or(""));
     let chat = q.get("chat_id").cloned();
-    let mut rows = state
+    let (limit, offset) = parse_limit_offset(&q);
+    let rows = state
         .artefact_cache
-        .list_for_instance(&caller.user_id, &instance_id)
+        .list_for_instance_page(
+            &caller.user_id,
+            &instance_id,
+            chat.as_deref(),
+            limit,
+            offset,
+        )
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    if let Some(chat) = chat.as_deref() {
-        rows.retain(|r| r.chat_id == chat);
-    }
     Ok(Json(rows.into_iter().map(ArtefactView::from_row).collect()))
 }
 
@@ -118,14 +138,10 @@ async fn list_for_owner(
     uri: Uri,
 ) -> Result<Json<Vec<ArtefactView>>, StatusCode> {
     let q = parse_query(uri.query().unwrap_or(""));
-    let limit = q
-        .get("limit")
-        .and_then(|s| s.parse::<u32>().ok())
-        .unwrap_or(500)
-        .min(1000);
+    let (limit, offset) = parse_limit_offset(&q);
     let rows = state
         .artefact_cache
-        .list_for_owner(&caller.user_id, limit)
+        .list_for_owner_page(&caller.user_id, limit, offset)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(rows.into_iter().map(ArtefactView::from_row).collect()))

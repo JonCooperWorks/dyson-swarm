@@ -21,6 +21,8 @@ import React from 'react';
 import { useApi } from '../hooks/useApi.jsx';
 import { useAppState } from '../hooks/useAppState.js';
 import { setSharesFor, removeShare } from '../store/app.js';
+import { fmtTime } from '../utils/format.js';
+import { EmptyState } from './ui.jsx';
 
 export const TTL_OPTIONS = [
   { value: '1d', label: '1 day' },
@@ -47,6 +49,9 @@ export function artefactFilenameMap(artefactRows) {
 
 export function shareFilename(row, namesByArtefactId) {
   if (!row) return '—';
+  if (typeof row.artefact_title === 'string' && row.artefact_title.trim()) {
+    return row.artefact_title.trim();
+  }
   return namesByArtefactId?.get(row.artefact_id) || row.artefact_id || '—';
 }
 
@@ -413,13 +418,9 @@ function AccessLogLink({ instanceId, jti }) {
 
 function ShareLogEmpty() {
   return (
-    <div className="share-log-empty">
-      <div className="share-log-empty-mark">0</div>
-      <div>
-        <div className="share-log-empty-title">No accesses yet</div>
-        <div className="muted small">This shared link has not been opened.</div>
-      </div>
-    </div>
+    <EmptyState glyph="0" title="No accesses yet">
+      This shared link has not been opened.
+    </EmptyState>
   );
 }
 
@@ -537,10 +538,4 @@ function MintedShareBanner({ minted, onDismiss }) {
       </div>
     </div>
   );
-}
-
-function fmtTime(secs) {
-  if (!secs) return '—';
-  try { return new Date(secs * 1000).toISOString().replace('T', ' ').replace(/\.\d+Z$/, 'Z'); }
-  catch { return String(secs); }
 }

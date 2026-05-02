@@ -467,10 +467,15 @@ pub async fn discover_metadata(
 ) -> Result<AuthMetadata, String> {
     // Two-step discovery per RFC 9728 + RFC 8414:
     //   1. Fetch Protected Resource Metadata at
-    //      `{resource_origin}/.well-known/oauth-protected-resource`
-    //      to find the authorization server URL — the resource and the
-    //      AS often live on different origins (e.g. Smithery hosts the
-    //      MCP server on `*.run.tools` and the AS on `auth.smithery.ai`).
+    //      `{resource_origin}/.well-known/oauth-protected-resource{resource_path}`
+    //      first, then the root form
+    //      `{resource_origin}/.well-known/oauth-protected-resource`.
+    //      Path-scoped PRM is what providers like GitHub publish for
+    //      `/mcp` resources; older servers still use the root form.
+    //      Either way, the PRM points us at the authorization server
+    //      origin — the resource and the AS often live on different
+    //      origins (e.g. Smithery hosts the MCP server on `*.run.tools`
+    //      and the AS on `auth.smithery.ai`).
     //   2. Fetch AS metadata via path-prefixed well-known
     //      (`{as_origin}/.well-known/oauth-authorization-server{as_path}`)
     //      so AS URLs with a tenant path resolve correctly.
@@ -486,14 +491,30 @@ pub async fn discover_metadata(
     let origin = origin_of(server_url)?;
     let domain = domain_of(server_url);
 
-    let prm_url = format!("{origin}/.well-known/oauth-protected-resource");
-    match fetch_protected_resource(&prm_url, client, &domain).await? {
-        Some(as_url) => fetch_as_metadata(&as_url, client, &domain).await,
-        None => {
-            let url = format!("{origin}/.well-known/oauth-authorization-server");
-            fetch_metadata_at(&url, client, &domain).await
+    for prm_url in protected_resource_metadata_urls(server_url)? {
+        match fetch_protected_resource(&prm_url, client, &domain).await? {
+            Some(as_url) => return fetch_as_metadata(&as_url, client, &domain).await,
+            None => continue,
         }
     }
+
+    let url = format!("{origin}/.well-known/oauth-authorization-server");
+    fetch_metadata_at(&url, client, &domain).await
+}
+
+fn protected_resource_metadata_urls(server_url: &str) -> Result<Vec<String>, String> {
+    let parsed =
+        reqwest::Url::parse(server_url).map_err(|e| format!("parse {}: {e}", domain_of(server_url)))?;
+    let origin = origin_of(server_url)?;
+    let path = parsed.path().trim_end_matches('/');
+    let mut urls = Vec::new();
+    if !path.is_empty() {
+        urls.push(format!(
+            "{origin}/.well-known/oauth-protected-resource{path}",
+        ));
+    }
+    urls.push(format!("{origin}/.well-known/oauth-protected-resource"));
+    Ok(urls)
 }
 
 /// Try to fetch RFC 9728 Protected Resource Metadata.  Returns the
@@ -508,7 +529,7 @@ async fn fetch_protected_resource(
         .get(url)
         .send()
         .await
-        .map_err(|e| format!("discovery {resource_domain}: {e}"))?;
+        .map_err(|e| format!("discovery {resource_domain}: {}", redact_reqwest_err(&e, url)))?;
     if resp.status() == reqwest::StatusCode::NOT_FOUND {
         return Ok(None);
     }
@@ -548,7 +569,7 @@ async fn fetch_metadata_at(
         .get(url)
         .send()
         .await
-        .map_err(|e| format!("discovery {resource_domain}: {e}"))?;
+        .map_err(|e| format!("discovery {resource_domain}: {}", redact_reqwest_err(&e, url)))?;
     if !resp.status().is_success() {
         return Err(format!(
             "discovery {resource_domain}: HTTP {}",
@@ -830,6 +851,18 @@ impl OAuthFlowCache {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    use axum::{
+        Router,
+        extract::State,
+        response::IntoResponse,
+        routing::get as ax_get,
+    };
+
     use super::*;
     use crate::envelope::AgeCipherDirectory;
     use crate::traits::UserSecretStore;
@@ -1169,6 +1202,25 @@ mod tests {
         let _ = err;
     }
 
+    #[test]
+    fn protected_resource_metadata_urls_prefers_path_scoped_then_root() {
+        assert_eq!(
+            protected_resource_metadata_urls("https://api.githubcopilot.com/mcp/").unwrap(),
+            vec![
+                "https://api.githubcopilot.com/.well-known/oauth-protected-resource/mcp",
+                "https://api.githubcopilot.com/.well-known/oauth-protected-resource",
+            ],
+        );
+    }
+
+    #[test]
+    fn protected_resource_metadata_urls_root_only_when_no_path() {
+        assert_eq!(
+            protected_resource_metadata_urls("https://api.linear.app").unwrap(),
+            vec!["https://api.linear.app/.well-known/oauth-protected-resource"],
+        );
+    }
+
     // ── build_auth_url ─────────────────────────────────────────
     //
     // Smithery (and other strict ASes) reject `authorize?scope=foo`
@@ -1270,6 +1322,80 @@ mod tests {
             assert!(
                 err.contains("mcp.example.com"),
                 "operator still needs the domain to triage: {err}",
+            );
+        });
+    }
+
+    #[test]
+    fn discover_metadata_uses_path_scoped_protected_resource_when_present() {
+        #[derive(Clone)]
+        struct DiscoveryState {
+            root_hits: Arc<AtomicUsize>,
+            path_hits: Arc<AtomicUsize>,
+            as_base: String,
+        }
+
+        async fn root_prm(State(state): State<DiscoveryState>) -> impl IntoResponse {
+            state.root_hits.fetch_add(1, Ordering::SeqCst);
+            axum::http::StatusCode::NOT_FOUND
+        }
+
+        async fn path_prm(State(state): State<DiscoveryState>) -> impl IntoResponse {
+            state.path_hits.fetch_add(1, Ordering::SeqCst);
+            axum::Json(serde_json::json!({
+                "resource": "http://resource.test/mcp",
+                "authorization_servers": [format!("{}/as", state.as_base)],
+            }))
+            .into_response()
+        }
+
+        async fn as_metadata() -> impl IntoResponse {
+            axum::Json(serde_json::json!({
+                "authorization_endpoint": "https://github.com/login/oauth/authorize",
+                "token_endpoint": "https://github.com/login/oauth/access_token",
+                "registration_endpoint": null,
+            }))
+        }
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let state = DiscoveryState {
+                root_hits: Arc::new(AtomicUsize::new(0)),
+                path_hits: Arc::new(AtomicUsize::new(0)),
+                as_base: format!("http://{addr}"),
+            };
+            let app = Router::new()
+                .route("/.well-known/oauth-protected-resource", ax_get(root_prm))
+                .route("/.well-known/oauth-protected-resource/mcp", ax_get(path_prm))
+                .route("/.well-known/oauth-authorization-server/as", ax_get(as_metadata))
+                .with_state(state.clone());
+            tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+
+            let client = reqwest::Client::new();
+            let metadata = discover_metadata(&format!("http://{addr}/mcp/"), &client)
+                .await
+                .unwrap();
+
+            assert_eq!(
+                metadata.authorization_endpoint,
+                "https://github.com/login/oauth/authorize",
+            );
+            assert_eq!(
+                metadata.token_endpoint,
+                "https://github.com/login/oauth/access_token",
+            );
+            assert_eq!(state.path_hits.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                state.root_hits.load(Ordering::SeqCst),
+                0,
+                "root PRM should not be hit when path-scoped PRM succeeds",
             );
         });
     }

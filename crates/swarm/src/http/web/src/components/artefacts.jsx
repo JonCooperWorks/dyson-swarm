@@ -566,7 +566,7 @@ function ShareMenu({ busy, onMint }) {
               key={opt.value}
               className="btn btn-ghost btn-sm"
               onClick={() => pick(opt.value)}
-              title={opt.value === 'never' ? 'never expires (revoke manually from the shared links panel)' : undefined}
+              title={opt.value === 'never' ? 'no expiry' : undefined}
             >
               {opt.label}
             </button>

@@ -28,7 +28,7 @@ export const TTL_OPTIONS = [
   { value: '1d', label: '1 day' },
   { value: '7d', label: '7 days' },
   { value: '30d', label: '30 days' },
-  { value: 'never', label: 'never (revoke manually)' },
+  { value: 'never', label: 'never' },
 ];
 
 export function shareAccessLogHref(instanceId, jti) {

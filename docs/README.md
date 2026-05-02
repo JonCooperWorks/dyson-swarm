@@ -7,7 +7,7 @@ cover the two hot paths (`/llm/*` and `/mcp/*`), network policy explains
 what a hired sandbox can reach, and operations/testing cover how to run
 and evolve the system safely.
 
-The agent itself lives in the sibling [dyson](../../dyson) repo. Swarm is
+The agent itself lives in the sibling [dyson](https://github.com/JonCooperWorks/dyson) repo. Swarm is
 the host-side control plane: it hires and restores agents, enforces auth,
 stores encrypted state, brokers LLM and MCP traffic, and serves the web UI.
 

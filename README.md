@@ -5,7 +5,7 @@ rotates, snapshots, and reaps `dyson` agents running inside Cube
 sandboxes; serves the operator/user web UI; and brokers outbound LLM and
 MCP traffic through swarm-managed proxy surfaces.
 
-The agent itself lives in the sibling [dyson](../dyson) repo. The two
+The agent itself lives in the sibling [dyson](https://github.com/JonCooperWorks/dyson) repo. The two
 repos ship independently, which is why swarm owns persistent state,
 rotation, and upgrade orchestration.
 

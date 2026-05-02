@@ -458,21 +458,9 @@
 
 /* ── Form additions ─────────────────────────────────────────── */
 
-.field textarea, .textarea {
-  padding: 8px 10px;
-  background: var(--bg-2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  color: var(--fg);
-  font-family: var(--sans);
-  font-size: 13px;
-  line-height: 1.5;
-  resize: vertical;
+.field textarea,
+.textarea {
   min-height: 120px;
-}
-.field textarea:focus, .textarea:focus {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
 }
 .hint {
   display: block;
@@ -1046,16 +1034,9 @@
 .form { display: flex; flex-direction: column; gap: 12px; }
 .field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
 .field span { color: var(--fg-muted); }
-.field input {
-  padding: 6px 10px;
-  background: var(--bg-2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  color: var(--fg);
-  font-family: var(--mono);
-  font-size: 13px;
+.field :where(input:not([type]), input[type="date"], input[type="datetime-local"], input[type="email"], input[type="month"], input[type="number"], input[type="password"], input[type="search"], input[type="tel"], input[type="text"], input[type="time"], input[type="url"], input[type="week"], select, textarea) {
+  width: 100%;
 }
-.field input:focus { outline: 2px solid var(--accent); outline-offset: -2px; }
 
 /* Checkbox-as-field: row layout with the box on the left of its label.
  * Without this override, `.field` puts the input on its own line and
@@ -1110,6 +1091,7 @@
 .chip-input-text {
   flex: 1;
   min-width: 140px;
+  min-height: 22px;
   padding: 2px 4px;
   background: transparent;
   border: 0;
@@ -1491,19 +1473,9 @@
 /* ── BYOK editor modal (form fields) ───────────────────────────── */
 
 .byok-key-input {
-  padding: 8px 10px;
-  background: var(--bg-2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  color: var(--fg);
   font-family: var(--mono);
   font-size: 12px;
-  resize: vertical;
   min-height: 64px;
-}
-.byok-key-input:focus {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
 }
 
 .byok-help {
@@ -1987,6 +1959,10 @@
 }
 .audit-task-filter {
   flex: 0 0 auto;
+}
+.audit-filters .btn-sm {
+  min-height: var(--control-height);
+  padding: 0 12px;
 }
 .audit-table tr.sig-bad td { color: var(--fg); }
 .audit-table tr:hover td { background: var(--bg-soft, rgba(255, 255, 255, 0.02)); }

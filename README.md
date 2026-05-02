@@ -98,8 +98,8 @@ The new-instance page (`#/new`) carries a profile picker.  `nolocalnet`
 is the default; `open` is the compatibility escape hatch for workloads
 that intentionally need internal/LAN targets.
 
-Host HTTP(S) proxy egress is enforced by `dyson-egress-proxy`, not
-tinyproxy.  Cubes still use `HTTP_PROXY=http://169.254.68.5:3128` and
+Host HTTP(S) proxy egress is enforced by `dyson-egress-proxy`.  Cubes
+use `HTTP_PROXY=http://169.254.68.5:3128` and
 `HTTPS_PROXY=http://169.254.68.5:3128`; Cube DNATs that address to
 `192.168.0.1:3128` on the host.  The proxy reads
 `/run/dyson-egress/policies.json` and checks the source sandbox IP plus

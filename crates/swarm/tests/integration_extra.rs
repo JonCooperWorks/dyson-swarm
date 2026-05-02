@@ -219,12 +219,15 @@ async fn build_stack(subject_for_no_bearer: &str) -> Stack {
         sandbox_domain: "cube.test".into(),
     };
     let cube: Arc<dyn CubeClient> = Arc::new(HttpCubeClient::new(&cube_cfg).unwrap());
-    let instances_store: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(pool.clone()));
-    let secrets_store: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
-    let tokens_store: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(pool.clone()));
     let keys_tmp = Box::leak(Box::new(tempfile::tempdir().unwrap()));
     let cipher_dir: Arc<dyn CipherDirectory> =
         Arc::new(AgeCipherDirectory::new(keys_tmp.path()).unwrap());
+    let system_cipher = cipher_dir.system().unwrap();
+    let instances_store: Arc<dyn InstanceStore> =
+        Arc::new(SqlxInstanceStore::new(pool.clone(), system_cipher.clone()));
+    let secrets_store: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
+    let tokens_store: Arc<dyn TokenStore> =
+        Arc::new(SqlxTokenStore::new(pool.clone(), system_cipher));
     let user_secrets_store: Arc<dyn UserSecretStore> = Arc::new(
         dyson_swarm::db::secrets::SqlxUserSecretStore::new(pool.clone()),
     );

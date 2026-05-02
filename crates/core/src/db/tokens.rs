@@ -13,26 +13,17 @@ use crate::traits::{TokenRecord, TokenStore};
 #[derive(Debug, Clone)]
 pub struct SqlxTokenStore {
     pool: SqlitePool,
-    cipher: Option<Arc<dyn EnvelopeCipher>>,
+    cipher: Arc<dyn EnvelopeCipher>,
 }
 
 impl SqlxTokenStore {
-    pub fn new(pool: SqlitePool) -> Self {
-        Self { pool, cipher: None }
-    }
-
-    pub fn sealed(pool: SqlitePool, cipher: Arc<dyn EnvelopeCipher>) -> Self {
-        Self {
-            pool,
-            cipher: Some(cipher),
-        }
+    pub fn new(pool: SqlitePool, cipher: Arc<dyn EnvelopeCipher>) -> Self {
+        Self { pool, cipher }
     }
 
     fn seal_token(&self, token: &str) -> Result<String, StoreError> {
-        let Some(cipher) = self.cipher.as_ref() else {
-            return Ok(token.to_owned());
-        };
-        let sealed = cipher
+        let sealed = self
+            .cipher
             .seal(token.as_bytes())
             .map_err(|e| StoreError::Io(format!("seal proxy token: {e}")))?;
         String::from_utf8(sealed)
@@ -40,16 +31,8 @@ impl SqlxTokenStore {
     }
 
     fn open_token(&self, stored: &str) -> Result<String, StoreError> {
-        // Backwards compatibility for rows minted before token sealing.
-        if stored.starts_with("pt_") || stored.starts_with("it_") {
-            return Ok(stored.to_owned());
-        }
-        let Some(cipher) = self.cipher.as_ref() else {
-            return Err(StoreError::Malformed(
-                "proxy token row is sealed but token store has no cipher".into(),
-            ));
-        };
-        let plain = cipher
+        let plain = self
+            .cipher
             .open(stored.as_bytes())
             .map_err(|e| StoreError::Malformed(format!("open proxy token: {e}")))?;
         String::from_utf8(plain)
@@ -241,7 +224,7 @@ mod tests {
     }
 
     async fn seed(pool: &SqlitePool, id: &str) {
-        let store = SqlxInstanceStore::new(pool.clone());
+        let store = SqlxInstanceStore::new(pool.clone(), Arc::new(TestCipher));
         store
             .create(InstanceRow {
                 id: id.into(),
@@ -273,7 +256,7 @@ mod tests {
     async fn mint_resolve_revoke() {
         let pool = open_in_memory().await.unwrap();
         seed(&pool, "i1").await;
-        let store = SqlxTokenStore::new(pool);
+        let store = SqlxTokenStore::new(pool, Arc::new(TestCipher));
         let tok = store.mint("i1", "anthropic").await.unwrap();
         assert!(tok.starts_with("pt_"));
         assert_eq!(tok.len(), 35);
@@ -290,7 +273,7 @@ mod tests {
     #[tokio::test]
     async fn unknown_token_resolves_none() {
         let pool = open_in_memory().await.unwrap();
-        let store = SqlxTokenStore::new(pool);
+        let store = SqlxTokenStore::new(pool, Arc::new(TestCipher));
         assert!(store.resolve("not-a-token").await.unwrap().is_none());
     }
 
@@ -299,7 +282,7 @@ mod tests {
         let pool = open_in_memory().await.unwrap();
         seed(&pool, "i1").await;
         seed(&pool, "i2").await;
-        let store = SqlxTokenStore::new(pool);
+        let store = SqlxTokenStore::new(pool, Arc::new(TestCipher));
         let t1 = store.mint("i1", "openai").await.unwrap();
         let t2 = store.mint("i2", "openai").await.unwrap();
         store.revoke_for_instance("i1").await.unwrap();
@@ -317,7 +300,7 @@ mod tests {
         // remains live.
         let pool = open_in_memory().await.unwrap();
         seed(&pool, "i1").await;
-        let store = SqlxTokenStore::new(pool);
+        let store = SqlxTokenStore::new(pool, Arc::new(TestCipher));
         let t1 = store.mint("i1", "openai").await.unwrap();
         let t2 = store.mint("i1", "anthropic").await.unwrap();
 
@@ -345,7 +328,7 @@ mod tests {
         // filters by provider.  Both must be set correctly on mint.
         let pool = open_in_memory().await.unwrap();
         seed(&pool, "i1").await;
-        let store = SqlxTokenStore::new(pool);
+        let store = SqlxTokenStore::new(pool, Arc::new(TestCipher));
         let tok = store.mint_ingest("i1").await.unwrap();
         assert!(
             tok.starts_with("it_"),
@@ -366,7 +349,7 @@ mod tests {
         // pushes from a still-running cube the destroy didn't catch.
         let pool = open_in_memory().await.unwrap();
         seed(&pool, "i1").await;
-        let store = SqlxTokenStore::new(pool);
+        let store = SqlxTokenStore::new(pool, Arc::new(TestCipher));
         let chat = store.mint("i1", "openai").await.unwrap();
         let ingest = store.mint_ingest("i1").await.unwrap();
 
@@ -388,7 +371,7 @@ mod tests {
         // assertion that mint and mint_ingest produce disjoint shapes.
         let pool = open_in_memory().await.unwrap();
         seed(&pool, "i1").await;
-        let store = SqlxTokenStore::new(pool);
+        let store = SqlxTokenStore::new(pool, Arc::new(TestCipher));
         let pt = store.mint("i1", "openai").await.unwrap();
         let it = store.mint_ingest("i1").await.unwrap();
         assert!(pt.starts_with("pt_"));
@@ -397,10 +380,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sealed_store_does_not_persist_plaintext_tokens() {
+    async fn store_does_not_persist_plaintext_tokens() {
         let pool = open_in_memory().await.unwrap();
         seed(&pool, "i1").await;
-        let store = SqlxTokenStore::sealed(pool.clone(), Arc::new(TestCipher));
+        let store = SqlxTokenStore::new(pool.clone(), Arc::new(TestCipher));
         let tok = store
             .mint("i1", crate::instance::SHARED_PROVIDER)
             .await
@@ -430,18 +413,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sealed_store_still_reads_legacy_plaintext_rows() {
+    async fn store_rejects_unmigrated_plaintext_tokens() {
         let pool = open_in_memory().await.unwrap();
         seed(&pool, "i1").await;
-        let legacy = SqlxTokenStore::new(pool.clone());
-        let tok = legacy.mint("i1", "openai").await.unwrap();
+        sqlx::query(
+            "INSERT INTO proxy_tokens (token, instance_id, provider, created_at, revoked_at)
+             VALUES ('pt_unmigrated', 'i1', 'openrouter', 0, NULL)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
 
-        let sealed = SqlxTokenStore::sealed(pool, Arc::new(TestCipher));
-        let resolved = sealed
-            .resolve(&tok)
-            .await
-            .unwrap()
-            .expect("legacy plaintext token resolves");
-        assert_eq!(resolved.token, tok);
+        let store = SqlxTokenStore::new(pool, Arc::new(TestCipher));
+        let err = store.resolve("pt_unmigrated").await.unwrap_err();
+        assert!(matches!(err, StoreError::Malformed(_)));
     }
 }

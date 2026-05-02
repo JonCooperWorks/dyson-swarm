@@ -20,6 +20,7 @@ pub mod artefacts;
 pub mod audit;
 pub mod instances;
 pub mod policies;
+pub mod runtime_migrations;
 pub mod secrets;
 pub mod shares;
 pub mod snapshots;
@@ -101,4 +102,11 @@ pub async fn open_in_memory() -> Result<SqlitePool, sqlx::Error> {
         .await
         .map_err(|e| sqlx::Error::Migrate(Box::new(e)))?;
     Ok(pool)
+}
+
+#[cfg(test)]
+pub(crate) fn test_system_cipher() -> std::sync::Arc<dyn crate::envelope::EnvelopeCipher> {
+    let tmp = tempfile::tempdir().expect("test keys tempdir");
+    let dir = crate::envelope::AgeCipherDirectory::new(tmp.path()).expect("test cipher dir");
+    crate::envelope::CipherDirectory::system(&dir).expect("test system cipher")
 }

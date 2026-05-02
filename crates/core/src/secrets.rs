@@ -407,7 +407,10 @@ mod tests {
     }
 
     async fn instance_store() -> Arc<dyn InstanceStore> {
-        Arc::new(SqlxInstanceStore::new(open_in_memory().await.unwrap()))
+        Arc::new(SqlxInstanceStore::new(
+            open_in_memory().await.unwrap(),
+            crate::db::test_system_cipher(),
+        ))
     }
 
     async fn instance_store_with(owner_id: &str, instance_id: &str) -> Arc<dyn InstanceStore> {
@@ -424,7 +427,10 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        let store: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(pool));
+        let store: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(
+            pool,
+            crate::db::test_system_cipher(),
+        ));
         store
             .create(InstanceRow {
                 id: instance_id.to_owned(),

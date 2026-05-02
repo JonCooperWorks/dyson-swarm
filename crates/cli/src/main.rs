@@ -194,9 +194,32 @@ async fn run_dyson_skills(cfg: &config::Config, id: String) -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    let cipher_dir =
+        match dyson_swarm_core::envelope::AgeCipherDirectory::new(cfg.resolved_keys_dir()) {
+            Ok(d) => std::sync::Arc::new(d)
+                as std::sync::Arc<dyn dyson_swarm_core::envelope::CipherDirectory>,
+            Err(err) => {
+                eprintln!("keys_dir open: {err}");
+                return ExitCode::from(2);
+            }
+        };
+    let system_cipher = match cipher_dir.system() {
+        Ok(c) => c,
+        Err(err) => {
+            eprintln!("system envelope init: {err}");
+            return ExitCode::from(2);
+        }
+    };
+    if let Err(err) =
+        dyson_swarm_core::db::runtime_migrations::migrate(&pool, system_cipher.as_ref()).await
+    {
+        eprintln!("runtime data migration: {err}");
+        return ExitCode::from(2);
+    }
     let instances_store: std::sync::Arc<dyn dyson_swarm_core::traits::InstanceStore> =
         std::sync::Arc::new(dyson_swarm_core::db::instances::SqlxInstanceStore::new(
             pool.clone(),
+            system_cipher,
         ));
     let row = match instances_store.get(&id).await {
         Ok(Some(r)) => r,
@@ -213,16 +236,6 @@ async fn run_dyson_skills(cfg: &config::Config, id: String) -> ExitCode {
         Some(s) => s.to_owned(),
         None => {
             eprintln!("instance has no cube_sandbox_id");
-            return ExitCode::from(2);
-        }
-    };
-    let cipher_dir = match dyson_swarm_core::envelope::AgeCipherDirectory::new(
-        cfg.keys_dir.clone().unwrap_or_default(),
-    ) {
-        Ok(d) => std::sync::Arc::new(d)
-            as std::sync::Arc<dyn dyson_swarm_core::envelope::CipherDirectory>,
-        Err(err) => {
-            eprintln!("keys_dir open: {err}");
             return ExitCode::from(2);
         }
     };
@@ -276,12 +289,19 @@ async fn build_ops_services(cfg: &config::Config) -> Result<OpsServices, String>
     let system_cipher = cipher_dir
         .system()
         .map_err(|e| format!("system envelope init: {e:#}"))?;
-    let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::sealed(
-        pool.clone(),
-        system_cipher.clone(),
-    ));
+    let report = db::runtime_migrations::migrate(&pool, system_cipher.as_ref())
+        .await
+        .map_err(|e| format!("runtime data migration: {e:#}"))?;
+    if report.applied {
+        eprintln!(
+            "ok: runtime data migrations sealed {} proxy token(s), {} instance bearer(s)",
+            report.proxy_tokens_sealed, report.instance_bearers_sealed
+        );
+    }
+    let instances: Arc<dyn InstanceStore> =
+        Arc::new(SqlxInstanceStore::new(pool.clone(), system_cipher.clone()));
     let secrets: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
-    let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::sealed(pool.clone(), system_cipher));
+    let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(pool.clone(), system_cipher));
     let snapshots_store: Arc<dyn SnapshotStore> =
         Arc::new(db::snapshots::SqliteSnapshotStore::new(pool.clone()));
 

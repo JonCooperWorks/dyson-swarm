@@ -356,7 +356,7 @@ mod tests {
     use crate::traits::{InstanceRow, InstanceStatus, InstanceStore};
 
     async fn seed_instance(pool: sqlx::SqlitePool, id: &str) {
-        crate::db::instances::SqlxInstanceStore::new(pool)
+        crate::db::instances::SqlxInstanceStore::new(pool, crate::db::test_system_cipher())
             .create(InstanceRow {
                 id: id.into(),
                 owner_id: "legacy".into(),

@@ -181,7 +181,7 @@ mod tests {
     use crate::traits::{InstanceRow, InstanceStatus, InstanceStore};
 
     async fn seed(pool: &SqlitePool, id: &str) {
-        let store = SqlxInstanceStore::new(pool.clone());
+        let store = SqlxInstanceStore::new(pool.clone(), crate::db::test_system_cipher());
         store
             .create(InstanceRow {
                 id: id.into(),

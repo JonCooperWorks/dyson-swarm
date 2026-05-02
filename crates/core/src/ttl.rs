@@ -119,9 +119,15 @@ mod tests {
     async fn run_once_destroys_only_expired_unpinned() {
         let pool = open_in_memory().await.unwrap();
         let cube = Arc::new(MockCube::default());
-        let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(pool.clone()));
+        let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(
+            pool.clone(),
+            crate::db::test_system_cipher(),
+        ));
         let secrets: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
-        let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(pool.clone()));
+        let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(
+            pool.clone(),
+            crate::db::test_system_cipher(),
+        ));
         let svc = Arc::new(InstanceService::new(
             cube.clone(),
             instances.clone(),

@@ -48,30 +48,16 @@ fn vec_to_csv(v: &[String]) -> String {
 #[derive(Debug, Clone)]
 pub struct SqlxInstanceStore {
     pool: SqlitePool,
-    cipher: Option<Arc<dyn EnvelopeCipher>>,
+    cipher: Arc<dyn EnvelopeCipher>,
 }
 
 impl SqlxInstanceStore {
-    pub fn new(pool: SqlitePool) -> Self {
-        Self { pool, cipher: None }
-    }
-
-    pub fn sealed(pool: SqlitePool, cipher: Arc<dyn EnvelopeCipher>) -> Self {
-        Self {
-            pool,
-            cipher: Some(cipher),
-        }
+    pub fn new(pool: SqlitePool, cipher: Arc<dyn EnvelopeCipher>) -> Self {
+        Self { pool, cipher }
     }
 }
 
-fn is_legacy_bearer(stored: &str) -> bool {
-    stored.len() == 32 && stored.bytes().all(|b| b.is_ascii_hexdigit())
-}
-
-fn seal_bearer(cipher: Option<&dyn EnvelopeCipher>, bearer: &str) -> Result<String, StoreError> {
-    let Some(cipher) = cipher else {
-        return Ok(bearer.to_owned());
-    };
+fn seal_bearer(cipher: &dyn EnvelopeCipher, bearer: &str) -> Result<String, StoreError> {
     let sealed = cipher
         .seal(bearer.as_bytes())
         .map_err(|e| StoreError::Io(format!("seal instance bearer: {e}")))?;
@@ -79,13 +65,7 @@ fn seal_bearer(cipher: Option<&dyn EnvelopeCipher>, bearer: &str) -> Result<Stri
         .map_err(|_| StoreError::Malformed("sealed instance bearer was not utf-8".into()))
 }
 
-fn open_bearer(cipher: Option<&dyn EnvelopeCipher>, stored: &str) -> Result<String, StoreError> {
-    if is_legacy_bearer(stored) {
-        return Ok(stored.to_owned());
-    }
-    let Some(cipher) = cipher else {
-        return Ok(stored.to_owned());
-    };
+fn open_bearer(cipher: &dyn EnvelopeCipher, stored: &str) -> Result<String, StoreError> {
     let plain = cipher
         .open(stored.as_bytes())
         .map_err(|e| StoreError::Malformed(format!("open instance bearer: {e}")))?;
@@ -95,7 +75,7 @@ fn open_bearer(cipher: Option<&dyn EnvelopeCipher>, stored: &str) -> Result<Stri
 
 fn row_to_instance(
     row: &sqlx::sqlite::SqliteRow,
-    cipher: Option<&dyn EnvelopeCipher>,
+    cipher: &dyn EnvelopeCipher,
 ) -> Result<InstanceRow, StoreError> {
     let status_text: String = row.try_get("status").map_err(map_sqlx)?;
     let status = InstanceStatus::parse(&status_text)
@@ -160,7 +140,7 @@ impl InstanceStore for SqlxInstanceStore {
             .map_err(|e| StoreError::Io(format!("models encode: {e}")))?;
         let tools_json = serde_json::to_string(&row.tools)
             .map_err(|e| StoreError::Io(format!("tools encode: {e}")))?;
-        let bearer_token = seal_bearer(self.cipher.as_deref(), &row.bearer_token)?;
+        let bearer_token = seal_bearer(self.cipher.as_ref(), &row.bearer_token)?;
         sqlx::query(
             "INSERT INTO instances \
              (id, owner_id, name, task, cube_sandbox_id, template_id, status, bearer_token, \
@@ -203,7 +183,7 @@ impl InstanceStore for SqlxInstanceStore {
             .await
             .map_err(map_sqlx)?;
         match row {
-            Some(r) => Ok(Some(row_to_instance(&r, self.cipher.as_deref())?)),
+            Some(r) => Ok(Some(row_to_instance(&r, self.cipher.as_ref())?)),
             None => Ok(None),
         }
     }
@@ -223,7 +203,7 @@ impl InstanceStore for SqlxInstanceStore {
                 .await
                 .map_err(map_sqlx)?;
         match row {
-            Some(r) => Ok(Some(row_to_instance(&r, self.cipher.as_deref())?)),
+            Some(r) => Ok(Some(row_to_instance(&r, self.cipher.as_ref())?)),
             None => Ok(None),
         }
     }
@@ -250,7 +230,7 @@ impl InstanceStore for SqlxInstanceStore {
         .await
         .map_err(map_sqlx)?;
         rows.iter()
-            .map(|row| row_to_instance(row, self.cipher.as_deref()))
+            .map(|row| row_to_instance(row, self.cipher.as_ref()))
             .collect()
     }
 
@@ -462,7 +442,7 @@ impl InstanceStore for SqlxInstanceStore {
         .await
         .map_err(map_sqlx)?;
         rows.iter()
-            .map(|row| row_to_instance(row, self.cipher.as_deref()))
+            .map(|row| row_to_instance(row, self.cipher.as_ref()))
             .collect()
     }
 }
@@ -519,7 +499,7 @@ mod tests {
     #[tokio::test]
     async fn create_get_round_trip() {
         let pool = open_in_memory().await.unwrap();
-        let store = SqlxInstanceStore::new(pool);
+        let store = SqlxInstanceStore::new(pool, Arc::new(TestCipher));
         store.create(sample("a")).await.unwrap();
         let got = store.get("a").await.unwrap().expect("present");
         assert_eq!(got.id, "a");
@@ -530,9 +510,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sealed_store_does_not_persist_plaintext_bearer() {
+    async fn store_does_not_persist_plaintext_bearer() {
         let pool = open_in_memory().await.unwrap();
-        let store = SqlxInstanceStore::sealed(pool.clone(), Arc::new(TestCipher));
+        let store = SqlxInstanceStore::new(pool.clone(), Arc::new(TestCipher));
         let row = sample("a");
         let bearer = row.bearer_token.clone();
         store.create(row).await.unwrap();
@@ -550,22 +530,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sealed_store_still_reads_legacy_plaintext_bearer() {
+    async fn store_rejects_unmigrated_plaintext_bearer() {
         let pool = open_in_memory().await.unwrap();
-        let legacy = SqlxInstanceStore::new(pool.clone());
-        let mut row = sample("a");
-        row.bearer_token = "0123456789abcdef0123456789abcdef".to_string();
-        legacy.create(row).await.unwrap();
+        sqlx::query(
+            "INSERT INTO instances
+             (id, owner_id, name, task, cube_sandbox_id, template_id, status, bearer_token,
+              pinned, expires_at, last_active_at, last_probe_at, last_probe_status,
+              created_at, destroyed_at, rotated_to,
+              network_policy_kind, network_policy_entries, network_policy_cidrs, models, tools)
+             VALUES ('a', 'legacy', '', '', NULL, 'tpl', 'live', 'plaintext-bearer',
+                     0, NULL, 0, NULL, NULL, 0, NULL, NULL,
+                     'open', '', '', '[]', '[]')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
 
-        let sealed = SqlxInstanceStore::sealed(pool, Arc::new(TestCipher));
-        let got = sealed.get("a").await.unwrap().expect("present");
-        assert_eq!(got.bearer_token, "0123456789abcdef0123456789abcdef");
+        let store = SqlxInstanceStore::new(pool, Arc::new(TestCipher));
+        let err = store.get("a").await.unwrap_err();
+        assert!(matches!(err, StoreError::Malformed(_)));
     }
 
     #[tokio::test]
     async fn update_status_destroys() {
         let pool = open_in_memory().await.unwrap();
-        let store = SqlxInstanceStore::new(pool);
+        let store = SqlxInstanceStore::new(pool, Arc::new(TestCipher));
         store.create(sample("a")).await.unwrap();
         store
             .update_status("a", InstanceStatus::Destroyed)
@@ -579,7 +568,7 @@ mod tests {
     #[tokio::test]
     async fn pin_clears_expiry_unpin_sets_it() {
         let pool = open_in_memory().await.unwrap();
-        let store = SqlxInstanceStore::new(pool);
+        let store = SqlxInstanceStore::new(pool, Arc::new(TestCipher));
         store.create(sample("a")).await.unwrap();
         store.pin("a", true, None).await.unwrap();
         let pinned = store.get("a").await.unwrap().unwrap();
@@ -595,7 +584,7 @@ mod tests {
     #[tokio::test]
     async fn record_probe_round_trips_through_json() {
         let pool = open_in_memory().await.unwrap();
-        let store = SqlxInstanceStore::new(pool);
+        let store = SqlxInstanceStore::new(pool, Arc::new(TestCipher));
         store.create(sample("a")).await.unwrap();
         store
             .record_probe(
@@ -617,7 +606,7 @@ mod tests {
     #[tokio::test]
     async fn expired_excludes_pinned_and_destroyed() {
         let pool = open_in_memory().await.unwrap();
-        let store = SqlxInstanceStore::new(pool);
+        let store = SqlxInstanceStore::new(pool, Arc::new(TestCipher));
         let mut a = sample("a");
         a.expires_at = Some(50);
         store.create(a).await.unwrap();
@@ -644,7 +633,7 @@ mod tests {
     #[tokio::test]
     async fn list_filters_destroyed_by_default() {
         let pool = open_in_memory().await.unwrap();
-        let store = SqlxInstanceStore::new(pool);
+        let store = SqlxInstanceStore::new(pool, Arc::new(TestCipher));
         store.create(sample("a")).await.unwrap();
         let mut b = sample("b");
         b.status = InstanceStatus::Destroyed;
@@ -670,7 +659,7 @@ mod tests {
     #[tokio::test]
     async fn update_identity_round_trips_and_is_owner_scoped() {
         let pool = open_in_memory().await.unwrap();
-        let store = SqlxInstanceStore::new(pool);
+        let store = SqlxInstanceStore::new(pool, Arc::new(TestCipher));
         store.create(sample("a")).await.unwrap();
 
         store
@@ -696,7 +685,7 @@ mod tests {
     #[tokio::test]
     async fn touch_updates_last_active() {
         let pool = open_in_memory().await.unwrap();
-        let store = SqlxInstanceStore::new(pool);
+        let store = SqlxInstanceStore::new(pool, Arc::new(TestCipher));
         store.create(sample("a")).await.unwrap();
         let before = store.get("a").await.unwrap().unwrap().last_active_at;
         // touch sets to now, which is far larger than 100

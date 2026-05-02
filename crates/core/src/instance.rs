@@ -3225,9 +3225,15 @@ mod tests {
     ) {
         let pool = open_in_memory().await.unwrap();
         let cube = MockCube::new();
-        let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(pool.clone()));
+        let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(
+            pool.clone(),
+            crate::db::test_system_cipher(),
+        ));
         let secrets: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
-        let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(pool));
+        let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(
+            pool,
+            crate::db::test_system_cipher(),
+        ));
         let svc = InstanceService::new(
             cube.clone(),
             instances.clone(),
@@ -3799,9 +3805,15 @@ mod tests {
     async fn create_pushes_proxy_base_without_trailing_v1() {
         let pool = open_in_memory().await.unwrap();
         let cube = MockCube::new();
-        let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(pool.clone()));
+        let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(
+            pool.clone(),
+            crate::db::test_system_cipher(),
+        ));
         let secrets: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
-        let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(pool));
+        let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(
+            pool,
+            crate::db::test_system_cipher(),
+        ));
         let svc = InstanceService::new(
             cube.clone(),
             instances,
@@ -3865,9 +3877,15 @@ mod tests {
     ) {
         let pool = open_in_memory().await.unwrap();
         let cube = MockCube::new();
-        let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(pool.clone()));
+        let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(
+            pool.clone(),
+            crate::db::test_system_cipher(),
+        ));
         let secrets: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
-        let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(pool));
+        let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(
+            pool,
+            crate::db::test_system_cipher(),
+        ));
         let recorder = Arc::new(RecordingReconfigurer::default());
         let svc = InstanceService::new(
             cube.clone(),
@@ -3968,8 +3986,14 @@ mod tests {
         //       dyson reloads with MCP wired up on the next turn.
         let pool = crate::db::open_in_memory().await.unwrap();
         let cube = MockCube::new();
-        let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(pool.clone()));
-        let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(pool.clone()));
+        let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(
+            pool.clone(),
+            crate::db::test_system_cipher(),
+        ));
+        let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(
+            pool.clone(),
+            crate::db::test_system_cipher(),
+        ));
         let secrets_store: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
         let recorder = Arc::new(RecordingReconfigurer::default());
         let tmp = tempfile::tempdir().unwrap();
@@ -4385,8 +4409,14 @@ mod tests {
         .await
         .unwrap();
         let cube = MockCube::new();
-        let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(pool.clone()));
-        let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(pool.clone()));
+        let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(
+            pool.clone(),
+            crate::db::test_system_cipher(),
+        ));
+        let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(
+            pool.clone(),
+            crate::db::test_system_cipher(),
+        ));
         let secrets_store: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
         let recorder = Arc::new(RecordingReconfigurer::default());
         let tmp = Box::leak(Box::new(tempfile::tempdir().unwrap()));
@@ -4616,9 +4646,15 @@ mod tests {
     ) {
         let pool = open_in_memory().await.unwrap();
         let cube = MockCube::new();
-        let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(pool.clone()));
+        let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(
+            pool.clone(),
+            crate::db::test_system_cipher(),
+        ));
         let secrets: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
-        let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(pool.clone()));
+        let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(
+            pool.clone(),
+            crate::db::test_system_cipher(),
+        ));
         let snaps: Arc<dyn SnapshotStore> = Arc::new(SqliteSnapshotStore::new(pool.clone()));
         let recorder = Arc::new(RecordingReconfigurer::default());
         let keys_tmp = tempfile::tempdir().unwrap();
@@ -4707,9 +4743,15 @@ mod tests {
     ) {
         let pool = open_in_memory().await.unwrap();
         let cube = MockCube::new();
-        let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(pool.clone()));
+        let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(
+            pool.clone(),
+            crate::db::test_system_cipher(),
+        ));
         let secrets: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
-        let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(pool.clone()));
+        let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(
+            pool.clone(),
+            crate::db::test_system_cipher(),
+        ));
         let snaps: Arc<dyn SnapshotStore> = Arc::new(SqliteSnapshotStore::new(pool.clone()));
         let recorder = Arc::new(RecordingReconfigurer::default());
         let keys_tmp = tempfile::tempdir().unwrap();
@@ -5711,9 +5753,15 @@ mod tests {
         .await
         .unwrap();
         let cube = MockCube::new();
-        let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(pool.clone()));
+        let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(
+            pool.clone(),
+            crate::db::test_system_cipher(),
+        ));
         let secrets_store: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
-        let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(pool.clone()));
+        let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(
+            pool.clone(),
+            crate::db::test_system_cipher(),
+        ));
         let snaps: Arc<dyn SnapshotStore> = Arc::new(SqliteSnapshotStore::new(pool.clone()));
         let recorder = Arc::new(RecordingReconfigurer::default());
         let tmp = Box::leak(Box::new(tempfile::tempdir().unwrap()));

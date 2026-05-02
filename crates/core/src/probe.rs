@@ -236,8 +236,12 @@ mod tests {
         }
     }
 
-    async fn seed_live(pool: &sqlx::SqlitePool, id: &str) {
-        let store = SqlxInstanceStore::new(pool.clone());
+    async fn seed_live(
+        pool: &sqlx::SqlitePool,
+        cipher: Arc<dyn crate::envelope::EnvelopeCipher>,
+        id: &str,
+    ) {
+        let store = SqlxInstanceStore::new(pool.clone(), cipher);
         store
             .create(InstanceRow {
                 id: id.into(),
@@ -305,10 +309,11 @@ mod tests {
     #[tokio::test]
     async fn run_once_persists_results_and_skips_destroyed() {
         let pool = open_in_memory().await.unwrap();
-        seed_live(&pool, "i1").await;
+        let cipher = crate::db::test_system_cipher();
+        seed_live(&pool, cipher.clone(), "i1").await;
 
         // A destroyed instance: should NOT be probed.
-        let store = SqlxInstanceStore::new(pool.clone());
+        let store = SqlxInstanceStore::new(pool.clone(), cipher.clone());
         store
             .create(InstanceRow {
                 id: "d1".into(),
@@ -337,7 +342,8 @@ mod tests {
 
         let prober = ScriptedProber::new(vec![ProbeResult::Healthy]);
         let counters = Mutex::new(UnreachableCounters::default());
-        let store_dyn: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(pool.clone()));
+        let store_dyn: Arc<dyn InstanceStore> =
+            Arc::new(SqlxInstanceStore::new(pool.clone(), cipher));
         run_once(&prober, &*store_dyn, &counters).await;
 
         assert_eq!(prober.calls.load(Ordering::SeqCst), 1);
@@ -351,8 +357,10 @@ mod tests {
     #[tokio::test]
     async fn run_once_three_unreachables_warn_once() {
         let pool = open_in_memory().await.unwrap();
-        seed_live(&pool, "i1").await;
-        let store_dyn: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(pool.clone()));
+        let cipher = crate::db::test_system_cipher();
+        seed_live(&pool, cipher.clone(), "i1").await;
+        let store_dyn: Arc<dyn InstanceStore> =
+            Arc::new(SqlxInstanceStore::new(pool.clone(), cipher));
 
         let unr = || ProbeResult::Unreachable {
             reason: "boom".into(),

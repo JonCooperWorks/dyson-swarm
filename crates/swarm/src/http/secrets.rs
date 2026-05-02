@@ -179,8 +179,13 @@ mod tests {
         }
     }
 
-    async fn seed_instance(pool: sqlx::SqlitePool, id: &str, owner: &str) {
-        SqlxInstanceStore::new(pool)
+    async fn seed_instance(
+        pool: sqlx::SqlitePool,
+        cipher: Arc<dyn crate::envelope::EnvelopeCipher>,
+        id: &str,
+        owner: &str,
+    ) {
+        SqlxInstanceStore::new(pool, cipher)
             .create(InstanceRow {
                 id: id.into(),
                 owner_id: owner.into(),
@@ -237,8 +242,9 @@ mod tests {
         let keys_tmp = tempfile::tempdir().unwrap();
         let cipher_dir: Arc<dyn crate::envelope::CipherDirectory> =
             Arc::new(crate::envelope::AgeCipherDirectory::new(keys_tmp.path()).unwrap());
+        let system_cipher = cipher_dir.system().unwrap();
         let instances_store: Arc<dyn InstanceStore> =
-            Arc::new(SqlxInstanceStore::new(pool.clone()));
+            Arc::new(SqlxInstanceStore::new(pool.clone(), system_cipher.clone()));
         let svc = Arc::new(SecretsService::new(
             raw.clone(),
             instances_store.clone(),
@@ -257,13 +263,14 @@ mod tests {
             cipher_dir.clone(),
         ));
         let cube: Arc<dyn CubeClient> = Arc::new(StubCube);
-        let tokens_store: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(pool.clone()));
+        let tokens_store: Arc<dyn TokenStore> =
+            Arc::new(SqlxTokenStore::new(pool.clone(), system_cipher.clone()));
         let users_store: Arc<dyn crate::traits::UserStore> = Arc::new(
             crate::db::users::SqlxUserStore::new(pool.clone(), cipher_dir.clone()),
         );
         let (user_auth, user_id) =
             crate::auth::user::fixed_user_auth(users_store.clone(), "alice").await;
-        seed_instance(pool.clone(), "i1", &user_id).await;
+        seed_instance(pool.clone(), system_cipher, "i1", &user_id).await;
         let instance_svc = Arc::new(InstanceService::new(
             cube.clone(),
             instances_store.clone(),

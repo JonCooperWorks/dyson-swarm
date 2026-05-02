@@ -148,12 +148,25 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let instances_store: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::sealed(
-        pool.clone(),
-        token_cipher.clone(),
-    ));
+    match db::runtime_migrations::migrate(&pool, token_cipher.as_ref()).await {
+        Ok(report) => {
+            if report.applied {
+                tracing::info!(
+                    proxy_tokens = report.proxy_tokens_sealed,
+                    instance_bearers = report.instance_bearers_sealed,
+                    "runtime data migrations complete"
+                );
+            }
+        }
+        Err(err) => {
+            tracing::error!(error = %err, "runtime data migration failed");
+            return ExitCode::from(2);
+        }
+    }
+    let instances_store: Arc<dyn InstanceStore> =
+        Arc::new(SqlxInstanceStore::new(pool.clone(), token_cipher.clone()));
     let tokens_store: Arc<dyn TokenStore> =
-        Arc::new(SqlxTokenStore::sealed(pool.clone(), token_cipher));
+        Arc::new(SqlxTokenStore::new(pool.clone(), token_cipher));
     let snapshots_store: Arc<dyn SnapshotStore> =
         Arc::new(db::snapshots::SqliteSnapshotStore::new(pool.clone()));
     let policies_store: Arc<dyn PolicyStore> =

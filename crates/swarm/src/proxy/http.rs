@@ -545,9 +545,32 @@ mod tests {
     use crate::db::instances::SqlxInstanceStore;
     use crate::db::open_in_memory;
     use crate::db::tokens::SqlxTokenStore;
+    use crate::envelope::{EnvelopeCipher, EnvelopeError};
     use crate::proxy::adapters;
     use crate::proxy::policy_check::InstancePolicy;
     use crate::traits::{InstanceRow, InstanceStatus, InstanceStore, TokenStore};
+
+    #[derive(Debug)]
+    struct TestCipher;
+
+    impl EnvelopeCipher for TestCipher {
+        fn seal(&self, plaintext: &[u8]) -> Result<Vec<u8>, EnvelopeError> {
+            let mut out = b"sealed:".to_vec();
+            out.extend_from_slice(plaintext);
+            Ok(out)
+        }
+
+        fn open(&self, ciphertext: &[u8]) -> Result<Vec<u8>, EnvelopeError> {
+            ciphertext
+                .strip_prefix(b"sealed:")
+                .map(|s| s.to_vec())
+                .ok_or(EnvelopeError::Corrupt)
+        }
+    }
+
+    fn system_cipher() -> Arc<dyn EnvelopeCipher> {
+        Arc::new(TestCipher)
+    }
 
     async fn seed_instance_with_token(pool: &SqlitePool) -> (String, String) {
         seed_instance_with_token_for(pool, "legacy").await
@@ -573,7 +596,7 @@ mod tests {
             .await
             .unwrap();
         }
-        let store = SqlxInstanceStore::new(pool.clone());
+        let store = SqlxInstanceStore::new(pool.clone(), system_cipher());
         let id = "i-test".to_string();
         store
             .create(InstanceRow {
@@ -600,7 +623,7 @@ mod tests {
             })
             .await
             .unwrap();
-        let tokens = SqlxTokenStore::new(pool.clone());
+        let tokens = SqlxTokenStore::new(pool.clone(), system_cipher());
         let token = tokens.mint(&id, "*").await.unwrap();
         (id, token)
     }
@@ -712,9 +735,11 @@ mod tests {
         };
         let mut providers = Providers::default();
         providers.insert(provider, cfg);
-        let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(pool.clone()));
-        let instances: Arc<dyn InstanceStore> =
-            Arc::new(crate::db::instances::SqlxInstanceStore::new(pool.clone()));
+        let tokens: Arc<dyn TokenStore> =
+            Arc::new(SqlxTokenStore::new(pool.clone(), system_cipher()));
+        let instances: Arc<dyn InstanceStore> = Arc::new(
+            crate::db::instances::SqlxInstanceStore::new(pool.clone(), system_cipher()),
+        );
         let policies: Arc<dyn crate::traits::PolicyStore> =
             Arc::new(crate::db::policies::SqlitePolicyStore::new(pool.clone()));
         let audit: Arc<dyn crate::traits::AuditStore> =
@@ -774,9 +799,11 @@ mod tests {
         };
         let mut providers = Providers::default();
         providers.insert(provider, cfg);
-        let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(pool.clone()));
-        let instances: Arc<dyn InstanceStore> =
-            Arc::new(crate::db::instances::SqlxInstanceStore::new(pool.clone()));
+        let tokens: Arc<dyn TokenStore> =
+            Arc::new(SqlxTokenStore::new(pool.clone(), system_cipher()));
+        let instances: Arc<dyn InstanceStore> = Arc::new(
+            crate::db::instances::SqlxInstanceStore::new(pool.clone(), system_cipher()),
+        );
         let policies: Arc<dyn crate::traits::PolicyStore> =
             Arc::new(crate::db::policies::SqlitePolicyStore::new(pool.clone()));
         let audit: Arc<dyn crate::traits::AuditStore> =
@@ -873,7 +900,7 @@ mod tests {
     async fn revoked_token_returns_401() {
         let pool = open_in_memory().await.unwrap();
         let (id, token) = seed_instance_with_token(&pool).await;
-        SqlxTokenStore::new(pool.clone())
+        SqlxTokenStore::new(pool.clone(), system_cipher())
             .revoke_for_instance(&id)
             .await
             .unwrap();

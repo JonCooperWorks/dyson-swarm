@@ -612,9 +612,15 @@ mod tests {
     ) {
         let pool = open_in_memory().await.unwrap();
         let cube = MockCube::new();
-        let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(pool.clone()));
+        let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(
+            pool.clone(),
+            crate::db::test_system_cipher(),
+        ));
         let secrets: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
-        let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(pool.clone()));
+        let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(
+            pool.clone(),
+            crate::db::test_system_cipher(),
+        ));
         let snaps: Arc<dyn SnapshotStore> = Arc::new(SqliteSnapshotStore::new(pool.clone()));
         let isvc = Arc::new(InstanceService::new(
             cube.clone(),
@@ -727,9 +733,15 @@ mod tests {
         }
 
         let cube = MockCube::new();
-        let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(pool.clone()));
+        let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(
+            pool.clone(),
+            crate::db::test_system_cipher(),
+        ));
         let secrets: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
-        let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(pool.clone()));
+        let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(
+            pool.clone(),
+            crate::db::test_system_cipher(),
+        ));
         let snaps_store: Arc<dyn SnapshotStore> = Arc::new(SqliteSnapshotStore::new(pool.clone()));
         let isvc = Arc::new(InstanceService::new(
             cube.clone(),
@@ -1008,9 +1020,15 @@ mod tests {
                 .unwrap();
         }
         let cube = MockCube::new();
-        let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(pool.clone()));
+        let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(
+            pool.clone(),
+            crate::db::test_system_cipher(),
+        ));
         let secrets: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
-        let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(pool.clone()));
+        let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(
+            pool.clone(),
+            crate::db::test_system_cipher(),
+        ));
         let snaps_store: Arc<dyn SnapshotStore> = Arc::new(SqliteSnapshotStore::new(pool.clone()));
         let isvc = Arc::new(InstanceService::new(
             cube.clone(),
@@ -1108,9 +1126,15 @@ mod tests {
             .unwrap();
 
         let cube = MockCube::new();
-        let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(pool.clone()));
+        let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(
+            pool.clone(),
+            crate::db::test_system_cipher(),
+        ));
         let secrets: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
-        let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(pool.clone()));
+        let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(
+            pool.clone(),
+            crate::db::test_system_cipher(),
+        ));
         let snaps: Arc<dyn SnapshotStore> = Arc::new(SqliteSnapshotStore::new(pool.clone()));
         let isvc = Arc::new(InstanceService::new(
             cube.clone(),

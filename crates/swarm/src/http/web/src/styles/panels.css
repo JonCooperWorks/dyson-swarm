@@ -363,8 +363,18 @@
     padding: 10px 0 8px;
     background: var(--bg);
     border-bottom: 1px solid var(--border);
+    transition: transform 180ms ease, opacity 180ms ease;
+    will-change: transform;
+  }
+  .detail-actions.detail-actions-hidden {
+    transform: translateY(-110%);
+    opacity: 0;
+    pointer-events: none;
   }
   .detail-actions .btn { flex: 1 1 auto; min-width: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .detail-actions { transition: none; }
 }
 
 /* Compact tap-to-copy id pill — used in place of a raw 36-char UUID

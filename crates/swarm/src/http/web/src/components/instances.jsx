@@ -1596,6 +1596,37 @@ function InstanceDetail({ id, onNew, view }) {
   });
   const [busy, setBusy] = React.useState(false);
   const [err, setErr] = React.useState(null);
+  // Hide the sticky action bar while the user is scrolling the detail
+  // pane downward, show it again on any upward gesture or when the
+  // pane is at the top.  Mobile-only — desktop CSS leaves the bar
+  // inline with the title block.  Prevents the 7-button two-row bar
+  // from eating ~25% of the viewport while reading a long subpage.
+  const detailPaneRef = React.useRef(null);
+  const [hideActions, setHideActions] = React.useState(false);
+  React.useEffect(() => { setHideActions(false); }, [id, view]);
+  React.useEffect(() => {
+    const el = detailPaneRef.current;
+    if (!el) return;
+    let lastTop = el.scrollTop;
+    let raf = 0;
+    const onScroll = () => {
+      if (raf) return;
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        const top = el.scrollTop;
+        const dy = top - lastTop;
+        if (top <= 8) setHideActions(false);
+        else if (dy > 4) setHideActions(true);
+        else if (dy < -4) setHideActions(false);
+        lastTop = top;
+      });
+    };
+    el.addEventListener('scroll', onScroll, { passive: true });
+    return () => {
+      el.removeEventListener('scroll', onScroll);
+      if (raf) cancelAnimationFrame(raf);
+    };
+  }, [row?.id]);
 
   // Pull fresh detail when selection changes (the list view's row is a
   // strict subset of the InstanceView shape, so re-fetching catches
@@ -1734,7 +1765,7 @@ function InstanceDetail({ id, onNew, view }) {
   const isWarmingUp = canOpen && (row.status !== 'live' || !row.cube_sandbox_id);
 
   return (
-    <main className="detail-pane">
+    <main className="detail-pane" ref={detailPaneRef}>
       <header className="detail-header">
         <div className="employee-card">
           <h2 className="employee-name">{displayName}</h2>
@@ -1746,7 +1777,7 @@ function InstanceDetail({ id, onNew, view }) {
             <IdChip id={row.id} openUrl={row.open_url}/>
           </div>
         </div>
-        <div className="detail-actions">
+        <div className={`detail-actions${hideActions ? ' detail-actions-hidden' : ''}`}>
           <a
             className={`btn btn-primary ${canOpen ? '' : 'btn-disabled'}`}
             href={canOpen ? row.open_url : undefined}

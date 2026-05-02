@@ -137,9 +137,7 @@ export function TasksListPage({ instanceId, embedded = false }) {
           </div>
         </div>
         {rows.length === 0 ? (
-          <p className="muted small">
-            no tasks yet — click <em>+ new</em> to expose a webhook URL.
-          </p>
+          <TasksEmpty newHref={newHref} auditHref={auditHref}/>
         ) : (
           <ul className="tasks-list">
             {rows.map(row => (
@@ -155,6 +153,22 @@ export function TasksListPage({ instanceId, embedded = false }) {
         )}
       </section>
     </Shell>
+  );
+}
+
+function TasksEmpty({ newHref, auditHref }) {
+  return (
+    <div className="tasks-empty">
+      <div className="tasks-empty-glyph" aria-hidden="true">↯</div>
+      <div className="tasks-empty-title">no tasks yet</div>
+      <div className="tasks-empty-body muted small">
+        Create one webhook URL, then watch every delivery in audit.
+      </div>
+      <div className="tasks-empty-actions">
+        <a className="btn btn-primary btn-sm" href={newHref}>+ new</a>
+        <a className="btn btn-ghost btn-sm" href={auditHref}>audit</a>
+      </div>
+    </div>
   );
 }
 
@@ -558,6 +572,13 @@ export function AuditListPage({ instanceId, embedded = false }) {
     () => (slot?.rows || []).map(r => r.name),
     [slot],
   );
+  const filterNames = React.useMemo(() => {
+    const names = new Set(taskNames);
+    (rows || []).forEach(r => {
+      if (r?.webhook_name) names.add(r.webhook_name);
+    });
+    return Array.from(names).sort((a, b) => a.localeCompare(b));
+  }, [taskNames, rows]);
 
   React.useEffect(() => {
     // Pull the task roster on mount so the webhook filter dropdown is
@@ -657,7 +678,7 @@ export function AuditListPage({ instanceId, embedded = false }) {
           <input
             type="search"
             className="audit-search"
-            placeholder="search bodies + errors…"
+            placeholder="search errors…"
             value={qInput}
             onChange={e => setQInput(e.target.value)}
             maxLength={256}
@@ -669,7 +690,7 @@ export function AuditListPage({ instanceId, embedded = false }) {
             title="filter by task"
           >
             <option value="">all tasks</option>
-            {taskNames.map(n => (
+            {filterNames.map(n => (
               <option key={n} value={n}>{n}</option>
             ))}
           </select>
@@ -703,12 +724,18 @@ export function AuditListPage({ instanceId, embedded = false }) {
             <tbody>
               {rows.map(d => {
                 const detailHref = `#/i/${encodeURIComponent(instanceId)}/tasks/audit/${encodeURIComponent(d.id)}`;
+                const deletedTask = !!slot && d.webhook_name && !taskNames.includes(d.webhook_name);
                 return (
                   <tr key={d.id} className={d.signature_ok ? '' : 'sig-bad'}>
                     <td data-label="when" className="muted small">
                       <a className="audit-row-link" href={detailHref}>{fmtTime(d.fired_at)}</a>
                     </td>
-                    <td data-label="task"><code className="mono-sm">{d.webhook_name}</code></td>
+                    <td data-label="task">
+                      <code className="mono-sm">{d.webhook_name}</code>
+                      {deletedTask ? (
+                        <span className="badge badge-faint small audit-deleted-task">deleted</span>
+                      ) : null}
+                    </td>
                     <td data-label="status">
                       <span className={`badge ${d.status_code < 400 ? 'badge-ok' : 'badge-warn'}`}>
                         {d.status_code}
@@ -755,6 +782,11 @@ export function AuditListPage({ instanceId, embedded = false }) {
 
 export function AuditDetailPage({ instanceId, deliveryId, embedded = false }) {
   const { client } = useApi();
+  const slot = useAppState(s => s.webhooks.byInstance[instanceId]);
+  const taskNames = React.useMemo(
+    () => (slot?.rows || []).map(r => r.name),
+    [slot],
+  );
   const backHref = `#/i/${encodeURIComponent(instanceId)}/tasks/audit`;
   const [row, setRow] = React.useState(null);
   const [err, setErr] = React.useState(null);
@@ -773,6 +805,16 @@ export function AuditDetailPage({ instanceId, deliveryId, embedded = false }) {
       });
     return () => { cancelled = true; };
   }, [client, instanceId, deliveryId]);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    if (!slot) {
+      client.listWebhooks(instanceId)
+        .then(list => { if (!cancelled) setWebhooksFor(instanceId, list || []); })
+        .catch(() => { /* detail still renders even if the roster cannot load */ });
+    }
+    return () => { cancelled = true; };
+  }, [client, instanceId, slot]);
 
   React.useEffect(() => {
     const onKey = (e) => { if (e.key === 'Escape') window.location.hash = backHref; };
@@ -806,12 +848,16 @@ export function AuditDetailPage({ instanceId, deliveryId, embedded = false }) {
               <dt>task</dt>
               <dd>
                 <code className="mono-sm">{row.webhook_name}</code>{' '}
-                <a
-                  className="muted small"
-                  href={`#/i/${encodeURIComponent(instanceId)}/tasks/${encodeURIComponent(row.webhook_name)}`}
-                >
-                  open task
-                </a>
+                {slot && taskNames.includes(row.webhook_name) ? (
+                  <a
+                    className="muted small"
+                    href={`#/i/${encodeURIComponent(instanceId)}/tasks/${encodeURIComponent(row.webhook_name)}`}
+                  >
+                    open task
+                  </a>
+                ) : slot ? (
+                  <span className="badge badge-faint small">deleted</span>
+                ) : null}
               </dd>
               <dt>fired</dt><dd>{fmtTime(row.fired_at)}</dd>
               <dt>status</dt>

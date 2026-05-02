@@ -282,8 +282,8 @@ export class SwarmClient {
 
   /// Cross-task audit log for an instance — newest first, cursor-paginated
   /// by `fired_at` seconds.  `before` is the previous page's oldest
-  /// `fired_at`; `q` is a substring filter applied to the body+error
-  /// columns server-side.  Each row also carries `webhook_name` so the
+  /// `fired_at`; `q` is a substring filter applied to the error text
+  /// server-side.  Each row also carries `webhook_name` so the
   /// SPA can render which task fired it.
   listInstanceDeliveries(instanceId, { limit = 50, before, q, webhook } = {}) {
     const params = new URLSearchParams();

@@ -509,6 +509,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn delivery_audit_survives_webhook_delete() {
+        let pool = open_in_memory().await.unwrap();
+        seed_instance(pool.clone(), "i1").await;
+        let webhooks = SqlxWebhookStore::new(pool.clone());
+        webhooks.put(&row("i1", "ping")).await.unwrap();
+        let deliveries = SqlxDeliveryStore::new(pool);
+
+        deliveries
+            .insert(&DeliveryRow {
+                id: "d1".into(),
+                instance_id: "i1".into(),
+                webhook_name: "ping".into(),
+                fired_at: 100,
+                status_code: 202,
+                latency_ms: 9,
+                request_id: Some("req-1".into()),
+                signature_ok: true,
+                error: None,
+                body: Some(b"{\"smoke\":true}".to_vec()),
+                body_size: Some(14),
+                content_type: Some("application/json".into()),
+            })
+            .await
+            .unwrap();
+
+        webhooks.delete("i1", "ping").await.unwrap();
+        assert!(webhooks.get("i1", "ping").await.unwrap().is_none());
+
+        let by_instance = deliveries
+            .list_for_instance("i1", None, None, None, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            by_instance
+                .iter()
+                .map(|r| r.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["d1"]
+        );
+        assert_eq!(by_instance[0].webhook_name, "ping");
+        assert!(by_instance[0].body.is_none());
+
+        let detail = deliveries.get_by_id("i1", "d1").await.unwrap().unwrap();
+        assert_eq!(detail.webhook_name, "ping");
+        assert_eq!(detail.body.as_deref(), Some(b"{\"smoke\":true}".as_slice()));
+    }
+
+    #[tokio::test]
     async fn instance_audit_list_paginates_and_searches() {
         let pool = open_in_memory().await.unwrap();
         seed_instance(pool.clone(), "i1").await;

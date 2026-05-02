@@ -1781,6 +1781,45 @@
   flex-direction: column;
 }
 
+.tasks-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 8px;
+  margin: 6px 0 0;
+  padding: 28px 16px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--bg-2) 45%, transparent);
+}
+.tasks-empty-glyph {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-1);
+  color: var(--accent);
+  font-family: var(--mono);
+  font-size: 18px;
+}
+.tasks-empty-title {
+  font-weight: 600;
+  color: var(--fg);
+}
+.tasks-empty-body {
+  max-width: 340px;
+  line-height: 1.45;
+}
+.tasks-empty-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+
 .tasks-row {
   display: flex;
   flex-direction: column;
@@ -1956,6 +1995,7 @@
   text-decoration: none;
 }
 .audit-row-link:hover { text-decoration: underline; }
+.audit-deleted-task { margin-left: 6px; }
 .audit-pager {
   display: flex;
   align-items: center;

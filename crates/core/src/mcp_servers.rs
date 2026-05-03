@@ -15,7 +15,7 @@
 //! with the per-instance proxy_token; [`crate::proxy::mcp`] handles the
 //! handshake, refresh, and forward.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use base64::Engine;
@@ -121,6 +121,13 @@ pub enum McpRuntimeSpec {
         args: Vec<String>,
         #[serde(default, skip_serializing_if = "HashMap::is_empty")]
         env: HashMap<String, String>,
+    },
+    HttpStreamable {
+        url: String,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        headers: BTreeMap<String, String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        auth_bearer_env: Option<String>,
     },
 }
 
@@ -469,10 +476,7 @@ pub fn validate_docker_stdio_args(args: &[String]) -> Result<(), String> {
         {
             return Err(format!("Docker flag `{arg}` is not allowed"));
         }
-        if !arg.starts_with("--")
-            && arg.starts_with('-')
-            && arg.chars().skip(1).any(|c| c == 'd')
-        {
+        if !arg.starts_with("--") && arg.starts_with('-') && arg.chars().skip(1).any(|c| c == 'd') {
             return Err("detached Docker MCP servers are not supported".into());
         }
         for flag in forbidden_with_value {

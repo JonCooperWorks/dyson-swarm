@@ -12,6 +12,7 @@
 //! Real upstream URL + tokens stay encrypted in the user secret store
 //! and are decrypted in-process per request.
 
+use std::collections::BTreeMap;
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
 
@@ -391,10 +392,75 @@ async fn ensure_fresh_oauth(
 struct RuntimeForwardRequest<'a> {
     instance_id: &'a str,
     server_name: &'a str,
-    command: &'a str,
-    args: &'a [String],
-    env: &'a std::collections::HashMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    command: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    args: Option<&'a [String]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    env: Option<&'a std::collections::HashMap<String, String>>,
+    transport: RuntimeTransportSpec<'a>,
     request_json: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind")]
+enum RuntimeTransportSpec<'a> {
+    DockerStdio {
+        command: &'a str,
+        args: &'a [String],
+        env: &'a std::collections::HashMap<String, String>,
+    },
+    HttpStreamable {
+        url: &'a str,
+        #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+        headers: BTreeMap<String, String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        auth_bearer_env: Option<&'a str>,
+    },
+}
+
+impl<'a> RuntimeForwardRequest<'a> {
+    fn docker(
+        instance_id: &'a str,
+        server_name: &'a str,
+        command: &'a str,
+        args: &'a [String],
+        env: &'a std::collections::HashMap<String, String>,
+        request_json: &'a str,
+    ) -> Self {
+        Self {
+            instance_id,
+            server_name,
+            command: Some(command),
+            args: Some(args),
+            env: Some(env),
+            transport: RuntimeTransportSpec::DockerStdio { command, args, env },
+            request_json,
+        }
+    }
+
+    fn http_streamable(
+        instance_id: &'a str,
+        server_name: &'a str,
+        url: &'a str,
+        headers: BTreeMap<String, String>,
+        auth_bearer_env: Option<&'a str>,
+        request_json: &'a str,
+    ) -> Self {
+        Self {
+            instance_id,
+            server_name,
+            command: None,
+            args: None,
+            env: None,
+            transport: RuntimeTransportSpec::HttpStreamable {
+                url,
+                headers,
+                auth_bearer_env,
+            },
+            request_json,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -420,24 +486,15 @@ async fn forward_runtime_stdio(
             "mcp runtime helper not configured",
         );
     };
-    let Some(McpRuntimeSpec::DockerStdio { command, args, env }) = entry.runtime.as_ref() else {
-        return error_resp(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "invalid mcp runtime entry",
-        );
-    };
     let request_json = match std::str::from_utf8(body_bytes) {
         Ok(s) => s,
         Err(_) => return error_resp(StatusCode::BAD_REQUEST, "JSON-RPC body must be UTF-8"),
     };
-    let request = RuntimeForwardRequest {
-        instance_id,
-        server_name,
-        command,
-        args,
-        env,
-        request_json,
-    };
+    let request =
+        match runtime_forward_request_for_entry(instance_id, server_name, entry, request_json) {
+            Ok(request) => request,
+            Err(msg) => return error_resp(StatusCode::INTERNAL_SERVER_ERROR, &msg),
+        };
     let runtime_resp = match call_runtime(socket_path, &request).await {
         Ok(r) => r,
         Err(err) => {
@@ -489,6 +546,58 @@ async fn forward_runtime_stdio(
     builder
         .body(Body::from(body))
         .unwrap_or_else(|_| error_resp(StatusCode::INTERNAL_SERVER_ERROR, "build resp"))
+}
+
+fn runtime_forward_request_for_entry<'a>(
+    instance_id: &'a str,
+    server_name: &'a str,
+    entry: &'a McpServerEntry,
+    request_json: &'a str,
+) -> Result<RuntimeForwardRequest<'a>, String> {
+    match entry.runtime.as_ref() {
+        Some(McpRuntimeSpec::DockerStdio { command, args, env }) => {
+            Ok(RuntimeForwardRequest::docker(
+                instance_id,
+                server_name,
+                command,
+                args,
+                env,
+                request_json,
+            ))
+        }
+        Some(McpRuntimeSpec::HttpStreamable {
+            url,
+            headers,
+            auth_bearer_env,
+        }) => {
+            let mut runtime_headers: BTreeMap<String, String> = headers.clone();
+            match &entry.auth {
+                McpAuthSpec::None => {}
+                McpAuthSpec::Bearer { token } => {
+                    runtime_headers.insert("Authorization".into(), format!("Bearer {token}"));
+                }
+                McpAuthSpec::Oauth { .. } => {
+                    let tokens = entry
+                        .oauth_tokens
+                        .as_ref()
+                        .ok_or_else(|| "oauth not authorised yet".to_string())?;
+                    runtime_headers.insert(
+                        "Authorization".into(),
+                        format!("Bearer {}", tokens.access_token),
+                    );
+                }
+            }
+            Ok(RuntimeForwardRequest::http_streamable(
+                instance_id,
+                server_name,
+                url,
+                runtime_headers,
+                auth_bearer_env.as_deref(),
+                request_json,
+            ))
+        }
+        None => Err("invalid mcp runtime entry".into()),
+    }
 }
 
 async fn call_runtime(
@@ -1331,18 +1440,9 @@ async fn post_jsonrpc_for_entry(
     let Some(socket_path) = svc.runtime_socket_path.as_deref() else {
         return Err("mcp runtime helper not configured".into());
     };
-    let Some(McpRuntimeSpec::DockerStdio { command, args, env }) = entry.runtime.as_ref() else {
-        return Err("invalid mcp runtime entry".into());
-    };
     let request_json = serde_json::to_string(body).map_err(|e| format!("encode JSON-RPC: {e}"))?;
-    let request = RuntimeForwardRequest {
-        instance_id,
-        server_name,
-        command,
-        args,
-        env,
-        request_json: &request_json,
-    };
+    let request =
+        runtime_forward_request_for_entry(instance_id, server_name, entry, &request_json)?;
     let resp = call_runtime(socket_path, &request).await?;
     if !(200..300).contains(&resp.status) {
         return Err(format!("runtime HTTP {}: {}", resp.status, resp.body));
@@ -1742,6 +1842,8 @@ mod tests {
             assert_eq!(req["instance_id"], "i-1");
             assert_eq!(req["server_name"], "echo");
             assert_eq!(req["command"], "docker");
+            assert_eq!(req["transport"]["kind"], "DockerStdio");
+            assert_eq!(req["transport"]["command"], "docker");
             let resp = serde_json::json!({
                 "status": 200,
                 "content_type": "application/json",
@@ -1757,14 +1859,14 @@ mod tests {
 
         let args = vec!["run".to_string(), "example/mcp".to_string()];
         let env = std::collections::HashMap::new();
-        let req = RuntimeForwardRequest {
-            instance_id: "i-1",
-            server_name: "echo",
-            command: "docker",
-            args: &args,
-            env: &env,
-            request_json: r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
-        };
+        let req = RuntimeForwardRequest::docker(
+            "i-1",
+            "echo",
+            "docker",
+            &args,
+            &env,
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+        );
         let resp = call_runtime(&socket, &req).await.unwrap();
         assert_eq!(resp.status, 200);
         assert!(resp.body.contains("\"ok\":true"));

@@ -3096,13 +3096,14 @@ impl InstanceService {
         Ok(())
     }
 
-    /// Fetch the exact MCP JSON previously saved through the CLI add
-    /// path.  Returns `None` when there is no raw JSON-backed MCP entry
-    /// on the instance.
+    /// Fetch exact MCP JSON previously saved through the Docker add path.
+    /// When `server_name` is set, only that entry is considered. Returns
+    /// `None` when there is no raw JSON-backed MCP entry on the instance.
     pub async fn get_vscode_mcp_config(
         &self,
         owner_id: &str,
         id: &str,
+        server_name: Option<&str>,
     ) -> Result<Option<serde_json::Value>, SwarmError> {
         let _row = self
             .instances
@@ -3113,6 +3114,12 @@ impl InstanceService {
             .mcp_secrets
             .as_ref()
             .ok_or_else(|| SwarmError::PolicyDenied("mcp secrets store not configured".into()))?;
+        if let Some(server_name) = server_name {
+            let entry = mcp_servers::get(secrets, owner_id, id, server_name)
+                .await
+                .map_err(|e| SwarmError::Internal(format!("mcp get: {e}")))?;
+            return Ok(entry.and_then(|e| e.raw_vscode_config));
+        }
         let names = mcp_servers::list_names(secrets, owner_id, id)
             .await
             .map_err(|e| SwarmError::Internal(format!("mcp list: {e}")))?;
@@ -4839,7 +4846,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn put_vscode_mcp_config_adds_cli_without_replacing_remote_servers() {
+    async fn put_vscode_mcp_config_adds_docker_without_replacing_remote_servers() {
         let (svc, _cube, _tokens, _instances, recorder, user_secrets, owner) =
             build_with_mcp_secrets().await;
         let created = hire_minimal(&svc, &owner).await;
@@ -4900,7 +4907,13 @@ mod tests {
             Some(crate::mcp_servers::McpRuntimeSpec::DockerStdio { .. })
         ));
         assert_eq!(
-            svc.get_vscode_mcp_config(&owner, &created.id)
+            svc.get_vscode_mcp_config(&owner, &created.id, None)
+                .await
+                .unwrap(),
+            Some(raw.clone())
+        );
+        assert_eq!(
+            svc.get_vscode_mcp_config(&owner, &created.id, Some("github"))
                 .await
                 .unwrap(),
             Some(raw)

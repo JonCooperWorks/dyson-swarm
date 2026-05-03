@@ -356,9 +356,9 @@ describe('McpServersPanel', () => {
     expect(client.putMcpJsonConfig).not.toHaveBeenCalled();
   });
 
-  test('CLI add path shows the JSON editor and saves through the single-server config API', async () => {
+  test('Docker add path shows the JSON editor and saves through the single-server config API', async () => {
     let rows = [];
-    const cliConfig = {
+    const dockerConfig = {
       servers: {
         github: {
           type: 'stdio',
@@ -374,7 +374,7 @@ describe('McpServersPanel', () => {
         rows = [{
           name: 'github',
           url: 'docker://ghcr.io/example/github-mcp',
-          server_type: 'cli',
+          server_type: 'docker',
           auth_kind: 'none',
           connected: true,
         }];
@@ -385,24 +385,71 @@ describe('McpServersPanel', () => {
 
     await screen.findByText('no MCP servers attached.');
     fireEvent.click(screen.getByRole('button', { name: 'add' }));
-    fireEvent.change(screen.getByLabelText('MCP server type'), { target: { value: 'cli' } });
+    expect(screen.getByRole('option', { name: 'Docker' })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('MCP server type'), { target: { value: 'docker' } });
 
     const editor = screen.getByLabelText('MCP JSON config');
     expect(editor).toHaveValue('');
     expect(editor.getAttribute('placeholder')).toContain('<container-image>');
     expect(editor.getAttribute('placeholder')).not.toContain('ghcr.io/example/github-mcp');
     expect(screen.queryByLabelText('Example MCP JSON shape')).toBeNull();
-    fireEvent.change(editor, { target: { value: JSON.stringify(cliConfig, null, 2) } });
+    fireEvent.change(editor, { target: { value: JSON.stringify(dockerConfig, null, 2) } });
     fireEvent.click(screen.getByRole('button', { name: 'save' }));
 
     await waitFor(() => expect(client.putMcpJsonConfig).toHaveBeenCalledTimes(1));
-    expect(client.putMcpJsonConfig).toHaveBeenCalledWith('inst-1', cliConfig);
+    expect(client.putMcpJsonConfig).toHaveBeenCalledWith('inst-1', dockerConfig);
     expect(client.putMcpServer).not.toHaveBeenCalled();
     await screen.findByText('github');
     expect(screen.queryByLabelText('MCP JSON config')).toBeNull();
   });
 
-  test('CLI add path does not submit the grey example when the editor is empty', async () => {
+  test('Docker rows can be edited through their saved MCP JSON', async () => {
+    const savedConfig = {
+      servers: {
+        github: {
+          type: 'stdio',
+          command: 'docker',
+          args: ['run', '-i', '--rm', 'ghcr.io/example/github-mcp'],
+        },
+      },
+    };
+    const updatedConfig = {
+      servers: {
+        github: {
+          type: 'stdio',
+          command: 'docker',
+          args: ['run', '--rm', '-i', '--entrypoint', 'python', 'ghcr.io/example/github-mcp', './entrypoint.py'],
+        },
+      },
+    };
+    const client = {
+      listMcpServers: vi.fn().mockResolvedValue([{
+        name: 'github',
+        url: 'docker://ghcr.io/example/github-mcp',
+        server_type: 'docker',
+        auth_kind: 'none',
+        connected: true,
+      }]),
+      getMcpJsonConfig: vi.fn().mockResolvedValue({ config: savedConfig }),
+      putMcpJsonConfig: vi.fn().mockResolvedValue({ ok: true }),
+      putMcpServer: vi.fn(),
+    };
+    renderPanel(client);
+
+    await screen.findByText('github');
+    fireEvent.click(screen.getByRole('button', { name: 'edit' }));
+
+    await waitFor(() => expect(client.getMcpJsonConfig).toHaveBeenCalledWith('inst-1', 'github'));
+    const editor = screen.getByLabelText('MCP JSON config');
+    expect(editor).toHaveValue(JSON.stringify(savedConfig, null, 2));
+    fireEvent.change(editor, { target: { value: JSON.stringify(updatedConfig, null, 2) } });
+    fireEvent.click(screen.getByRole('button', { name: 'save' }));
+
+    await waitFor(() => expect(client.putMcpJsonConfig).toHaveBeenCalledWith('inst-1', updatedConfig));
+    expect(client.putMcpServer).not.toHaveBeenCalled();
+  });
+
+  test('Docker add path does not submit the grey example when the editor is empty', async () => {
     const client = {
       listMcpServers: vi.fn().mockResolvedValue([]),
       putMcpServer: vi.fn(),
@@ -412,7 +459,7 @@ describe('McpServersPanel', () => {
 
     await screen.findByText('no MCP servers attached.');
     fireEvent.click(screen.getByRole('button', { name: 'add' }));
-    fireEvent.change(screen.getByLabelText('MCP server type'), { target: { value: 'cli' } });
+    fireEvent.change(screen.getByLabelText('MCP server type'), { target: { value: 'docker' } });
     fireEvent.click(screen.getByRole('button', { name: 'save' }));
 
     expect(await screen.findByText(/before saving/)).toBeInTheDocument();
@@ -420,7 +467,7 @@ describe('McpServersPanel', () => {
     expect(client.putMcpServer).not.toHaveBeenCalled();
   });
 
-  test('CLI JSON editor rejects HTTP configs so remote servers stay on the remote API path', async () => {
+  test('Docker JSON editor rejects HTTP configs so remote servers stay on the remote API path', async () => {
     const client = {
       listMcpServers: vi.fn().mockResolvedValue([]),
       putMcpServer: vi.fn(),
@@ -430,7 +477,7 @@ describe('McpServersPanel', () => {
 
     await screen.findByText('no MCP servers attached.');
     fireEvent.click(screen.getByRole('button', { name: 'add' }));
-    fireEvent.change(screen.getByLabelText('MCP server type'), { target: { value: 'cli' } });
+    fireEvent.change(screen.getByLabelText('MCP server type'), { target: { value: 'docker' } });
     fireEvent.change(screen.getByLabelText('MCP JSON config'), {
       target: {
         value: JSON.stringify({

@@ -90,7 +90,7 @@ describe('SwarmClient', () => {
     });
   });
 
-  test('CLI MCP JSON uses only the single-server config API path', async () => {
+  test('Docker MCP JSON uses only the single-server config API path', async () => {
     const fetchImpl = vi.fn().mockResolvedValue(jsonResponse({ ok: true }));
     const client = new SwarmClient({ fetch: fetchImpl, getToken: () => null });
     const config = {
@@ -107,6 +107,15 @@ describe('SwarmClient', () => {
     expect(url).toBe('/v1/instances/inst%2F1/mcp/config');
     expect(init.method).toBe('PUT');
     expect(JSON.parse(init.body)).toEqual(config);
+  });
+
+  test('Docker MCP JSON fetch can be scoped to one server', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse({ config: { servers: {} } }));
+    const client = new SwarmClient({ fetch: fetchImpl, getToken: () => null });
+    await client.getMcpJsonConfig('inst/1', 'github server');
+    const [url, init] = fetchImpl.mock.calls[0];
+    expect(url).toBe('/v1/instances/inst%2F1/mcp/config?server=github%20server');
+    expect(init.headers.get('accept')).toBe('application/json');
   });
 
   test('204 No Content returns null instead of throwing on JSON parse', async () => {

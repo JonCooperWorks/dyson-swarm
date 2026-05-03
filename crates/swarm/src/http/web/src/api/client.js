@@ -579,8 +579,8 @@ export class SwarmClient {
   // ─── Per-instance MCP servers ──────────────────────────────────────
   //
   // Records live in user_secrets sealed under the user's age cipher.
-  // CLI stdio servers can be added from one MCP JSON object; the agent
-  // only ever sees a swarm proxy URL.
+  // Docker stdio servers can be added from one MCP JSON object; the
+  // agent only ever sees a swarm proxy URL.
 
   /// `[{name, url, auth_kind, connected}, ...]` for one instance.
   /// `connected` is true for bearer/none entries (always usable) and
@@ -596,9 +596,10 @@ export class SwarmClient {
     );
   }
 
-  getMcpJsonConfig(instanceId) {
+  getMcpJsonConfig(instanceId, serverName = null) {
+    const qs = serverName ? `?server=${encodeURIComponent(serverName)}` : '';
     return this._json(
-      `/v1/instances/${encodeURIComponent(instanceId)}/mcp/config`,
+      `/v1/instances/${encodeURIComponent(instanceId)}/mcp/config${qs}`,
       { headers: { Accept: 'application/json' } },
     );
   }

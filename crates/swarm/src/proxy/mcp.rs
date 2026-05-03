@@ -935,7 +935,7 @@ struct ServerSummary {
     name: String,
     url: String,
     /// `remote` for HTTP/SSE servers created through the field UI,
-    /// `cli` for Docker stdio servers created from VS Code-style JSON.
+    /// `docker` for Docker stdio servers created from MCP JSON.
     server_type: &'static str,
     auth_kind: &'static str,
     /// True when an OAuth flow has completed — surfaced so the UI can
@@ -995,7 +995,11 @@ async fn list_servers(
             out.push(ServerSummary {
                 name,
                 url,
-                server_type: if e.runtime.is_some() { "cli" } else { "remote" },
+                server_type: if e.runtime.is_some() {
+                    "docker"
+                } else {
+                    "remote"
+                },
                 auth_kind,
                 connected,
                 tools_catalog: e.tools_catalog,
@@ -1057,7 +1061,7 @@ async fn get_server(
         name,
         url: entry.url,
         server_type: if entry.runtime.is_some() {
-            "cli"
+            "docker"
         } else {
             "remote"
         },
@@ -1084,6 +1088,7 @@ struct GetVscodeConfigResponse {
 async fn get_vscode_config(
     State(svc): State<Arc<McpService>>,
     Path(instance_id): Path<String>,
+    uri: Uri,
     axum::Extension(caller): axum::Extension<CallerIdentity>,
 ) -> Result<Json<GetVscodeConfigResponse>, Response<Body>> {
     let isvc = svc.instance_svc.as_ref().ok_or_else(|| {
@@ -1092,11 +1097,56 @@ async fn get_vscode_config(
             "mcp management not configured",
         )
     })?;
+    let server = uri.query().and_then(|query| query_param(query, "server"));
     let config = isvc
-        .get_vscode_mcp_config(&caller.user_id, &instance_id)
+        .get_vscode_mcp_config(&caller.user_id, &instance_id, server.as_deref())
         .await
         .map_err(swarm_err_to_resp)?;
     Ok(Json(GetVscodeConfigResponse { config }))
+}
+
+fn query_param(query: &str, key: &str) -> Option<String> {
+    query.split('&').find_map(|part| {
+        let (k, v) = part.split_once('=').unwrap_or((part, ""));
+        (percent_decode_query_component(k) == key).then(|| percent_decode_query_component(v))
+    })
+}
+
+fn percent_decode_query_component(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 2 < bytes.len() => {
+                if let (Some(hi), Some(lo)) = (hex_value(bytes[i + 1]), hex_value(bytes[i + 2])) {
+                    out.push((hi << 4) | lo);
+                    i += 3;
+                } else {
+                    out.push(bytes[i]);
+                    i += 1;
+                }
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_value(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
 }
 
 async fn put_vscode_config(

@@ -2707,7 +2707,7 @@ const MCP_JSON_CONFIG_EXAMPLE = `{
 // instance, lets the user add / edit / delete / disconnect, and
 // kicks off OAuth flows in a new tab.  Remote HTTP/SSE servers keep
 // the original field-based flow; Docker stdio servers are added via
-// the MCP JSON editor exposed only from Add -> CLI.
+// the MCP JSON editor exposed from Add -> Docker.
 
 export function McpServersPanel({ instanceId, policyKind, disabled }) {
   const { client } = useApi();
@@ -2795,21 +2795,31 @@ export function McpServersPanel({ instanceId, policyKind, disabled }) {
     }
   };
 
-  // Edit-button path: fetch the FULL URL via getMcpServer (the listing
-  // strips query strings) so the modal pre-fills with whatever the
-  // operator originally saved.  Shows a transient busy state while
-  // the round-trip lands; on failure we fall back to the stripped row
-  // so the user can still edit (worst case: they re-paste the URL).
+  // Edit-button path: remote rows fetch the FULL URL via getMcpServer
+  // because the listing strips query strings. Docker rows fetch the
+  // sealed raw MCP JSON so the textarea can round-trip what the
+  // operator pasted. On failure we still open the modal with row data.
   const openEdit = async (row) => {
-    if (row.server_type === 'cli') return;
     setBusy(true); setErr(null);
     try {
-      const detail = await client.getMcpServer(instanceId, row.name);
-      setEditing({ mode: 'edit', row: detail || row });
+      if (isDockerMcpRow(row)) {
+        const detail = await client.getMcpJsonConfig(instanceId, row.name);
+        setEditing({
+          mode: 'edit',
+          row: {
+            ...row,
+            server_type: 'docker',
+            raw_config: detail?.config || null,
+          },
+        });
+      } else {
+        const detail = await client.getMcpServer(instanceId, row.name);
+        setEditing({ mode: 'edit', row: detail || row });
+      }
     } catch (e) {
       // Fall back to listing data -- better than blocking the edit.
-      console.warn('[swarm] mcp edit: getMcpServer failed', e);
-      setEditing({ mode: 'edit', row });
+      console.warn('[swarm] mcp edit: prefill failed', e);
+      setEditing({ mode: 'edit', row: isDockerMcpRow(row) ? { ...row, server_type: 'docker' } : row });
     } finally {
       setBusy(false);
     }
@@ -2848,7 +2858,7 @@ export function McpServersPanel({ instanceId, policyKind, disabled }) {
               instanceId={instanceId}
               policyKind={policyKind}
               busy={busy || disabled}
-              onEdit={r.server_type === 'cli' ? null : () => openEdit(r)}
+              onEdit={() => openEdit(r)}
               onConnect={() => connect(r.name)}
               onDisconnect={() => disconnect(r.name)}
               onRemove={() => remove(r.name)}
@@ -3039,6 +3049,10 @@ function McpServerRow({
   );
 }
 
+function isDockerMcpRow(row) {
+  return row?.server_type === 'docker' || row?.server_type === 'cli';
+}
+
 export function parseMcpCliJsonConfig(text) {
   if (!text.trim()) {
     throw new Error('Paste an MCP config before saving.');
@@ -3062,10 +3076,10 @@ export function parseMcpCliJsonConfig(text) {
     ? server.type
     : (server.url ? 'http' : 'stdio');
   if (serverType !== 'stdio') {
-    throw new Error('CLI JSON must describe a stdio server. Use the remote MCP form for HTTP/SSE servers.');
+    throw new Error('Docker JSON must describe a stdio server. Use the remote MCP form for HTTP/SSE servers.');
   }
   if (typeof server.command !== 'string' || server.command.trim() !== 'docker') {
-    throw new Error('CLI stdio MCP support requires command: "docker".');
+    throw new Error('Docker MCP support requires command: "docker".');
   }
   return parsed;
 }
@@ -3110,7 +3124,8 @@ function McpServerEditModal({ initial, existingNames, onCancel, onSubmit, onSubm
   // shape matches: a false-positive mask reveals nothing.
   const hasExistingBearer = !isNew && initialAuthKind === 'bearer';
   const hasExistingOauthSecret = !isNew && initialAuthKind === 'oauth';
-  const [serverType, setServerType] = React.useState('remote');
+  const initialIsDocker = isDockerMcpRow(initial);
+  const [serverType, setServerType] = React.useState(initialIsDocker ? 'docker' : 'remote');
   const [name, setName] = React.useState(initial?.name || '');
   const [url, setUrl] = React.useState(initial?.url || '');
   const [authKind, setAuthKind] = React.useState(initialAuthKind);
@@ -3124,8 +3139,11 @@ function McpServerEditModal({ initial, existingNames, onCancel, onSubmit, onSubm
   const [authorizationUrl, setAuthorizationUrl] = React.useState('');
   const [tokenUrl, setTokenUrl] = React.useState('');
   const [registrationUrl, setRegistrationUrl] = React.useState('');
-  const [jsonText, setJsonText] = React.useState('');
+  const [jsonText, setJsonText] = React.useState(
+    initialIsDocker && initial?.raw_config ? JSON.stringify(initial.raw_config, null, 2) : ''
+  );
   const [err, setErr] = React.useState(null);
+  const isDockerJsonMode = (isNew && serverType === 'docker') || (!isNew && initialIsDocker);
 
   // Auth kind changed mid-edit → drop any "keep existing" sentinels.
   // Switching shape clears the stored creds anyway (server-side), so
@@ -3141,9 +3159,19 @@ function McpServerEditModal({ initial, existingNames, onCancel, onSubmit, onSubm
   const submit = (e) => {
     e.preventDefault();
     setErr(null);
-    if (isNew && serverType === 'cli') {
+    if (isDockerJsonMode) {
       try {
-        onSubmitJson(parseMcpCliJsonConfig(jsonText));
+        const config = parseMcpCliJsonConfig(jsonText);
+        const serverName = Object.keys(mcpServerMapFromConfig(config))[0];
+        if (!isNew && serverName !== initial.name) {
+          setErr('Names are immutable — keep the same server name or remove and re-add.');
+          return;
+        }
+        if (isNew && existingNames.includes(serverName)) {
+          setErr(`a server named "${serverName}" already exists`);
+          return;
+        }
+        onSubmitJson(config);
       } catch (e) {
         setErr(e?.message || 'The configuration is not valid JSON.');
       }
@@ -3201,16 +3229,16 @@ function McpServerEditModal({ initial, existingNames, onCancel, onSubmit, onSubm
                 aria-label="MCP server type"
               >
                 <option value="remote">remote HTTP/SSE</option>
-                <option value="cli">CLI</option>
+                <option value="docker">Docker</option>
               </select>
             </label>
           ) : null}
-          {isNew && serverType === 'cli' ? (
+          {isDockerJsonMode ? (
             <>
               <p className="muted small">
-                Paste an MCP config with exactly one stdio server under
-                `servers` or `mcpServers`. Swarm seals the JSON with your
-                key and only gives the agent a swarm proxy URL.
+                Paste Docker-backed MCP JSON with exactly one stdio server
+                under `servers` or `mcpServers`. Swarm seals the JSON with
+                your key and only gives the agent a swarm proxy URL.
               </p>
               <textarea
                 className="mcp-json-textarea"
@@ -3219,6 +3247,7 @@ function McpServerEditModal({ initial, existingNames, onCancel, onSubmit, onSubm
                 onChange={e => setJsonText(e.target.value)}
                 spellCheck={false}
                 disabled={busy}
+                autoFocus={!isNew}
                 aria-label="MCP JSON config"
               />
             </>

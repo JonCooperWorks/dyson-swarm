@@ -23,6 +23,7 @@ import {
   POLICY_OPTIONS,
   CubeProfilePicker,
   McpServersPanel,
+  parseMcpCliJsonConfig,
   findCubeProfile,
   InstancesView,
   instanceRailHref,
@@ -333,11 +334,11 @@ describe('McpServersPanel', () => {
     renderPanel(client);
 
     await screen.findByText('no MCP servers attached.');
-    expect(screen.queryByLabelText('VS Code-style MCP JSON config')).toBeNull();
+    expect(screen.queryByLabelText('MCP JSON config')).toBeNull();
 
     fireEvent.click(screen.getByRole('button', { name: 'add' }));
     expect(screen.getByText('add mcp server')).toBeInTheDocument();
-    expect(screen.queryByLabelText('VS Code-style MCP JSON config')).toBeNull();
+    expect(screen.queryByLabelText('MCP JSON config')).toBeNull();
 
     fireEvent.change(screen.getByLabelText('name'), { target: { value: 'linear' } });
     fireEvent.change(screen.getByLabelText('URL'), { target: { value: 'https://api.linear.app/mcp' } });
@@ -386,7 +387,7 @@ describe('McpServersPanel', () => {
     fireEvent.click(screen.getByRole('button', { name: 'add' }));
     fireEvent.change(screen.getByLabelText('MCP server type'), { target: { value: 'cli' } });
 
-    const editor = screen.getByLabelText('VS Code-style MCP JSON config');
+    const editor = screen.getByLabelText('MCP JSON config');
     expect(editor).toHaveValue('');
     expect(editor.getAttribute('placeholder')).toContain('<container-image>');
     expect(editor.getAttribute('placeholder')).not.toContain('ghcr.io/example/github-mcp');
@@ -398,7 +399,7 @@ describe('McpServersPanel', () => {
     expect(client.putMcpJsonConfig).toHaveBeenCalledWith('inst-1', cliConfig);
     expect(client.putMcpServer).not.toHaveBeenCalled();
     await screen.findByText('github');
-    expect(screen.queryByLabelText('VS Code-style MCP JSON config')).toBeNull();
+    expect(screen.queryByLabelText('MCP JSON config')).toBeNull();
   });
 
   test('CLI add path does not submit the grey example when the editor is empty', async () => {
@@ -430,7 +431,7 @@ describe('McpServersPanel', () => {
     await screen.findByText('no MCP servers attached.');
     fireEvent.click(screen.getByRole('button', { name: 'add' }));
     fireEvent.change(screen.getByLabelText('MCP server type'), { target: { value: 'cli' } });
-    fireEvent.change(screen.getByLabelText('VS Code-style MCP JSON config'), {
+    fireEvent.change(screen.getByLabelText('MCP JSON config'), {
       target: {
         value: JSON.stringify({
           servers: {
@@ -447,6 +448,35 @@ describe('McpServersPanel', () => {
     expect(await screen.findByText(/Use the remote MCP form/)).toBeInTheDocument();
     expect(client.putMcpJsonConfig).not.toHaveBeenCalled();
     expect(client.putMcpServer).not.toHaveBeenCalled();
+  });
+});
+
+describe('parseMcpCliJsonConfig', () => {
+  test('accepts Claude-style mcpServers configs', () => {
+    const config = {
+      mcpServers: {
+        massive: {
+          command: 'docker',
+          args: ['run', '--rm', '-i', 'joncooperworks/mcp_massive:latest'],
+        },
+      },
+    };
+
+    expect(parseMcpCliJsonConfig(JSON.stringify(config))).toEqual(config);
+  });
+
+  test('rejects configs with both server maps', () => {
+    const config = {
+      servers: {},
+      mcpServers: {
+        massive: {
+          command: 'docker',
+          args: ['run', 'joncooperworks/mcp_massive:latest'],
+        },
+      },
+    };
+
+    expect(() => parseMcpCliJsonConfig(JSON.stringify(config))).toThrow(/either `servers` or `mcpServers`/);
   });
 });
 

@@ -579,8 +579,8 @@ export class SwarmClient {
   // ─── Per-instance MCP servers ──────────────────────────────────────
   //
   // Records live in user_secrets sealed under the user's age cipher.
-  // CLI stdio servers can be added from one VS Code-style JSON object;
-  // the agent only ever sees a swarm proxy URL.
+  // CLI stdio servers can be added from one MCP JSON object; the agent
+  // only ever sees a swarm proxy URL.
 
   /// `[{name, url, auth_kind, connected}, ...]` for one instance.
   /// `connected` is true for bearer/none entries (always usable) and

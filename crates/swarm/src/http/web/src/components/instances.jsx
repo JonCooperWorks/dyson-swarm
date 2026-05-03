@@ -2707,7 +2707,7 @@ const MCP_JSON_CONFIG_EXAMPLE = `{
 // instance, lets the user add / edit / delete / disconnect, and
 // kicks off OAuth flows in a new tab.  Remote HTTP/SSE servers keep
 // the original field-based flow; Docker stdio servers are added via
-// the VS Code-style JSON editor exposed only from Add -> CLI.
+// the MCP JSON editor exposed only from Add -> CLI.
 
 export function McpServersPanel({ instanceId, policyKind, disabled }) {
   const { client } = useApi();
@@ -3041,7 +3041,7 @@ function McpServerRow({
 
 export function parseMcpCliJsonConfig(text) {
   if (!text.trim()) {
-    throw new Error('Paste a VS Code-style MCP config before saving.');
+    throw new Error('Paste an MCP config before saving.');
   }
   let parsed;
   try {
@@ -3049,17 +3049,10 @@ export function parseMcpCliJsonConfig(text) {
   } catch (e) {
     throw new Error(e?.message || 'The configuration is not valid JSON.');
   }
-  const servers = parsed
-    && typeof parsed === 'object'
-    && !Array.isArray(parsed)
-    && parsed.servers
-    && typeof parsed.servers === 'object'
-    && !Array.isArray(parsed.servers)
-    ? parsed.servers
-    : null;
+  const servers = mcpServerMapFromConfig(parsed);
   const names = servers ? Object.keys(servers) : [];
   if (names.length !== 1) {
-    throw new Error('Paste a VS Code-style object with exactly one entry in servers.');
+    throw new Error('Paste an MCP config with exactly one entry in `servers` or `mcpServers`.');
   }
   const server = servers[names[0]];
   if (!server || typeof server !== 'object' || Array.isArray(server)) {
@@ -3075,6 +3068,26 @@ export function parseMcpCliJsonConfig(text) {
     throw new Error('CLI stdio MCP support requires command: "docker".');
   }
   return parsed;
+}
+
+function mcpServerMapFromConfig(parsed) {
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return null;
+  }
+  const hasServers = Object.prototype.hasOwnProperty.call(parsed, 'servers');
+  const hasMcpServers = Object.prototype.hasOwnProperty.call(parsed, 'mcpServers');
+  if (hasServers && hasMcpServers) {
+    throw new Error('Use either `servers` or `mcpServers`, not both.');
+  }
+  const key = hasServers ? 'servers' : (hasMcpServers ? 'mcpServers' : null);
+  if (!key) {
+    return null;
+  }
+  const servers = parsed[key];
+  if (!servers || typeof servers !== 'object' || Array.isArray(servers)) {
+    throw new Error(`\`${key}\` must be an object.`);
+  }
+  return servers;
 }
 
 function McpServerEditModal({ initial, existingNames, onCancel, onSubmit, onSubmitJson, busy }) {
@@ -3195,9 +3208,9 @@ function McpServerEditModal({ initial, existingNames, onCancel, onSubmit, onSubm
           {isNew && serverType === 'cli' ? (
             <>
               <p className="muted small">
-                Paste a VS Code-style MCP config with exactly one stdio
-                server. Swarm seals the JSON with your key and only gives
-                the agent a swarm proxy URL.
+                Paste an MCP config with exactly one stdio server under
+                `servers` or `mcpServers`. Swarm seals the JSON with your
+                key and only gives the agent a swarm proxy URL.
               </p>
               <textarea
                 className="mcp-json-textarea"
@@ -3206,7 +3219,7 @@ function McpServerEditModal({ initial, existingNames, onCancel, onSubmit, onSubm
                 onChange={e => setJsonText(e.target.value)}
                 spellCheck={false}
                 disabled={busy}
-                aria-label="VS Code-style MCP JSON config"
+                aria-label="MCP JSON config"
               />
             </>
           ) : (

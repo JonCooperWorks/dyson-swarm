@@ -3052,10 +3052,10 @@ impl InstanceService {
         Ok(())
     }
 
-    /// Add or replace exactly one MCP server from a VS Code-style MCP
-    /// JSON document.  The raw JSON is sealed on the resulting entry so
-    /// the SPA can round-trip the familiar config, while dyson still
-    /// receives only the hidden swarm proxy URL.
+    /// Add or replace exactly one MCP server from an MCP JSON document.
+    /// The raw JSON is sealed on the resulting entry so the SPA can
+    /// round-trip the familiar config, while dyson still receives only
+    /// the hidden swarm proxy URL.
     pub async fn put_vscode_mcp_config(
         &self,
         owner_id: &str,
@@ -3096,9 +3096,9 @@ impl InstanceService {
         Ok(())
     }
 
-    /// Fetch the exact VS Code-style JSON previously saved through the
-    /// CLI add path.  Returns `None` when there is no raw JSON-backed
-    /// MCP entry on the instance.
+    /// Fetch the exact MCP JSON previously saved through the CLI add
+    /// path.  Returns `None` when there is no raw JSON-backed MCP entry
+    /// on the instance.
     pub async fn get_vscode_mcp_config(
         &self,
         owner_id: &str,

@@ -201,19 +201,17 @@ impl McpServerEntry {
     }
 }
 
-/// Parsed representation of the single-server VS Code-style MCP JSON
-/// accepted by the swarm UI.  The returned name + entry can be written
-/// directly to `user_secrets`; `entry.raw_vscode_config` preserves the
-/// exact user document.
+/// Parsed representation of the single-server MCP JSON accepted by the
+/// swarm UI.  VS Code uses `servers`; Claude-style configs often use
+/// `mcpServers`.  The returned name + entry can be written directly to
+/// `user_secrets`; `entry.raw_vscode_config` preserves the exact user
+/// document.
 pub fn entry_from_vscode_config(
     raw: serde_json::Value,
 ) -> Result<(String, McpServerEntry), String> {
     reject_input_placeholders(&raw)?;
     let obj = raw.as_object().ok_or("MCP config must be a JSON object")?;
-    let servers = obj
-        .get("servers")
-        .and_then(serde_json::Value::as_object)
-        .ok_or("MCP config must contain a `servers` object")?;
+    let servers = server_map_from_config(obj)?;
     if servers.len() != 1 {
         return Err("MCP config must contain exactly one server".into());
     }
@@ -292,6 +290,31 @@ pub fn entry_from_vscode_config(
     };
     entry.raw_vscode_config = Some(raw);
     Ok((name, entry))
+}
+
+fn server_map_from_config<'a>(
+    obj: &'a serde_json::Map<String, serde_json::Value>,
+) -> Result<&'a serde_json::Map<String, serde_json::Value>, String> {
+    let servers = object_field(obj, "servers")?;
+    let mcp_servers = object_field(obj, "mcpServers")?;
+    match (servers, mcp_servers) {
+        (Some(_), Some(_)) => {
+            Err("MCP config must contain either `servers` or `mcpServers`, not both".into())
+        }
+        (Some(map), None) | (None, Some(map)) => Ok(map),
+        (None, None) => Err("MCP config must contain a `servers` or `mcpServers` object".into()),
+    }
+}
+
+fn object_field<'a>(
+    obj: &'a serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Result<Option<&'a serde_json::Map<String, serde_json::Value>>, String> {
+    match obj.get(key) {
+        Some(serde_json::Value::Object(map)) => Ok(Some(map)),
+        Some(_) => Err(format!("MCP config `{key}` must be an object")),
+        None => Ok(None),
+    }
 }
 
 fn is_safe_server_name(name: &str) -> bool {
@@ -1425,6 +1448,34 @@ mod tests {
     }
 
     #[test]
+    fn vscode_config_accepts_claude_style_mcp_servers_block() {
+        let raw = serde_json::json!({
+            "mcpServers": {
+                "massive": {
+                    "command": "docker",
+                    "args": ["run", "--rm", "-i", "joncooperworks/mcp_massive:latest"]
+                }
+            }
+        });
+        let (name, entry) = entry_from_vscode_config(raw.clone()).unwrap();
+
+        assert_eq!(name, "massive");
+        assert_eq!(entry.url, "docker://joncooperworks/mcp_massive:latest");
+        assert_eq!(entry.raw_vscode_config, Some(raw));
+        match entry.runtime {
+            Some(McpRuntimeSpec::DockerStdio { command, args, env }) => {
+                assert_eq!(command, "docker");
+                assert_eq!(
+                    args,
+                    vec!["run", "--rm", "-i", "joncooperworks/mcp_massive:latest"]
+                );
+                assert!(env.is_empty());
+            }
+            other => panic!("expected docker stdio runtime, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn vscode_config_accepts_single_http_server() {
         let raw = serde_json::json!({
             "servers": {
@@ -1462,6 +1513,22 @@ mod tests {
             entry_from_vscode_config(multi)
                 .unwrap_err()
                 .contains("exactly one")
+        );
+
+        let both = serde_json::json!({
+            "servers": {},
+            "mcpServers": {
+                "github": {
+                    "type": "stdio",
+                    "command": "docker",
+                    "args": ["run", "ghcr.io/example/github-mcp"]
+                }
+            }
+        });
+        assert!(
+            entry_from_vscode_config(both)
+                .unwrap_err()
+                .contains("either `servers` or `mcpServers`")
         );
 
         let placeholder = serde_json::json!({

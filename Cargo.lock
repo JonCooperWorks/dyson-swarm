@@ -716,6 +716,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "dyson-mcp-runtime"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "dyson-swarm-core",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "dyson-swarm"
 version = "0.1.0"
 dependencies = [

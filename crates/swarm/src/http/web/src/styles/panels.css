@@ -1648,6 +1648,37 @@
 
 /* ── MCP servers panel (instance detail) ─────────────────────── */
 
+.mcp-json-textarea {
+  width: 100%;
+  min-height: 260px;
+  resize: vertical;
+  margin-top: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-1);
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.55;
+  tab-size: 2;
+}
+
+.mcp-json-textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+.mcp-json-textarea:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
+
+.mcp-json-dirty {
+  margin: 6px 0 0;
+}
+
 .mcp-row-list {
   list-style: none;
   padding: 0;

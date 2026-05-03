@@ -4,6 +4,7 @@ members = [
     "crates/swarm",
     "crates/cli",
     "crates/egress-proxy",
+    "crates/mcp-runtime",
 ]
 resolver = "2"
 

@@ -76,6 +76,8 @@ pub struct Config {
     pub default_models: Vec<String>,
 
     pub cube: CubeConfig,
+    #[serde(default)]
+    pub mcp_runtime: Option<McpRuntimeConfig>,
     pub default_policy: DefaultPolicy,
     #[serde(default)]
     pub providers: Providers,
@@ -241,6 +243,11 @@ pub struct CubeConfig {
     pub url: String,
     pub api_key: String,
     pub sandbox_domain: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct McpRuntimeConfig {
+    pub socket_path: PathBuf,
 }
 
 #[derive(Debug, Clone, Deserialize)]

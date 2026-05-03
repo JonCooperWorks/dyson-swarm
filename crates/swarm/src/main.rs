@@ -553,7 +553,10 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         user_secrets_svc.clone(),
         mcp_public_origin,
     ) {
-        Ok(s) => Arc::new(s.with_instance_svc(instance_svc.clone())),
+        Ok(s) => Arc::new(
+            s.with_instance_svc(instance_svc.clone())
+                .with_runtime_socket(cfg.mcp_runtime.as_ref().map(|r| r.socket_path.clone())),
+        ),
         Err(err) => {
             tracing::error!(error = %err, "mcp service init failed");
             return ExitCode::from(2);

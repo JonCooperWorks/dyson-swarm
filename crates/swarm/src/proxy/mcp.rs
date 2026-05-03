@@ -12,6 +12,7 @@
 //! Real upstream URL + tokens stay encrypted in the user secret store
 //! and are decrypted in-process per request.
 
+use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -26,8 +27,8 @@ use crate::auth::{CallerIdentity, extract_bearer};
 use crate::error::SwarmError;
 use crate::instance::InstanceService;
 use crate::mcp_servers::{
-    self, AuthMetadata, DcrRequest, McpAuthSpec, McpOAuthTokens, McpServerEntry, McpServerSpec,
-    McpToolSummary, McpToolsCatalog, OAuthFlowCache, PendingFlow,
+    self, AuthMetadata, DcrRequest, McpAuthSpec, McpOAuthTokens, McpRuntimeSpec, McpServerEntry,
+    McpServerSpec, McpToolSummary, McpToolsCatalog, OAuthFlowCache, PendingFlow,
 };
 use crate::secrets::UserSecretsService;
 use crate::traits::{InstanceStore, TokenStore};
@@ -50,6 +51,10 @@ pub struct McpService {
     /// the running dyson.  None disables the management routes (the
     /// proxy + OAuth callback still work — they only need user_secrets).
     pub instance_svc: Option<Arc<InstanceService>>,
+    /// Unix socket for the dedicated Docker-backed stdio MCP runtime.
+    /// When absent, remote HTTP/SSE MCP still works; container stdio
+    /// entries return a clear 503.
+    pub runtime_socket_path: Option<PathBuf>,
 }
 
 impl McpService {
@@ -69,6 +74,7 @@ impl McpService {
                 .build()?,
             public_origin,
             instance_svc: None,
+            runtime_socket_path: None,
         })
     }
 
@@ -77,6 +83,11 @@ impl McpService {
     /// push to the running dyson.
     pub fn with_instance_svc(mut self, svc: Arc<InstanceService>) -> Self {
         self.instance_svc = Some(svc);
+        self
+    }
+
+    pub fn with_runtime_socket(mut self, socket_path: Option<PathBuf>) -> Self {
+        self.runtime_socket_path = socket_path;
         self
     }
 
@@ -101,6 +112,12 @@ pub fn router(svc: Arc<McpService>) -> Router {
 pub fn user_router(svc: Arc<McpService>) -> Router {
     Router::new()
         .route("/v1/instances/:id/mcp/servers", get(list_servers))
+        .route(
+            "/v1/instances/:id/mcp/config",
+            get(get_vscode_config)
+                .put(put_vscode_config)
+                .delete(delete_vscode_config),
+        )
         .route(
             "/v1/instances/:id/mcp/servers/:name",
             get(get_server).put(put_server).delete(delete_server),
@@ -206,6 +223,18 @@ async fn forward(
         }
     }
 
+    if entry.runtime.is_some() {
+        return forward_runtime_stdio(
+            &svc,
+            &instance_id,
+            &server_name,
+            &entry,
+            &body_bytes,
+            peek.as_ref(),
+        )
+        .await;
+    }
+
     let mut outbound = svc.http.post(&entry.url);
     // Pass through Content-Type and Accept verbatim so streamable HTTP
     // MCP servers see the SSE-or-JSON negotiation the agent intended.
@@ -215,22 +244,11 @@ async fn forward(
     if let Some(acc) = parts.headers.get(axum::http::header::ACCEPT) {
         outbound = outbound.header(axum::http::header::ACCEPT, acc);
     }
-    // Apply the upstream auth header.
-    match &entry.auth {
-        McpAuthSpec::None => {}
-        McpAuthSpec::Bearer { token } => {
-            outbound = outbound.bearer_auth(token);
-        }
-        McpAuthSpec::Oauth { .. } => match entry.oauth_tokens.as_ref() {
-            Some(tk) => outbound = outbound.bearer_auth(&tk.access_token),
-            None => {
-                return error_resp(
-                    StatusCode::PRECONDITION_REQUIRED,
-                    "oauth not authorised yet",
-                );
-            }
-        },
-    }
+    // Apply extra VS Code-style headers, then the legacy auth shape.
+    outbound = match apply_entry_headers_and_auth(outbound, &entry) {
+        Ok(req) => req,
+        Err(msg) => return error_resp(StatusCode::PRECONDITION_REQUIRED, &msg),
+    };
 
     let resp = match outbound.body(body_bytes).send().await {
         Ok(r) => r,
@@ -367,6 +385,146 @@ async fn ensure_fresh_oauth(
         .await
         .map_err(|e| format!("persist refreshed tokens: {e}"))?;
     Ok(())
+}
+
+#[derive(Debug, Serialize)]
+struct RuntimeForwardRequest<'a> {
+    instance_id: &'a str,
+    server_name: &'a str,
+    command: &'a str,
+    args: &'a [String],
+    env: &'a std::collections::HashMap<String, String>,
+    request_json: &'a str,
+}
+
+#[derive(Debug, Deserialize)]
+struct RuntimeForwardResponse {
+    status: u16,
+    #[serde(default)]
+    content_type: Option<String>,
+    #[serde(default)]
+    body: String,
+}
+
+async fn forward_runtime_stdio(
+    svc: &McpService,
+    instance_id: &str,
+    server_name: &str,
+    entry: &McpServerEntry,
+    body_bytes: &[u8],
+    peek: Option<&(String, serde_json::Value, serde_json::Value)>,
+) -> Response<Body> {
+    let Some(socket_path) = svc.runtime_socket_path.as_deref() else {
+        return error_resp(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "mcp runtime helper not configured",
+        );
+    };
+    let Some(McpRuntimeSpec::DockerStdio { command, args, env }) = entry.runtime.as_ref() else {
+        return error_resp(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "invalid mcp runtime entry",
+        );
+    };
+    let request_json = match std::str::from_utf8(body_bytes) {
+        Ok(s) => s,
+        Err(_) => return error_resp(StatusCode::BAD_REQUEST, "JSON-RPC body must be UTF-8"),
+    };
+    let request = RuntimeForwardRequest {
+        instance_id,
+        server_name,
+        command,
+        args,
+        env,
+        request_json,
+    };
+    let runtime_resp = match call_runtime(socket_path, &request).await {
+        Ok(r) => r,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                server = %server_name,
+                "mcp runtime: request failed"
+            );
+            return error_resp(StatusCode::BAD_GATEWAY, "mcp runtime request failed");
+        }
+    };
+    let status =
+        StatusCode::from_u16(runtime_resp.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    let content_type = runtime_resp.content_type;
+    let mut body = runtime_resp.body.into_bytes();
+    let response_ct = content_type.as_deref().unwrap_or_else(|| {
+        if body.is_empty() {
+            ""
+        } else {
+            "application/json"
+        }
+    });
+    let should_filter_list = matches!(peek, Some((m, _, _)) if m == "tools/list")
+        && entry.enabled_tools.is_some()
+        && response_ct.to_lowercase().starts_with("application/json")
+        && status.is_success();
+    if should_filter_list {
+        let allowed = entry.enabled_tools.as_deref().unwrap_or(&[]);
+        body = match filter_tools_list_body(&body, allowed) {
+            Ok(filtered) => filtered,
+            Err(err) => {
+                tracing::warn!(error = %err, "mcp runtime: tools/list filter failed; passing through");
+                body
+            }
+        };
+    }
+    let mut builder = Response::builder().status(status);
+    if let Some(ct) = content_type {
+        builder = builder.header(axum::http::header::CONTENT_TYPE, ct);
+    } else if !body.is_empty() {
+        builder = builder.header(axum::http::header::CONTENT_TYPE, "application/json");
+    }
+    if !body.is_empty() {
+        builder = builder.header(
+            axum::http::header::CONTENT_LENGTH,
+            HeaderValue::from(body.len()),
+        );
+    }
+    builder
+        .body(Body::from(body))
+        .unwrap_or_else(|_| error_resp(StatusCode::INTERNAL_SERVER_ERROR, "build resp"))
+}
+
+async fn call_runtime(
+    socket_path: &FsPath,
+    request: &RuntimeForwardRequest<'_>,
+) -> Result<RuntimeForwardResponse, String> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixStream;
+
+    let mut stream = UnixStream::connect(socket_path)
+        .await
+        .map_err(|e| format!("connect {}: {e}", socket_path.display()))?;
+    let line = serde_json::to_vec(request).map_err(|e| format!("encode request: {e}"))?;
+    stream
+        .write_all(&line)
+        .await
+        .map_err(|e| format!("write request: {e}"))?;
+    stream
+        .write_all(b"\n")
+        .await
+        .map_err(|e| format!("write newline: {e}"))?;
+    stream.flush().await.map_err(|e| format!("flush: {e}"))?;
+
+    let mut reader = BufReader::new(stream);
+    let mut out = String::new();
+    let n = tokio::time::timeout(
+        std::time::Duration::from_secs(125),
+        reader.read_line(&mut out),
+    )
+    .await
+    .map_err(|_| "runtime response timed out".to_string())?
+    .map_err(|e| format!("read response: {e}"))?;
+    if n == 0 {
+        return Err("runtime closed without response".into());
+    }
+    serde_json::from_str(&out).map_err(|e| format!("decode response: {e}"))
 }
 
 // ───────────────────────────────────────────────────────────────────
@@ -799,6 +957,65 @@ async fn owner_owns_instance(svc: &McpService, owner_id: &str, instance_id: &str
     )
 }
 
+#[derive(Serialize)]
+struct GetVscodeConfigResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    config: Option<serde_json::Value>,
+}
+
+async fn get_vscode_config(
+    State(svc): State<Arc<McpService>>,
+    Path(instance_id): Path<String>,
+    axum::Extension(caller): axum::Extension<CallerIdentity>,
+) -> Result<Json<GetVscodeConfigResponse>, Response<Body>> {
+    let isvc = svc.instance_svc.as_ref().ok_or_else(|| {
+        error_resp(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "mcp management not configured",
+        )
+    })?;
+    let config = isvc
+        .get_vscode_mcp_config(&caller.user_id, &instance_id)
+        .await
+        .map_err(swarm_err_to_resp)?;
+    Ok(Json(GetVscodeConfigResponse { config }))
+}
+
+async fn put_vscode_config(
+    State(svc): State<Arc<McpService>>,
+    Path(instance_id): Path<String>,
+    axum::Extension(caller): axum::Extension<CallerIdentity>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, Response<Body>> {
+    let isvc = svc.instance_svc.as_ref().ok_or_else(|| {
+        error_resp(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "mcp management not configured",
+        )
+    })?;
+    isvc.put_vscode_mcp_config(&caller.user_id, &instance_id, body)
+        .await
+        .map_err(swarm_err_to_resp)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn delete_vscode_config(
+    State(svc): State<Arc<McpService>>,
+    Path(instance_id): Path<String>,
+    axum::Extension(caller): axum::Extension<CallerIdentity>,
+) -> Result<Json<serde_json::Value>, Response<Body>> {
+    let isvc = svc.instance_svc.as_ref().ok_or_else(|| {
+        error_resp(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "mcp management not configured",
+        )
+    })?;
+    isvc.delete_vscode_mcp_config(&caller.user_id, &instance_id)
+        .await
+        .map_err(swarm_err_to_resp)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
 // ───────────────────────────────────────────────────────────────────
 // Management routes (put / delete / disconnect)
 // ───────────────────────────────────────────────────────────────────
@@ -953,7 +1170,7 @@ async fn check_server(
         return Err(error_resp(StatusCode::BAD_GATEWAY, "oauth refresh failed"));
     }
 
-    let catalog = match run_tools_list(&svc.http, &entry).await {
+    let catalog = match run_tools_list(&svc, &instance_id, &name, &entry).await {
         Ok(c) => c,
         Err(err) => {
             tracing::warn!(
@@ -997,7 +1214,9 @@ async fn check_server(
 /// both).  Bearer/None auth are sent via the existing `entry.auth`;
 /// OAuth callers must have refreshed tokens before invoking this.
 async fn run_tools_list(
-    http: &reqwest::Client,
+    svc: &McpService,
+    instance_id: &str,
+    server_name: &str,
     entry: &McpServerEntry,
 ) -> Result<McpToolsCatalog, String> {
     let init_req = serde_json::json!({
@@ -1013,7 +1232,7 @@ async fn run_tools_list(
             },
         },
     });
-    let init_resp = post_jsonrpc(http, entry, &init_req, None)
+    let init_resp = post_jsonrpc_for_entry(svc, instance_id, server_name, entry, &init_req, None)
         .await
         .map_err(|e| format!("initialize: {e}"))?;
     let session_id = init_resp.session_id.clone();
@@ -1026,7 +1245,15 @@ async fn run_tools_list(
         "jsonrpc": "2.0",
         "method": "notifications/initialized",
     });
-    let _ = post_jsonrpc(http, entry, &initialized_notif, session_id.as_deref()).await;
+    let _ = post_jsonrpc_for_entry(
+        svc,
+        instance_id,
+        server_name,
+        entry,
+        &initialized_notif,
+        session_id.as_deref(),
+    )
+    .await;
 
     let list_req = serde_json::json!({
         "jsonrpc": "2.0",
@@ -1034,9 +1261,16 @@ async fn run_tools_list(
         "method": "tools/list",
         "params": {},
     });
-    let list_resp = post_jsonrpc(http, entry, &list_req, session_id.as_deref())
-        .await
-        .map_err(|e| format!("tools/list: {e}"))?;
+    let list_resp = post_jsonrpc_for_entry(
+        svc,
+        instance_id,
+        server_name,
+        entry,
+        &list_req,
+        session_id.as_deref(),
+    )
+    .await
+    .map_err(|e| format!("tools/list: {e}"))?;
 
     if let Some(err) = list_resp.body.get("error") {
         return Err(format!("upstream tools/list error: {err}"));
@@ -1074,6 +1308,49 @@ struct JsonRpcResponse {
     session_id: Option<String>,
 }
 
+async fn post_jsonrpc_for_entry(
+    svc: &McpService,
+    instance_id: &str,
+    server_name: &str,
+    entry: &McpServerEntry,
+    body: &serde_json::Value,
+    session_id: Option<&str>,
+) -> Result<JsonRpcResponse, String> {
+    if entry.runtime.is_none() {
+        return post_jsonrpc(&svc.http, entry, body, session_id).await;
+    }
+    let Some(socket_path) = svc.runtime_socket_path.as_deref() else {
+        return Err("mcp runtime helper not configured".into());
+    };
+    let Some(McpRuntimeSpec::DockerStdio { command, args, env }) = entry.runtime.as_ref() else {
+        return Err("invalid mcp runtime entry".into());
+    };
+    let request_json = serde_json::to_string(body).map_err(|e| format!("encode JSON-RPC: {e}"))?;
+    let request = RuntimeForwardRequest {
+        instance_id,
+        server_name,
+        command,
+        args,
+        env,
+        request_json: &request_json,
+    };
+    let resp = call_runtime(socket_path, &request).await?;
+    if !(200..300).contains(&resp.status) {
+        return Err(format!("runtime HTTP {}: {}", resp.status, resp.body));
+    }
+    if resp.body.is_empty() {
+        return Ok(JsonRpcResponse {
+            body: serde_json::Value::Null,
+            session_id: None,
+        });
+    }
+    let body = serde_json::from_str(&resp.body).map_err(|e| format!("parse runtime json: {e}"))?;
+    Ok(JsonRpcResponse {
+        body,
+        session_id: None,
+    })
+}
+
 /// Single round-trip helper: POST a JSON-RPC envelope, parse whichever
 /// of `application/json` or `text/event-stream` the server returns.
 async fn post_jsonrpc(
@@ -1096,14 +1373,7 @@ async fn post_jsonrpc(
     if let Some(s) = session_id {
         req = req.header("Mcp-Session-Id", s);
     }
-    match &entry.auth {
-        McpAuthSpec::None => {}
-        McpAuthSpec::Bearer { token } => req = req.bearer_auth(token),
-        McpAuthSpec::Oauth { .. } => match entry.oauth_tokens.as_ref() {
-            Some(tk) => req = req.bearer_auth(&tk.access_token),
-            None => return Err("oauth not authorised yet".into()),
-        },
-    }
+    req = apply_entry_headers_and_auth(req, entry)?;
 
     let resp = req.json(body).send().await.map_err(|e| {
         format!(
@@ -1147,6 +1417,24 @@ async fn post_jsonrpc(
         serde_json::from_slice(&bytes).map_err(|e| format!("parse json: {e}"))?
     };
     Ok(JsonRpcResponse { body, session_id })
+}
+
+fn apply_entry_headers_and_auth(
+    mut req: reqwest::RequestBuilder,
+    entry: &McpServerEntry,
+) -> Result<reqwest::RequestBuilder, String> {
+    for (name, value) in &entry.headers {
+        req = req.header(name.as_str(), value.as_str());
+    }
+    match &entry.auth {
+        McpAuthSpec::None => {}
+        McpAuthSpec::Bearer { token } => req = req.bearer_auth(token),
+        McpAuthSpec::Oauth { .. } => match entry.oauth_tokens.as_ref() {
+            Some(tk) => req = req.bearer_auth(&tk.access_token),
+            None => return Err("oauth not authorised yet".into()),
+        },
+    }
+    Ok(req)
 }
 
 /// Minimal SSE parser scoped to our use case: scan `data:` lines and
@@ -1426,6 +1714,52 @@ mod tests {
         // upstream body through unchanged rather than rewriting it.
         let body = br#"{"jsonrpc":"2.0","id":2,"error":{"code":-32601}}"#;
         assert!(filter_tools_list_body(body, &["a".into()]).is_err());
+    }
+
+    #[tokio::test]
+    async fn call_runtime_round_trips_fake_helper() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::UnixListener;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let socket = tmp.path().join("runtime.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let req: serde_json::Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(req["instance_id"], "i-1");
+            assert_eq!(req["server_name"], "echo");
+            assert_eq!(req["command"], "docker");
+            let resp = serde_json::json!({
+                "status": 200,
+                "content_type": "application/json",
+                "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true}}"
+            });
+            let mut stream = reader.into_inner();
+            stream
+                .write_all(serde_json::to_string(&resp).unwrap().as_bytes())
+                .await
+                .unwrap();
+            stream.write_all(b"\n").await.unwrap();
+        });
+
+        let args = vec!["run".to_string(), "example/mcp".to_string()];
+        let env = std::collections::HashMap::new();
+        let req = RuntimeForwardRequest {
+            instance_id: "i-1",
+            server_name: "echo",
+            command: "docker",
+            args: &args,
+            env: &env,
+            request_json: r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+        };
+        let resp = call_runtime(&socket, &req).await.unwrap();
+        assert_eq!(resp.status, 200);
+        assert!(resp.body.contains("\"ok\":true"));
+        server.await.unwrap();
     }
 
     #[test]

@@ -2691,30 +2691,47 @@ function McpErrorNotice({ notice, compact = false }) {
   );
 }
 
+const DEFAULT_MCP_JSON_CONFIG = `{
+  "servers": {
+    "github": {
+      "type": "stdio",
+      "command": "docker",
+      "args": ["run", "-i", "--rm", "ghcr.io/example/github-mcp"]
+    }
+  }
+}`;
+
 // ─── MCP servers panel (instance detail) ──────────────────────────
 //
-// Lives next to SecretsPanel.  Lists the MCP servers attached to one
-// instance, lets the user add / edit / delete / disconnect, and
-// kicks off OAuth flows in a new tab.  All persistence goes through
-// `InstanceService::{put,delete,disconnect}_mcp_server`, which seals
-// the entry in user_secrets and pushes the new `mcp_servers` block to
-// the running dyson via the configure endpoint.
+// Lives next to SecretsPanel.  The primary editor is a VS Code-style
+// JSON blob with exactly one server under `servers`; swarm validates
+// and seals that raw JSON, then renders only the hidden swarm proxy URL
+// into the dyson config.  The row list below remains the operational
+// surface for check/connect/tool allowlisting/removal.
 
 function McpServersPanel({ instanceId, policyKind, disabled }) {
   const { client } = useApi();
   const [rows, setRows] = React.useState(null);
   const [err, setErr] = React.useState(null);
   const [busy, setBusy] = React.useState(false);
-  // editing: null | { mode: 'new' } | { mode: 'edit', row } | { mode: 'loading' }
-  // The "loading" state shows a spinner while we fetch the full URL
-  // for the edit form (the listing strips query strings; the edit
-  // modal needs the un-stripped value to pre-fill cleanly).
-  const [editing, setEditing] = React.useState(null);
+  const [jsonText, setJsonText] = React.useState(DEFAULT_MCP_JSON_CONFIG);
+  const [jsonLoaded, setJsonLoaded] = React.useState(false);
+  const [jsonDirty, setJsonDirty] = React.useState(false);
 
-  const refresh = React.useCallback(async () => {
+  const refresh = React.useCallback(async ({ preserveJson = false } = {}) => {
     try {
       const list = await client.listMcpServers(instanceId);
       setRows(Array.isArray(list) ? list : []);
+      if (!preserveJson) {
+        const ret = await client.getMcpJsonConfig(instanceId);
+        if (ret?.config) {
+          setJsonText(JSON.stringify(ret.config, null, 2));
+        } else {
+          setJsonText(DEFAULT_MCP_JSON_CONFIG);
+        }
+        setJsonLoaded(true);
+        setJsonDirty(false);
+      }
     } catch (e) {
       setErr(formatMcpPanelError(e, 'list'));
     }
@@ -2762,12 +2779,22 @@ function McpServersPanel({ instanceId, policyKind, disabled }) {
     }
   };
 
-  const submitEdit = async (spec) => {
+  const saveJsonConfig = async () => {
+    let parsed;
+    try {
+      parsed = JSON.parse(jsonText);
+    } catch (e) {
+      setErr({
+        title: 'Invalid MCP JSON',
+        body: e?.message || 'The configuration is not valid JSON.',
+        hint: 'Paste a single VS Code-style object with exactly one entry in servers.',
+      });
+      return;
+    }
     setBusy(true); setErr(null);
     try {
-      await client.putMcpServer(instanceId, spec.name, { url: spec.url, auth: spec.auth });
+      await client.putMcpJsonConfig(instanceId, parsed);
       await refresh();
-      setEditing(null);
     } catch (e) {
       setErr(formatMcpPanelError(e, 'save'));
     } finally {
@@ -2775,20 +2802,14 @@ function McpServersPanel({ instanceId, policyKind, disabled }) {
     }
   };
 
-  // Edit-button path: fetch the FULL URL via getMcpServer (the listing
-  // strips query strings) so the modal pre-fills with whatever the
-  // operator originally saved.  Shows a transient busy state while
-  // the round-trip lands; on failure we fall back to the stripped row
-  // so the user can still edit (worst case: they re-paste the URL).
-  const openEdit = async (row) => {
+  const clearJsonConfig = async () => {
+    if (!confirm('clear the attached MCP server? the agent will stop seeing this tool set.')) return;
     setBusy(true); setErr(null);
     try {
-      const detail = await client.getMcpServer(instanceId, row.name);
-      setEditing({ mode: 'edit', row: detail || row });
+      await client.deleteMcpJsonConfig(instanceId);
+      await refresh();
     } catch (e) {
-      // Fall back to listing data — better than blocking the edit.
-      console.warn('[swarm] mcp edit: getMcpServer failed', e);
-      setEditing({ mode: 'edit', row });
+      setErr(formatMcpPanelError(e, 'delete'));
     } finally {
       setBusy(false);
     }
@@ -2801,19 +2822,35 @@ function McpServersPanel({ instanceId, policyKind, disabled }) {
         <div className="panel-actions">
           <button
             className="btn btn-sm"
-            onClick={() => setEditing({ mode: 'new' })}
-            disabled={disabled || busy}
+            onClick={saveJsonConfig}
+            disabled={disabled || busy || !jsonLoaded}
           >
-            add
+            save json
+          </button>
+          <button className="btn btn-ghost btn-sm" onClick={clearJsonConfig} disabled={disabled || busy}>
+            clear
           </button>
         </div>
       </div>
       {err ? <McpErrorNotice notice={err}/> : null}
       <p className="muted small">
-        Swarm proxies every MCP request — the agent only sees a swarm URL,
-        never your upstream URL or its credentials. OAuth tokens land in
-        your encrypted user secret store and refresh transparently.
+        Paste a VS Code-style MCP config with exactly one server. Swarm seals
+        the JSON with your key and only gives the agent a swarm proxy URL.
       </p>
+      <textarea
+        className="mcp-json-textarea"
+        value={jsonText}
+        onChange={e => {
+          setJsonText(e.target.value);
+          setJsonDirty(true);
+        }}
+        spellCheck={false}
+        disabled={disabled || busy}
+        aria-label="VS Code-style MCP JSON config"
+      />
+      {jsonDirty ? (
+        <p className="muted small mcp-json-dirty">unsaved MCP JSON changes</p>
+      ) : null}
       {rows === null ? (
         <p className="muted small">loading…</p>
       ) : rows.length === 0 ? (
@@ -2827,24 +2864,14 @@ function McpServersPanel({ instanceId, policyKind, disabled }) {
               instanceId={instanceId}
               policyKind={policyKind}
               busy={busy || disabled}
-              onEdit={() => openEdit(r)}
               onConnect={() => connect(r.name)}
               onDisconnect={() => disconnect(r.name)}
               onRemove={() => remove(r.name)}
-              onCatalogUpdated={() => refresh()}
+              onCatalogUpdated={() => refresh({ preserveJson: true })}
             />
           ))}
         </ul>
       )}
-      {editing ? (
-        <McpServerEditModal
-          existingNames={(rows || []).map(r => r.name)}
-          initial={editing.mode === 'edit' ? editing.row : null}
-          onCancel={() => setEditing(null)}
-          onSubmit={submitEdit}
-          busy={busy}
-        />
-      ) : null}
     </section>
   );
 }
@@ -2989,9 +3016,11 @@ function McpServerRow({
         >
           {catalog ? 're-check' : 'check'}
         </button>
-        <button className="btn btn-ghost btn-sm" onClick={onEdit} disabled={busy}>
-          edit
-        </button>
+        {onEdit ? (
+          <button className="btn btn-ghost btn-sm" onClick={onEdit} disabled={busy}>
+            edit
+          </button>
+        ) : null}
         <button className="btn btn-ghost btn-sm" onClick={onRemove} disabled={busy}>
           remove
         </button>

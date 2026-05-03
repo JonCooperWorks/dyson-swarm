@@ -15,6 +15,7 @@
 //! with the per-instance proxy_token; [`crate::proxy::mcp`] handles the
 //! handshake, refresh, and forward.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use base64::Engine;
@@ -76,6 +77,21 @@ pub enum McpAuthSpec {
 pub struct McpServerEntry {
     pub url: String,
     pub auth: McpAuthSpec,
+    /// Extra upstream headers for HTTP/SSE servers.  Legacy entries
+    /// typically leave this empty because their auth is represented by
+    /// `auth`; VS Code-style HTTP configs can carry arbitrary headers.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub headers: HashMap<String, String>,
+    /// Runtime marker for swarm-owned stdio servers.  When set, the
+    /// `/mcp/<instance>/<server>` proxy forwards JSON-RPC to the
+    /// dedicated MCP runtime helper instead of posting to `url`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<McpRuntimeSpec>,
+    /// Exact VS Code-style JSON the user pasted.  Stored encrypted with
+    /// the rest of the entry so the UI can round-trip it without
+    /// re-rendering or exposing it to the dyson.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_vscode_config: Option<serde_json::Value>,
     /// Populated by the OAuth callback; refreshed on demand by the
     /// proxy when an access token is near or past its expiry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -94,6 +110,18 @@ pub struct McpServerEntry {
     /// requests for names outside the set are rejected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled_tools: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum McpRuntimeSpec {
+    DockerStdio {
+        command: String,
+        #[serde(default)]
+        args: Vec<String>,
+        #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+        env: HashMap<String, String>,
+    },
 }
 
 /// Cached `tools/list` result for one MCP server.  Persisted on the
@@ -155,12 +183,379 @@ impl McpServerEntry {
             Self {
                 url,
                 auth,
+                headers: HashMap::new(),
+                runtime: None,
+                raw_vscode_config: None,
                 oauth_tokens: None,
                 tools_catalog: None,
                 enabled_tools,
             },
         )
     }
+}
+
+/// Parsed representation of the single-server VS Code-style MCP JSON
+/// accepted by the swarm UI.  The returned name + entry can be written
+/// directly to `user_secrets`; `entry.raw_vscode_config` preserves the
+/// exact user document.
+pub fn entry_from_vscode_config(
+    raw: serde_json::Value,
+) -> Result<(String, McpServerEntry), String> {
+    reject_input_placeholders(&raw)?;
+    let obj = raw.as_object().ok_or("MCP config must be a JSON object")?;
+    let servers = obj
+        .get("servers")
+        .and_then(serde_json::Value::as_object)
+        .ok_or("MCP config must contain a `servers` object")?;
+    if servers.len() != 1 {
+        return Err("MCP config must contain exactly one server".into());
+    }
+    let (name, server) = servers.iter().next().expect("checked len == 1");
+    if !is_safe_server_name(name) {
+        return Err("server name must match [A-Za-z0-9_-]+".into());
+    }
+    let name = name.clone();
+    let server = server
+        .as_object()
+        .ok_or("server config must be a JSON object")?;
+    let server_type = server
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_else(|| {
+            if server.get("url").is_some() {
+                "http"
+            } else {
+                "stdio"
+            }
+        });
+
+    let mut entry = match server_type {
+        "http" | "sse" => {
+            let url = server
+                .get("url")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or("HTTP/SSE MCP server requires `url`")?;
+            let mut headers = parse_string_map(server.get("headers"), "headers")?;
+            let auth = auth_from_headers(&headers);
+            if matches!(auth, McpAuthSpec::Bearer { .. }) {
+                headers.retain(|k, _| !k.eq_ignore_ascii_case("authorization"));
+            }
+            McpServerEntry {
+                url: url.to_string(),
+                auth,
+                headers,
+                runtime: None,
+                raw_vscode_config: None,
+                oauth_tokens: None,
+                tools_catalog: None,
+                enabled_tools: None,
+            }
+        }
+        "stdio" => {
+            let command = server
+                .get("command")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or("stdio MCP server requires `command`")?;
+            if command != "docker" {
+                return Err("v1 stdio MCP support requires `command`: \"docker\"".into());
+            }
+            let args = parse_string_array(server.get("args"), "args")?;
+            validate_docker_stdio_args(&args)?;
+            let env = parse_string_map(server.get("env"), "env")?;
+            McpServerEntry {
+                url: docker_display_url(&args),
+                auth: McpAuthSpec::None,
+                headers: HashMap::new(),
+                runtime: Some(McpRuntimeSpec::DockerStdio {
+                    command: command.to_string(),
+                    args,
+                    env,
+                }),
+                raw_vscode_config: None,
+                oauth_tokens: None,
+                tools_catalog: None,
+                enabled_tools: None,
+            }
+        }
+        other => return Err(format!("unsupported MCP server type `{other}`")),
+    };
+    entry.raw_vscode_config = Some(raw);
+    Ok((name, entry))
+}
+
+fn is_safe_server_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+fn parse_string_array(
+    value: Option<&serde_json::Value>,
+    field: &str,
+) -> Result<Vec<String>, String> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let arr = value
+        .as_array()
+        .ok_or_else(|| format!("`{field}` must be an array of strings"))?;
+    arr.iter()
+        .map(|v| {
+            v.as_str()
+                .map(ToString::to_string)
+                .ok_or_else(|| format!("`{field}` must contain only strings"))
+        })
+        .collect()
+}
+
+fn parse_string_map(
+    value: Option<&serde_json::Value>,
+    field: &str,
+) -> Result<HashMap<String, String>, String> {
+    let Some(value) = value else {
+        return Ok(HashMap::new());
+    };
+    let obj = value
+        .as_object()
+        .ok_or_else(|| format!("`{field}` must be an object of string values"))?;
+    obj.iter()
+        .map(|(k, v)| {
+            v.as_str()
+                .map(|s| (k.clone(), s.to_string()))
+                .ok_or_else(|| format!("`{field}` values must be strings"))
+        })
+        .collect()
+}
+
+fn auth_from_headers(headers: &HashMap<String, String>) -> McpAuthSpec {
+    headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+        .and_then(|(_, v)| v.trim().strip_prefix("Bearer "))
+        .filter(|token| !token.trim().is_empty())
+        .map(|token| McpAuthSpec::Bearer {
+            token: token.trim().to_string(),
+        })
+        .unwrap_or(McpAuthSpec::None)
+}
+
+fn reject_input_placeholders(value: &serde_json::Value) -> Result<(), String> {
+    match value {
+        serde_json::Value::String(s) if s.contains("${input:") => {
+            Err("`${input:...}` placeholders are not supported; paste literal values".into())
+        }
+        serde_json::Value::Array(arr) => {
+            for v in arr {
+                reject_input_placeholders(v)?;
+            }
+            Ok(())
+        }
+        serde_json::Value::Object(obj) => {
+            for v in obj.values() {
+                reject_input_placeholders(v)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn docker_display_url(args: &[String]) -> String {
+    let image = docker_run_image(args).unwrap_or("unknown");
+    format!("docker://{image}")
+}
+
+fn docker_run_image(args: &[String]) -> Option<&str> {
+    if args.first().map(String::as_str) != Some("run") {
+        return None;
+    }
+    let mut i = 1usize;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        if arg == "--" {
+            return args.get(i + 1).map(String::as_str);
+        }
+        if !arg.starts_with('-') {
+            return Some(arg);
+        }
+        if option_takes_value(arg) && !arg.contains('=') {
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    None
+}
+
+/// Defense-in-depth validation used by both swarm and the MCP runtime
+/// helper.  It is intentionally conservative around host escape hatches
+/// while allowing the ordinary Docker flags MCP snippets tend to use.
+pub fn validate_docker_stdio_args(args: &[String]) -> Result<(), String> {
+    if args.first().map(String::as_str) != Some("run") {
+        return Err("stdio Docker MCP config must start with `args: [\"run\", ...]`".into());
+    }
+    if args.len() < 2 {
+        return Err("docker run config must include an image".into());
+    }
+    let forbidden_with_value = [
+        "--volume",
+        "--mount",
+        "--device",
+        "--cap-add",
+        "--detach",
+        "--privileged",
+        "--publish",
+        "--publish-all",
+        "--pid",
+        "--ipc",
+        "--uts",
+        "--userns",
+        "--cgroupns",
+        "--cgroup-parent",
+        "--network",
+        "--net",
+        "--security-opt",
+        "--env-file",
+        "--label-file",
+        "--cidfile",
+        "--restart",
+        "--volumes-from",
+        "--device-cgroup-rule",
+        "--memory",
+        "--memory-reservation",
+        "--memory-swap",
+        "--cpus",
+        "--cpu-quota",
+        "--cpu-shares",
+        "--blkio-weight",
+        "--pids-limit",
+        "--ulimit",
+        "--shm-size",
+        "--oom-score-adj",
+    ];
+    let mut image_seen = false;
+    let mut i = 1usize;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        if arg.contains("/var/run/docker.sock") || arg.contains("docker.sock") {
+            return Err("Docker socket mounts are not allowed".into());
+        }
+        if arg == "--" {
+            image_seen = args.get(i + 1).is_some();
+            break;
+        }
+        if !arg.starts_with('-') {
+            image_seen = true;
+            break;
+        }
+        if arg == "--detach" || arg == "-d" {
+            return Err("detached Docker MCP servers are not supported".into());
+        }
+        if arg.starts_with("--rm=") && arg != "--rm=true" {
+            return Err("Docker flag `--rm=false` is not allowed".into());
+        }
+        if arg == "--privileged" {
+            return Err("privileged containers are not allowed".into());
+        }
+        if arg.starts_with("-v")
+            || arg.starts_with("-p")
+            || arg.starts_with("-P")
+            || arg.starts_with("-m")
+        {
+            return Err(format!("Docker flag `{arg}` is not allowed"));
+        }
+        if !arg.starts_with("--")
+            && arg.starts_with('-')
+            && arg.chars().skip(1).any(|c| c == 'd')
+        {
+            return Err("detached Docker MCP servers are not supported".into());
+        }
+        for flag in forbidden_with_value {
+            if arg == flag || arg.starts_with(&format!("{flag}=")) {
+                if flag == "--network" || flag == "--net" {
+                    let value = docker_flag_value(args, i, flag).unwrap_or_default();
+                    if value == "none" || value == "bridge" {
+                        break;
+                    }
+                }
+                return Err(format!("Docker flag `{flag}` is not allowed"));
+            }
+        }
+        if option_takes_value(arg) && !arg.contains('=') {
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    if !image_seen {
+        return Err("docker run config must include an image".into());
+    }
+    Ok(())
+}
+
+fn docker_flag_value<'a>(args: &'a [String], index: usize, flag: &str) -> Option<&'a str> {
+    let arg = args.get(index)?.as_str();
+    if let Some((_, value)) = arg.split_once('=') {
+        return Some(value);
+    }
+    if arg == flag {
+        return args.get(index + 1).map(String::as_str);
+    }
+    None
+}
+
+fn option_takes_value(arg: &str) -> bool {
+    let long = arg.split('=').next().unwrap_or(arg);
+    matches!(
+        long,
+        "--add-host"
+            | "--annotation"
+            | "--attach"
+            | "--blkio-weight"
+            | "--cidfile"
+            | "--cpus"
+            | "--cpu-quota"
+            | "--cpu-shares"
+            | "--dns"
+            | "--dns-option"
+            | "--dns-search"
+            | "--entrypoint"
+            | "--env"
+            | "--env-file"
+            | "--expose"
+            | "--group-add"
+            | "--hostname"
+            | "--label"
+            | "--label-file"
+            | "--log-driver"
+            | "--log-opt"
+            | "--memory"
+            | "--memory-reservation"
+            | "--memory-swap"
+            | "--name"
+            | "--net"
+            | "--network"
+            | "--network-alias"
+            | "--platform"
+            | "--pull"
+            | "--restart"
+            | "--shm-size"
+            | "--stop-signal"
+            | "--user"
+            | "--workdir"
+            | "-a"
+            | "-e"
+            | "-h"
+            | "-l"
+            | "-m"
+            | "-u"
+            | "-w"
+    )
 }
 
 /// Build the `user_secrets` row name for one server.
@@ -503,8 +898,8 @@ pub async fn discover_metadata(
 }
 
 fn protected_resource_metadata_urls(server_url: &str) -> Result<Vec<String>, String> {
-    let parsed =
-        reqwest::Url::parse(server_url).map_err(|e| format!("parse {}: {e}", domain_of(server_url)))?;
+    let parsed = reqwest::Url::parse(server_url)
+        .map_err(|e| format!("parse {}: {e}", domain_of(server_url)))?;
     let origin = origin_of(server_url)?;
     let path = parsed.path().trim_end_matches('/');
     let mut urls = Vec::new();
@@ -525,11 +920,12 @@ async fn fetch_protected_resource(
     client: &reqwest::Client,
     resource_domain: &str,
 ) -> Result<Option<String>, String> {
-    let resp = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| format!("discovery {resource_domain}: {}", redact_reqwest_err(&e, url)))?;
+    let resp = client.get(url).send().await.map_err(|e| {
+        format!(
+            "discovery {resource_domain}: {}",
+            redact_reqwest_err(&e, url)
+        )
+    })?;
     if resp.status() == reqwest::StatusCode::NOT_FOUND {
         return Ok(None);
     }
@@ -565,11 +961,12 @@ async fn fetch_metadata_at(
     client: &reqwest::Client,
     resource_domain: &str,
 ) -> Result<AuthMetadata, String> {
-    let resp = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| format!("discovery {resource_domain}: {}", redact_reqwest_err(&e, url)))?;
+    let resp = client.get(url).send().await.map_err(|e| {
+        format!(
+            "discovery {resource_domain}: {}",
+            redact_reqwest_err(&e, url)
+        )
+    })?;
     if !resp.status().is_success() {
         return Err(format!(
             "discovery {resource_domain}: HTTP {}",
@@ -856,12 +1253,7 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
 
-    use axum::{
-        Router,
-        extract::State,
-        response::IntoResponse,
-        routing::get as ax_get,
-    };
+    use axum::{Router, extract::State, response::IntoResponse, routing::get as ax_get};
 
     use super::*;
     use crate::envelope::AgeCipherDirectory;
@@ -998,6 +1390,124 @@ mod tests {
         let block = dyson_json_block("i-abc", "linear", "https://swarm.example/", "tok-1");
         assert_eq!(block["url"], "https://swarm.example/mcp/i-abc/linear");
         assert_eq!(block["headers"]["Authorization"], "Bearer tok-1");
+    }
+
+    #[test]
+    fn vscode_config_accepts_single_docker_stdio_server() {
+        let raw = serde_json::json!({
+            "servers": {
+                "github_1": {
+                    "type": "stdio",
+                    "command": "docker",
+                    "args": ["run", "-i", "--rm", "-e", "GITHUB_TOKEN", "ghcr.io/example/github-mcp"],
+                    "env": { "GITHUB_TOKEN": "ghp_secret" }
+                }
+            }
+        });
+        let (name, entry) = entry_from_vscode_config(raw.clone()).unwrap();
+
+        assert_eq!(name, "github_1");
+        assert_eq!(entry.url, "docker://ghcr.io/example/github-mcp");
+        assert_eq!(entry.auth, McpAuthSpec::None);
+        assert_eq!(entry.raw_vscode_config, Some(raw));
+        match entry.runtime {
+            Some(McpRuntimeSpec::DockerStdio { command, args, env }) => {
+                assert_eq!(command, "docker");
+                assert_eq!(args[0], "run");
+                assert_eq!(env["GITHUB_TOKEN"], "ghp_secret");
+            }
+            other => panic!("expected docker stdio runtime, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn vscode_config_accepts_single_http_server() {
+        let raw = serde_json::json!({
+            "servers": {
+                "linear": {
+                    "type": "http",
+                    "url": "https://api.linear.app/mcp",
+                    "headers": {
+                        "Authorization": "Bearer lin_secret",
+                        "X-Team": "search"
+                    }
+                }
+            }
+        });
+        let (name, entry) = entry_from_vscode_config(raw).unwrap();
+
+        assert_eq!(name, "linear");
+        assert_eq!(entry.url, "https://api.linear.app/mcp");
+        assert!(entry.runtime.is_none());
+        assert_eq!(entry.headers["X-Team"], "search");
+        match entry.auth {
+            McpAuthSpec::Bearer { token } => assert_eq!(token, "lin_secret"),
+            other => panic!("expected bearer auth, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn vscode_config_rejects_multi_server_and_placeholders() {
+        let multi = serde_json::json!({
+            "servers": {
+                "a": { "type": "http", "url": "https://a.example/mcp" },
+                "b": { "type": "http", "url": "https://b.example/mcp" }
+            }
+        });
+        assert!(
+            entry_from_vscode_config(multi)
+                .unwrap_err()
+                .contains("exactly one")
+        );
+
+        let placeholder = serde_json::json!({
+            "servers": {
+                "github": {
+                    "type": "stdio",
+                    "command": "docker",
+                    "args": ["run", "-i", "-e", "GITHUB_TOKEN=${input:token}", "ghcr.io/example/github-mcp"]
+                }
+            }
+        });
+        assert!(
+            entry_from_vscode_config(placeholder)
+                .unwrap_err()
+                .contains("placeholders")
+        );
+    }
+
+    #[test]
+    fn docker_stdio_validator_rejects_host_escape_flags() {
+        for args in [
+            vec!["run", "--privileged", "img"],
+            vec!["run", "--network=host", "img"],
+            vec!["run", "--pid", "host", "img"],
+            vec!["run", "-p", "8080:8080", "img"],
+            vec!["run", "-v", "/:/host", "img"],
+            vec!["run", "-d", "img"],
+            vec!["run", "--detach=true", "img"],
+            vec!["run", "--rm=false", "img"],
+            vec!["run", "--env-file", "/tmp/secrets", "img"],
+            vec!["run", "--mount", "type=bind,source=/,target=/host", "img"],
+            vec!["run", "--memory=8g", "img"],
+        ] {
+            let args: Vec<String> = args.into_iter().map(String::from).collect();
+            assert!(
+                validate_docker_stdio_args(&args).is_err(),
+                "{args:?} should be rejected"
+            );
+        }
+        let safe: Vec<String> = [
+            "run",
+            "--rm",
+            "-i",
+            "--network=bridge",
+            "ghcr.io/example/mcp",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        assert!(validate_docker_stdio_args(&safe).is_ok());
     }
 
     #[test]
@@ -1371,8 +1881,14 @@ mod tests {
             };
             let app = Router::new()
                 .route("/.well-known/oauth-protected-resource", ax_get(root_prm))
-                .route("/.well-known/oauth-protected-resource/mcp", ax_get(path_prm))
-                .route("/.well-known/oauth-authorization-server/as", ax_get(as_metadata))
+                .route(
+                    "/.well-known/oauth-protected-resource/mcp",
+                    ax_get(path_prm),
+                )
+                .route(
+                    "/.well-known/oauth-authorization-server/as",
+                    ax_get(as_metadata),
+                )
                 .with_state(state.clone());
             tokio::spawn(async move {
                 axum::serve(listener, app).await.unwrap();

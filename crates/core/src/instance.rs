@@ -2992,6 +2992,9 @@ impl InstanceService {
             .unwrap_or_else(|| crate::mcp_servers::McpServerEntry {
                 url: url.clone(),
                 auth: auth.clone(),
+                headers: std::collections::HashMap::new(),
+                runtime: None,
+                raw_vscode_config: None,
                 oauth_tokens: None,
                 tools_catalog: None,
                 enabled_tools: enabled_tools.clone(),
@@ -3012,6 +3015,9 @@ impl InstanceService {
         }
         entry.url = url;
         entry.auth = auth;
+        entry.headers.clear();
+        entry.runtime = None;
+        entry.raw_vscode_config = None;
         // The SPA always submits the current selection on save; mirror
         // it onto the entry (None ⇒ "use default", Some(vec) ⇒ explicit).
         entry.enabled_tools = enabled_tools;
@@ -3042,6 +3048,103 @@ impl InstanceService {
         // land so the next push (e.g. a rename) can pick it up.
         if let Err(err) = self.sync_mcp_to_dyson(owner_id, id).await {
             tracing::warn!(error = %err, instance = %id, "mcp put: sync_mcp_to_dyson failed (entry persisted)");
+        }
+        Ok(())
+    }
+
+    /// Replace the instance's MCP attachment with exactly one
+    /// VS Code-style MCP JSON document.  The raw JSON is sealed on the
+    /// resulting entry so the SPA can round-trip the familiar config,
+    /// while dyson still receives only the hidden swarm proxy URL.
+    pub async fn put_vscode_mcp_config(
+        &self,
+        owner_id: &str,
+        id: &str,
+        raw: serde_json::Value,
+    ) -> Result<(), SwarmError> {
+        let _row = self
+            .instances
+            .get_for_owner(owner_id, id)
+            .await?
+            .ok_or(SwarmError::NotFound)?;
+        let secrets = self
+            .mcp_secrets
+            .as_ref()
+            .ok_or_else(|| SwarmError::PolicyDenied("mcp secrets store not configured".into()))?;
+        let (name, entry) =
+            mcp_servers::entry_from_vscode_config(raw).map_err(SwarmError::BadRequest)?;
+
+        // One-server JSON editor semantics: replacing the document
+        // replaces the whole MCP set for the instance.
+        mcp_servers::forget_all(secrets, owner_id, id)
+            .await
+            .map_err(|e| SwarmError::Internal(format!("mcp forget: {e}")))?;
+        mcp_servers::put(secrets, owner_id, id, &name, &entry)
+            .await
+            .map_err(|e| SwarmError::Internal(format!("mcp put: {e}")))?;
+        let idx = serde_json::to_vec(&vec![name])
+            .map_err(|e| SwarmError::Internal(format!("mcp index serialise: {e}")))?;
+        secrets
+            .put(owner_id, &mcp_servers::index_key(id), &idx)
+            .await
+            .map_err(|e| SwarmError::Internal(format!("mcp index put: {e}")))?;
+
+        if let Err(err) = self.sync_mcp_to_dyson(owner_id, id).await {
+            tracing::warn!(error = %err, instance = %id, "mcp vscode put: sync_mcp_to_dyson failed (entry persisted)");
+        }
+        Ok(())
+    }
+
+    /// Fetch the exact VS Code-style JSON previously saved through the
+    /// single-server editor.  Returns `None` for legacy MCP entries
+    /// created through the older per-field UI.
+    pub async fn get_vscode_mcp_config(
+        &self,
+        owner_id: &str,
+        id: &str,
+    ) -> Result<Option<serde_json::Value>, SwarmError> {
+        let _row = self
+            .instances
+            .get_for_owner(owner_id, id)
+            .await?
+            .ok_or(SwarmError::NotFound)?;
+        let secrets = self
+            .mcp_secrets
+            .as_ref()
+            .ok_or_else(|| SwarmError::PolicyDenied("mcp secrets store not configured".into()))?;
+        let names = mcp_servers::list_names(secrets, owner_id, id)
+            .await
+            .map_err(|e| SwarmError::Internal(format!("mcp list: {e}")))?;
+        let Some(name) = names.first() else {
+            return Ok(None);
+        };
+        let entry = mcp_servers::get(secrets, owner_id, id, name)
+            .await
+            .map_err(|e| SwarmError::Internal(format!("mcp get: {e}")))?;
+        Ok(entry.and_then(|e| e.raw_vscode_config))
+    }
+
+    /// Clear the single-server JSON config and push an empty MCP block
+    /// to the running dyson.
+    pub async fn delete_vscode_mcp_config(
+        &self,
+        owner_id: &str,
+        id: &str,
+    ) -> Result<(), SwarmError> {
+        let _row = self
+            .instances
+            .get_for_owner(owner_id, id)
+            .await?
+            .ok_or(SwarmError::NotFound)?;
+        let secrets = self
+            .mcp_secrets
+            .as_ref()
+            .ok_or_else(|| SwarmError::PolicyDenied("mcp secrets store not configured".into()))?;
+        mcp_servers::forget_all(secrets, owner_id, id)
+            .await
+            .map_err(|e| SwarmError::Internal(format!("mcp forget: {e}")))?;
+        if let Err(err) = self.sync_mcp_to_dyson(owner_id, id).await {
+            tracing::warn!(error = %err, instance = %id, "mcp vscode delete: sync_mcp_to_dyson failed");
         }
         Ok(())
     }
@@ -6388,6 +6491,9 @@ mod tests {
             auth: crate::mcp_servers::McpAuthSpec::Bearer {
                 token: "lin_secret".into(),
             },
+            headers: std::collections::HashMap::new(),
+            runtime: None,
+            raw_vscode_config: None,
             oauth_tokens: Some(crate::mcp_servers::McpOAuthTokens {
                 access_token: "atk".into(),
                 refresh_token: Some("rtk".into()),
@@ -6560,6 +6666,9 @@ mod tests {
             auth: crate::mcp_servers::McpAuthSpec::Bearer {
                 token: "lin_secret".into(),
             },
+            headers: std::collections::HashMap::new(),
+            runtime: None,
+            raw_vscode_config: None,
             oauth_tokens: Some(crate::mcp_servers::McpOAuthTokens {
                 access_token: "atk".into(),
                 refresh_token: Some("rtk".into()),

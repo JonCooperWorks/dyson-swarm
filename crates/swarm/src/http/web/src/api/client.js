@@ -578,9 +578,9 @@ export class SwarmClient {
 
   // ─── Per-instance MCP servers ──────────────────────────────────────
   //
-  // Records (URL + auth) live in user_secrets sealed under the user's
-  // age cipher.  The agent only ever sees a swarm proxy URL, so even
-  // an airgapped dyson can reach attached MCP servers.
+  // Records live in user_secrets sealed under the user's age cipher.
+  // The JSON editor stores the raw VS Code-style config, while the
+  // agent only ever sees a swarm proxy URL.
 
   /// `[{name, url, auth_kind, connected}, ...]` for one instance.
   /// `connected` is true for bearer/none entries (always usable) and
@@ -593,6 +593,31 @@ export class SwarmClient {
     return this._json(
       `/v1/instances/${encodeURIComponent(instanceId)}/mcp/servers`,
       { headers: { Accept: 'application/json' } },
+    );
+  }
+
+  getMcpJsonConfig(instanceId) {
+    return this._json(
+      `/v1/instances/${encodeURIComponent(instanceId)}/mcp/config`,
+      { headers: { Accept: 'application/json' } },
+    );
+  }
+
+  putMcpJsonConfig(instanceId, config) {
+    return this._json(
+      `/v1/instances/${encodeURIComponent(instanceId)}/mcp/config`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(config),
+      },
+    );
+  }
+
+  deleteMcpJsonConfig(instanceId) {
+    return this._json(
+      `/v1/instances/${encodeURIComponent(instanceId)}/mcp/config`,
+      { method: 'DELETE' },
     );
   }
 

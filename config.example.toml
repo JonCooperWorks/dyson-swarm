@@ -22,6 +22,11 @@ url = "http://localhost:3000"
 api_key = "CHANGE_ME"
 sandbox_domain = "cube.app"
 
+# Optional Docker-backed stdio MCP runtime helper. Required only for
+# VS Code-style `command: "docker"` MCP configs pasted into the swarm UI.
+[mcp_runtime]
+socket_path = "/run/dyson-mcp-runtime/runtime.sock"
+
 # OIDC user identity.
 # Optional — if omitted, /v1/* is reachable only via opaque api keys minted
 # through POST /v1/admin/users/:id/keys (CI/admin paths). Most production

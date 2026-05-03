@@ -1679,10 +1679,6 @@
   cursor: not-allowed;
 }
 
-.mcp-json-dirty {
-  margin: 6px 0 0;
-}
-
 .mcp-row-list {
   list-style: none;
   padding: 0;

@@ -3112,7 +3112,6 @@ function McpServerEditModal({ initial, existingNames, onCancel, onSubmit, onSubm
   const [tokenUrl, setTokenUrl] = React.useState('');
   const [registrationUrl, setRegistrationUrl] = React.useState('');
   const [jsonText, setJsonText] = React.useState('');
-  const [jsonDirty, setJsonDirty] = React.useState(false);
   const [err, setErr] = React.useState(null);
 
   // Auth kind changed mid-edit → drop any "keep existing" sentinels.
@@ -3204,17 +3203,11 @@ function McpServerEditModal({ initial, existingNames, onCancel, onSubmit, onSubm
                 className="mcp-json-textarea"
                 value={jsonText}
                 placeholder={MCP_JSON_CONFIG_EXAMPLE}
-                onChange={e => {
-                  setJsonText(e.target.value);
-                  setJsonDirty(true);
-                }}
+                onChange={e => setJsonText(e.target.value)}
                 spellCheck={false}
                 disabled={busy}
                 aria-label="VS Code-style MCP JSON config"
               />
-              {jsonDirty ? (
-                <p className="muted small mcp-json-dirty">unsaved MCP JSON changes</p>
-              ) : null}
             </>
           ) : (
             <>

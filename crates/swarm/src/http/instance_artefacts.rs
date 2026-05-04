@@ -58,6 +58,17 @@ fn parse_limit_offset(q: &std::collections::HashMap<String, String>) -> (u32, u3
 
 pub fn router(state: AppState) -> Router {
     Router::new()
+        .route("/v1/instances/:id/artifacts", get(list_for_instance))
+        .route("/v1/instances/:id/artifacts/sweep", post(sweep_instance))
+        .route(
+            "/v1/instances/:id/artifacts/:art_id",
+            get(get_artefact_meta).delete(delete_artefact),
+        )
+        .route(
+            "/v1/instances/:id/artifacts/:art_id/raw",
+            get(get_artefact_raw),
+        )
+        .route("/v1/artifacts", get(list_for_owner))
         .route("/v1/instances/:id/artefacts", get(list_for_instance))
         .route("/v1/instances/:id/artefacts/sweep", post(sweep_instance))
         .route(

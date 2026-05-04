@@ -1,6 +1,6 @@
-/* swarm — Shared artefact links.
+/* swarm — Shared artifact links.
  *
- * The lifecycle controls live in <SharesPanel> so the artefacts screen
+ * The lifecycle controls live in <SharesPanel> so the artifacts screen
  * can carry share status, copy, revoke, reissue, audit, rotate, and
  * manual minting without bouncing the operator to a second page.
  *
@@ -35,9 +35,9 @@ export function shareAccessLogHref(instanceId, jti) {
   return `#/i/${encodeURIComponent(instanceId)}/shares/${encodeURIComponent(jti)}/log`;
 }
 
-export function artefactFilenameMap(artefactRows) {
+export function artifactFilenameMap(artifactRows) {
   const out = new Map();
-  for (const row of artefactRows || []) {
+  for (const row of artifactRows || []) {
     if (!row?.id) continue;
     const title = typeof row.title === 'string' && row.title.trim()
       ? row.title.trim()
@@ -47,23 +47,23 @@ export function artefactFilenameMap(artefactRows) {
   return out;
 }
 
-export function shareFilename(row, namesByArtefactId) {
+export function shareFilename(row, namesByArtifactId) {
   if (!row) return '—';
-  if (typeof row.artefact_title === 'string' && row.artefact_title.trim()) {
-    return row.artefact_title.trim();
+  if (typeof row.artifact_title === 'string' && row.artifact_title.trim()) {
+    return row.artifact_title.trim();
   }
-  return namesByArtefactId?.get(row.artefact_id) || row.artefact_id || '—';
+  return namesByArtifactId?.get(row.artifact_id) || row.artifact_id || '—';
 }
 
 export function SharesPage({ instanceId }) {
   const backHref = `#/i/${encodeURIComponent(instanceId)}`;
   return (
-    <main className="page page-edit page-artefacts">
+    <main className="page page-edit page-artifacts">
       <header className="page-header">
         <a className="btn btn-ghost btn-sm" href={backHref}>← back</a>
-        <h1 className="page-title">artefacts</h1>
+        <h1 className="page-title">artifacts</h1>
         <p className="page-sub muted">
-          Artefact sharing now lives with the artefacts list, so cached outputs
+          Artifact sharing now lives with the artifacts list, so cached outputs
           and active public links can be managed in one pass.
         </p>
       </header>
@@ -72,13 +72,13 @@ export function SharesPage({ instanceId }) {
   );
 }
 
-export function SharesPanel({ instanceId, artefactRows = [] }) {
+export function SharesPanel({ instanceId, artifactRows = [] }) {
   const { client } = useApi();
   const slot = useAppState(s => s.shares.byInstance[instanceId]);
   const rows = slot?.rows || null;
-  const namesByArtefactId = React.useMemo(
-    () => artefactFilenameMap(artefactRows),
-    [artefactRows],
+  const namesByArtifactId = React.useMemo(
+    () => artifactFilenameMap(artifactRows),
+    [artifactRows],
   );
   const [refreshing, setRefreshing] = React.useState(false);
   const [err, setErr] = React.useState(null);
@@ -87,20 +87,20 @@ export function SharesPanel({ instanceId, artefactRows = [] }) {
   const [minted, setMinted] = React.useState(null);
 
   // Hash-fragment params for deep-link mints from the dyson SPA's
-  // legacy "share…" button: `#/i/<id>/shares?share_artefact=&share_chat=`.
+  // legacy "share…" button: `#/i/<id>/shares?share_artifact=&share_chat=`.
   // The new dyson UI mints same-origin via `/_swarm/share-mint`, so
   // this is a fallback path — kept so links that landed in someone's
   // history still work.
-  const [prefill, setPrefill] = React.useState({ artefact: '', chat: '' });
+  const [prefill, setPrefill] = React.useState({ artifact: '', chat: '' });
   React.useEffect(() => {
     const apply = () => {
       const h = window.location.hash || '';
       const q = h.split('?')[1] || '';
       const p = new URLSearchParams(q);
-      const a = p.get('share_artefact');
+      const a = p.get('share_artifact');
       const c = p.get('share_chat');
       if (a && c) {
-        setPrefill({ artefact: a, chat: c });
+        setPrefill({ artifact: a, chat: c });
         setMintOpen(true);
         const base = h.split('?')[0];
         try { window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}${base}`); } catch { /* ignore */ }
@@ -175,7 +175,7 @@ export function SharesPanel({ instanceId, artefactRows = [] }) {
           <div>
             <div className="panel-title">shared links</div>
             <div className="muted small">
-              Copy, revoke, reissue, audit, or mint anonymous artefact links here.
+              Copy, revoke, reissue, audit, or mint anonymous artifact links here.
             </div>
           </div>
           <div className="panel-actions">
@@ -189,9 +189,9 @@ export function SharesPanel({ instanceId, artefactRows = [] }) {
             </button>
             <button
               className="btn btn-sm"
-              onClick={() => { setMintOpen(true); setPrefill({ artefact: '', chat: '' }); }}
+              onClick={() => { setMintOpen(true); setPrefill({ artifact: '', chat: '' }); }}
               disabled={busy}
-              title="anonymous link to one artefact"
+              title="anonymous link to one artifact"
             >
               + new
             </button>
@@ -210,13 +210,13 @@ export function SharesPanel({ instanceId, artefactRows = [] }) {
         ) : rows.length === 0 ? (
           <p className="muted small">
             no shared links yet — click <em>+ new</em> to mint one, or use
-            an artefact row's share action above.
+            an artifact row's share action above.
           </p>
         ) : (
           <table className="rows">
             <thead><tr>
               <th>filename</th>
-              <th>artefact</th>
+              <th>artifact</th>
               <th>label</th>
               <th>state</th>
               <th>created</th>
@@ -225,13 +225,13 @@ export function SharesPanel({ instanceId, artefactRows = [] }) {
             </tr></thead>
             <tbody>
               {rows.map(r => {
-                const filename = shareFilename(r, namesByArtefactId);
+                const filename = shareFilename(r, namesByArtifactId);
                 return (
                   <tr key={r.jti}>
                     <td data-label="filename">
-                      <span className="share-file-name" title={r.artefact_id}>{filename}</span>
+                      <span className="share-file-name" title={r.artifact_id}>{filename}</span>
                     </td>
-                    <td data-label="artefact"><code className="mono-sm">{r.artefact_id}</code></td>
+                    <td data-label="artifact"><code className="mono-sm">{r.artifact_id}</code></td>
                     <td data-label="label" className="muted small">{r.label || '—'}</td>
                     <td data-label="state">
                       {r.revoked_at
@@ -285,13 +285,13 @@ export function ShareAccessLogPage({ instanceId, jti, embedded = false }) {
   const { client } = useApi();
   const [rows, setRows] = React.useState(null);
   const [share, setShare] = React.useState(null);
-  const [artefacts, setArtefacts] = React.useState([]);
+  const [artifacts, setArtifacts] = React.useState([]);
   const [err, setErr] = React.useState(null);
-  const backHref = `#/i/${encodeURIComponent(instanceId)}/artefacts`;
+  const backHref = `#/i/${encodeURIComponent(instanceId)}/artifacts`;
 
   React.useEffect(() => {
     let cancelled = false;
-    setRows(null); setShare(null); setArtefacts([]); setErr(null);
+    setRows(null); setShare(null); setArtifacts([]); setErr(null);
     client.listShareAccesses(jti)
       .then(list => { if (!cancelled) setRows(Array.isArray(list) ? list : []); })
       .catch(e => { if (!cancelled) setErr(e?.detail || e?.message || 'list failed'); });
@@ -303,24 +303,24 @@ export function ShareAccessLogPage({ instanceId, jti, embedded = false }) {
         setShare(shareRows.find(r => r.jti === jti) || null);
       })
       .catch(() => { /* access rows are the page's critical path */ });
-    client.listInstanceArtefacts(instanceId)
-      .then(list => { if (!cancelled) setArtefacts(Array.isArray(list) ? list : []); })
-      .catch(() => { /* filename falls back to artefact id */ });
+    client.listInstanceArtifacts(instanceId)
+      .then(list => { if (!cancelled) setArtifacts(Array.isArray(list) ? list : []); })
+      .catch(() => { /* filename falls back to artifact id */ });
     return () => { cancelled = true; };
   }, [client, instanceId, jti]);
 
-  const namesByArtefactId = React.useMemo(() => artefactFilenameMap(artefacts), [artefacts]);
-  const filename = share ? shareFilename(share, namesByArtefactId) : `share ${jti.slice(0, 12)}…`;
+  const namesByArtifactId = React.useMemo(() => artifactFilenameMap(artifacts), [artifacts]);
+  const filename = share ? shareFilename(share, namesByArtifactId) : `share ${jti.slice(0, 12)}…`;
 
   const Shell = embedded ? 'div' : 'main';
   return (
     <Shell className={embedded ? 'instance-subpage page-share-log' : 'page page-edit page-share-log'}>
       <header className={embedded ? 'subpage-header' : 'page-header'}>
-        <a className="btn btn-ghost btn-sm" href={backHref}>← artefacts</a>
+        <a className="btn btn-ghost btn-sm" href={backHref}>← artifacts</a>
         <h1 className={embedded ? 'subpage-title' : 'page-title'}>access log</h1>
         <p className="page-sub muted">
           <span>{filename}</span>
-          {share?.artefact_id ? <> · <code className="mono-sm">{share.artefact_id}</code></> : null}
+          {share?.artifact_id ? <> · <code className="mono-sm">{share.artifact_id}</code></> : null}
         </p>
       </header>
 
@@ -450,7 +450,7 @@ function ShareAccessTable({ rows }) {
 
 function MintDialog({ instanceId, prefill, onClose, onMinted }) {
   const { client } = useApi();
-  const [artefact, setArtefact] = React.useState(prefill.artefact || '');
+  const [artifact, setArtifact] = React.useState(prefill.artifact || '');
   const [chat, setChat] = React.useState(prefill.chat || '');
   const [ttl, setTtl] = React.useState('7d');
   const [label, setLabel] = React.useState('');
@@ -459,13 +459,13 @@ function MintDialog({ instanceId, prefill, onClose, onMinted }) {
 
   const submit = async (e) => {
     e.preventDefault();
-    if (!artefact.trim() || !chat.trim()) {
-      setErr('artefact id and chat id are both required');
+    if (!artifact.trim() || !chat.trim()) {
+      setErr('artifact id and chat id are both required');
       return;
     }
     setBusy(true); setErr(null);
     try {
-      const m = await client.mintShare(instanceId, artefact.trim(), {
+      const m = await client.mintShare(instanceId, artifact.trim(), {
         chat_id: chat.trim(),
         ttl,
         label: label.trim() || null,
@@ -483,8 +483,8 @@ function MintDialog({ instanceId, prefill, onClose, onMinted }) {
         <h3 style={{ marginTop: 0 }}>new share</h3>
         <form onSubmit={submit} className="form">
           <label className="field">
-            <span>artefact id</span>
-            <input value={artefact} onChange={e => setArtefact(e.target.value)} placeholder="a1234…" autoFocus={!prefill.artefact}/>
+            <span>artifact id</span>
+            <input value={artifact} onChange={e => setArtifact(e.target.value)} placeholder="a1234…" autoFocus={!prefill.artifact}/>
           </label>
           <label className="field">
             <span>chat id</span>

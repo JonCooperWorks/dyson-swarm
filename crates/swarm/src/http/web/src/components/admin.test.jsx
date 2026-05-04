@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import React from 'react';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 
 import { ApiProvider } from '../hooks/useApi.jsx';
@@ -21,6 +21,7 @@ describe('AdminView Docker MCP catalog', () => {
           id: 'github',
           label: 'GitHub',
           template: '{"servers":{}}',
+          description: '**GitHub** MCP tools with [docs](https://example.test/docs).',
           placeholders: [],
           source: 'admin',
           created_at: 1,
@@ -40,6 +41,8 @@ describe('AdminView Docker MCP catalog', () => {
       .toHaveAttribute('href', '#/admin/mcp-catalog/new');
     expect(await screen.findByRole('link', { name: 'edit' }))
       .toHaveAttribute('href', '#/admin/mcp-catalog/github');
+    expect(await screen.findByRole('link', { name: 'docs' }))
+      .toHaveAttribute('href', 'https://example.test/docs');
   });
 
   test('adds an admin Docker MCP template with payload placeholders on the full page', async () => {
@@ -111,6 +114,18 @@ describe('AdminView Docker MCP catalog', () => {
     const bodyText = document.body.textContent;
     expect(bodyText.indexOf('saved placeholders')).toBeLessThan(bodyText.indexOf('payload path'));
     expect(bodyText.indexOf('GitHub token')).toBeLessThan(bodyText.indexOf('payload path'));
+    fireEvent.click(within(screen.getByText('github_token').closest('.admin-catalog-placeholder-row')).getByRole('button', { name: 'delete' }));
+    await waitFor(() => expect(template.value).not.toContain('{{placeholder.github_token}}'));
+    expect(screen.queryByText('GitHub token')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: /servers\.github\.env\.GITHUB_TOKEN/ }));
+    fireEvent.change(screen.getByLabelText('placeholder name'), {
+      target: { value: 'github_token' },
+    });
+    fireEvent.change(screen.getByLabelText('friendly name'), {
+      target: { value: 'GitHub token' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'bind placeholder' }));
+    await waitFor(() => expect(template.value).toContain('{{placeholder.github_token}}'));
     fireEvent.click(screen.getByRole('button', { name: 'save' }));
 
     await waitFor(() => expect(client.adminPutMcpDockerCatalogServer).toHaveBeenCalledTimes(1));
@@ -128,5 +143,57 @@ describe('AdminView Docker MCP catalog', () => {
       }],
     });
     expect(window.location.hash).toBe('#/admin');
+  });
+
+  test('does not leak placeholders from an edited template into a fresh add page', async () => {
+    const rows = [{
+      id: 'brave',
+      label: 'Brave',
+      description: 'Search tools',
+      template: JSON.stringify({
+        servers: {
+          brave: {
+            type: 'stdio',
+            command: 'docker',
+            args: ['run', '--rm', '-i', '-e', 'BRAVE_API_KEY', 'docker.io/mcp/brave-search'],
+            env: { BRAVE_API_KEY: '{{placeholder.brave_api_key}}' },
+          },
+        },
+      }),
+      placeholders: [{
+        id: 'brave_api_key',
+        label: 'Brave API key',
+        required: true,
+        secret: true,
+      }],
+      source: 'admin',
+      created_at: 1,
+      updated_at: 2,
+    }];
+    const client = {
+      adminListUsers: vi.fn().mockResolvedValue([]),
+      adminRevokeProxyToken: vi.fn(),
+      adminListMcpDockerCatalog: vi.fn().mockResolvedValue({ allow_raw_json: false, servers: rows }),
+      adminPutMcpDockerCatalogServer: vi.fn(),
+      adminDeleteMcpDockerCatalogServer: vi.fn(),
+    };
+
+    const { rerender } = render(
+      <ApiProvider client={client} auth={{ mode: 'none' }}>
+        <AdminView view={{ name: 'admin-mcp-catalog-edit', catalogId: 'brave' }}/>
+      </ApiProvider>,
+    );
+
+    expect(await screen.findByText('Brave API key')).toBeInTheDocument();
+    rerender(
+      <ApiProvider client={client} auth={{ mode: 'none' }}>
+        <AdminView view={{ name: 'admin-mcp-catalog-new' }}/>
+      </ApiProvider>,
+    );
+
+    const template = await screen.findByLabelText('Docker MCP JSON template');
+    expect(template).toHaveValue('');
+    expect(screen.queryByText('Brave API key')).toBeNull();
+    expect(screen.getByText('no template placeholders')).toBeInTheDocument();
   });
 });

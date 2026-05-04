@@ -1,5 +1,5 @@
-/* Regression coverage for the swarm-side artefact reader.  Most
- * artefacts are report-shaped Markdown, but cache metadata can arrive
+/* Regression coverage for the swarm-side artifact reader.  Most
+ * artifacts are report-shaped Markdown, but cache metadata can arrive
  * as text/plain or with a charset suffix on the content type.  These
  * tests lock down the "render it like a document" path instead of
  * slipping back to a raw <pre>.
@@ -10,23 +10,24 @@ import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/re
 import '@testing-library/jest-dom/vitest';
 
 import {
-  ArtefactTable,
-  ArtefactBody,
-  ArtefactActionsBar,
-  activeSharesByArtefact,
+  ArtifactTable,
+  ArtifactBody,
+  ArtifactActionsBar,
+  activeSharesByArtifact,
+  artifactShareKey,
   contentTypeBase,
-  isMarkdownArtefact,
-} from './artefacts.jsx';
+  isMarkdownArtifact,
+} from './artifacts.jsx';
 
 afterEach(() => { cleanup(); });
 
-describe('artefact markdown detection', () => {
+describe('artifact markdown detection', () => {
   test('normalizes content types with charset parameters', () => {
     expect(contentTypeBase('text/markdown; charset=utf-8')).toBe('text/markdown');
   });
 
   test('treats markdown reports as markdown even when cached as text/plain', () => {
-    expect(isMarkdownArtefact({
+    expect(isMarkdownArtifact({
       kind: 'other',
       mime: 'text/plain; charset=utf-8',
       title: 'report.txt',
@@ -35,7 +36,7 @@ describe('artefact markdown detection', () => {
   });
 
   test('does not render structured text formats through markdown heuristics', () => {
-    expect(isMarkdownArtefact({
+    expect(isMarkdownArtifact({
       kind: 'other',
       mime: 'application/json',
       title: 'payload.json',
@@ -44,23 +45,23 @@ describe('artefact markdown detection', () => {
   });
 });
 
-describe('activeSharesByArtefact', () => {
-  test('counts only live shared links per artefact', () => {
-    const counts = activeSharesByArtefact([
-      { artefact_id: 'a1', active: true, revoked_at: null },
-      { artefact_id: 'a1', active: true, revoked_at: null },
-      { artefact_id: 'a1', active: false, revoked_at: null },
-      { artefact_id: 'a2', active: true, revoked_at: 123 },
-      { artefact_id: 'a3', active: true, revoked_at: null },
+describe('activeSharesByArtifact', () => {
+  test('counts only live shared links per artifact', () => {
+    const counts = activeSharesByArtifact([
+      { instance_id: 'inst-a', chat_id: 'c1', artifact_id: 'a1', active: true, revoked_at: null },
+      { instance_id: 'inst-a', chat_id: 'c1', artifact_id: 'a1', active: true, revoked_at: null },
+      { instance_id: 'inst-a', chat_id: 'c1', artifact_id: 'a1', active: false, revoked_at: null },
+      { instance_id: 'inst-a', chat_id: 'c1', artifact_id: 'a2', active: true, revoked_at: 123 },
+      { instance_id: 'inst-a', chat_id: 'c2', artifact_id: 'a1', active: true, revoked_at: null },
     ]);
 
-    expect(counts.get('a1')).toBe(2);
-    expect(counts.has('a2')).toBe(false);
-    expect(counts.get('a3')).toBe(1);
+    expect(counts.get(artifactShareKey({ instance_id: 'inst-a', chat_id: 'c1', id: 'a1' }))).toBe(2);
+    expect(counts.has(artifactShareKey({ instance_id: 'inst-a', chat_id: 'c1', id: 'a2' }))).toBe(false);
+    expect(counts.get(artifactShareKey({ instance_id: 'inst-a', chat_id: 'c2', id: 'a1' }))).toBe(1);
   });
 });
 
-describe('ArtefactTable pagination', () => {
+describe('ArtifactTable pagination', () => {
   test('shows one server page and advances through the pager', () => {
     const rows = Array.from({ length: 26 }, (_, i) => ({
       id: `art-${i}`,
@@ -74,7 +75,7 @@ describe('ArtefactTable pagination', () => {
     const onPage = vi.fn();
 
     render(
-      <ArtefactTable
+      <ArtifactTable
         rows={rows}
         page={1}
         client={{}}
@@ -100,7 +101,7 @@ describe('ArtefactTable pagination', () => {
 
   test('marks rows with active shared links', () => {
     render(
-      <ArtefactTable
+      <ArtifactTable
         rows={[{
           id: 'art-1',
           instance_id: 'inst-a',
@@ -120,14 +121,87 @@ describe('ArtefactTable pagination', () => {
         showInstance={false}
         sweepClick={null}
         shareRows={[
-          { artefact_id: 'art-1', active: true, revoked_at: null },
-          { artefact_id: 'art-1', active: true, revoked_at: null },
+          { instance_id: 'inst-a', chat_id: 'c-0001', artifact_id: 'art-1', active: true, revoked_at: null },
+          { instance_id: 'inst-a', chat_id: 'c-0001', artifact_id: 'art-1', active: true, revoked_at: null },
         ]}
       />,
     );
 
     expect(screen.getByText('shared 2')).toBeInTheDocument();
-    expect(screen.getByText('dyson.png').closest('tr')).toHaveClass('artefact-row-shared');
+    expect(screen.getByText('dyson.png').closest('tr')).toHaveClass('artifact-row-shared');
+  });
+
+  test('does not mark a new artifact as shared when only the artifact id matches', () => {
+    render(
+      <ArtifactTable
+        rows={[{
+          id: 'art-1',
+          instance_id: 'inst-a',
+          chat_id: 'new-chat',
+          kind: 'image',
+          title: 'new.png',
+          bytes: 1024,
+          cached_at: 1000,
+        }]}
+        page={1}
+        client={{}}
+        busy={false}
+        setBusy={() => {}}
+        setErr={() => {}}
+        setMinted={() => {}}
+        refresh={() => {}}
+        showInstance={false}
+        sweepClick={null}
+        shareRows={[
+          { instance_id: 'inst-a', chat_id: 'old-chat', artifact_id: 'art-1', active: true, revoked_at: null },
+        ]}
+      />,
+    );
+
+    expect(screen.queryByText(/shared/)).toBeNull();
+    expect(screen.getByText('new.png').closest('tr')).not.toHaveClass('artifact-row-shared');
+  });
+
+  test('keeps old and new artifacts with the same id separated by chat', () => {
+    render(
+      <ArtifactTable
+        rows={[
+          {
+            id: 'art-1',
+            instance_id: 'inst-a',
+            chat_id: 'old-chat',
+            kind: 'image',
+            title: 'old.png',
+            bytes: 1024,
+            cached_at: 1000,
+          },
+          {
+            id: 'art-1',
+            instance_id: 'inst-a',
+            chat_id: 'new-chat',
+            kind: 'image',
+            title: 'new.png',
+            bytes: 1024,
+            cached_at: 1001,
+          },
+        ]}
+        page={1}
+        client={{}}
+        busy={false}
+        setBusy={() => {}}
+        setErr={() => {}}
+        setMinted={() => {}}
+        refresh={() => {}}
+        showInstance={false}
+        sweepClick={null}
+        shareRows={[
+          { instance_id: 'inst-a', chat_id: 'old-chat', artifact_id: 'art-1', active: true, revoked_at: null },
+        ]}
+      />,
+    );
+
+    expect(screen.getByText('old.png').closest('tr')).toHaveClass('artifact-row-shared');
+    expect(screen.getByText('new.png').closest('tr')).not.toHaveClass('artifact-row-shared');
   });
 
   test('lets row sharing choose an expiry before minting', async () => {
@@ -141,7 +215,7 @@ describe('ArtefactTable pagination', () => {
     const setMinted = vi.fn();
 
     render(
-      <ArtefactTable
+      <ArtifactTable
         rows={[{
           id: 'art-1',
           instance_id: 'inst-a',
@@ -181,10 +255,10 @@ describe('ArtefactTable pagination', () => {
   });
 });
 
-describe('ArtefactActionsBar', () => {
-  test('keeps the detail share menu on the artefact action bar with clean expiry labels', () => {
+describe('ArtifactActionsBar', () => {
+  test('keeps the detail share menu on the artifact action bar with clean expiry labels', () => {
     const { container } = render(
-      <ArtefactActionsBar
+      <ArtifactActionsBar
         client={{ mintShare: vi.fn() }}
         row={{
           id: 'art-1',
@@ -201,7 +275,7 @@ describe('ArtefactActionsBar', () => {
       />,
     );
 
-    expect(container.querySelector('.artefact-actions-bar')).not.toBeNull();
+    expect(container.querySelector('.artifact-actions-bar')).not.toBeNull();
     fireEvent.click(screen.getByRole('button', { name: /share/i }));
 
     expect(screen.getByRole('button', { name: 'never' })).toHaveAttribute('title', 'no expiry');
@@ -209,10 +283,10 @@ describe('ArtefactActionsBar', () => {
   });
 });
 
-describe('ArtefactBody markdown rendering', () => {
+describe('ArtifactBody markdown rendering', () => {
   test('renders headings, task lists, and tables from text/plain markdown-ish reports', () => {
     const { container } = render(
-      <ArtefactBody
+      <ArtifactBody
         row={{ kind: 'other', mime: null, title: 'report.txt' }}
         state={{
           loading: false,
@@ -233,7 +307,7 @@ describe('ArtefactBody markdown rendering', () => {
 
   test('opens external markdown links in a new tab', () => {
     render(
-      <ArtefactBody
+      <ArtifactBody
         row={{ kind: 'security_review', mime: 'text/markdown', title: 'report.md' }}
         state={{
           loading: false,

@@ -307,54 +307,54 @@ export class SwarmClient {
     );
   }
 
-  // ─── Swarm-side artefact cache ─────────────────────────────────
+  // ─── Swarm-side artifact cache ─────────────────────────────────
   //
-  // Backs the "all my artefacts" panel and the share-mint affordance.
+  // Backs the "all my artifacts" panel and the share-mint affordance.
   // Cubes are ephemeral; this surface persists past cube reset (bytes
   // live on swarm under [backup].local_cache_dir).  Each row is
   // `{id, instance_id, chat_id, kind, title, mime, bytes, created_at,
   // cached_at}`.
 
   /// Owner-wide listing across every instance.  Newest cached_at first.
-  listMyArtefacts({ limit } = {}) {
-    return this.listMyArtefactsPage({ limit }).then(page => page.rows);
+  listMyArtifacts({ limit } = {}) {
+    return this.listMyArtifactsPage({ limit }).then(page => page.rows);
   }
 
-  listMyArtefactsPage({ limit, offset } = {}) {
+  listMyArtifactsPage({ limit, offset } = {}) {
     const params = new URLSearchParams();
     if (limit) params.set('limit', String(limit));
     if (offset) params.set('offset', String(offset));
     const qs = params.toString();
     return this._json(
-      `/v1/artefacts${qs ? `?${qs}` : ''}`,
+      `/v1/artifacts${qs ? `?${qs}` : ''}`,
       { headers: { Accept: 'application/json' } },
     ).then(rows => ({ rows: Array.isArray(rows) ? rows : [] }));
   }
 
   /// Per-instance listing, optionally narrowed to one chat (mirrors
-  /// dyson's `/api/conversations/:chat/artefacts` shape).
-  listInstanceArtefacts(instanceId, { chatId } = {}) {
-    return this.listInstanceArtefactsPage(instanceId, { chatId }).then(page => page.rows);
+  /// dyson's `/api/conversations/:chat/artifacts` shape).
+  listInstanceArtifacts(instanceId, { chatId } = {}) {
+    return this.listInstanceArtifactsPage(instanceId, { chatId }).then(page => page.rows);
   }
 
-  listInstanceArtefactsPage(instanceId, { chatId, limit, offset } = {}) {
+  listInstanceArtifactsPage(instanceId, { chatId, limit, offset } = {}) {
     const params = new URLSearchParams();
     if (chatId) params.set('chat_id', chatId);
     if (limit) params.set('limit', String(limit));
     if (offset) params.set('offset', String(offset));
     const qs = params.toString();
     return this._json(
-      `/v1/instances/${encodeURIComponent(instanceId)}/artefacts${qs ? `?${qs}` : ''}`,
+      `/v1/instances/${encodeURIComponent(instanceId)}/artifacts${qs ? `?${qs}` : ''}`,
       { headers: { Accept: 'application/json' } },
     ).then(rows => ({ rows: Array.isArray(rows) ? rows : [] }));
   }
 
   /// Pre-populate the cache for one chat by walking the cube's listing.
   /// Bodies are not pulled (memory blast radius); the share mint OR a
-  /// `getInstanceArtefactRaw` call brings bytes in lazily.
-  sweepInstanceArtefacts(instanceId, chatId) {
+  /// `getInstanceArtifactRaw` call brings bytes in lazily.
+  sweepInstanceArtifacts(instanceId, chatId) {
     return this._json(
-      `/v1/instances/${encodeURIComponent(instanceId)}/artefacts/sweep`,
+      `/v1/instances/${encodeURIComponent(instanceId)}/artifacts/sweep`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -367,19 +367,19 @@ export class SwarmClient {
   /// `<a download>` at this rather than fetching JSON.  Cache-first;
   /// falls through to the live cube on miss and write-throughs the
   /// bytes for next time.
-  instanceArtefactRawUrl(instanceId, artefactId) {
-    return `/v1/instances/${encodeURIComponent(instanceId)}/artefacts/${encodeURIComponent(artefactId)}/raw`;
+  instanceArtifactRawUrl(instanceId, artifactId) {
+    return `/v1/instances/${encodeURIComponent(instanceId)}/artifacts/${encodeURIComponent(artifactId)}/raw`;
   }
 
-  /// Open the raw artefact in a new tab.  A plain `<a href>` to the
+  /// Open the raw artifact in a new tab.  A plain `<a href>` to the
   /// /raw endpoint 401s — that surface is bearer-gated and a browser
   /// click can't carry the SPA's session token.  Workaround: fetch
   /// with the bearer, wrap the bytes in a blob URL, open that.  The
   /// blob URL is short-lived (revoked when the new tab closes) so
   /// the bytes don't leak to the address bar or referrer headers.
   /// Returns the blob URL so the caller can revoke it on cleanup.
-  async openInstanceArtefactRaw(instanceId, artefactId) {
-    const url = this.instanceArtefactRawUrl(instanceId, artefactId);
+  async openInstanceArtifactRaw(instanceId, artifactId) {
+    const url = this.instanceArtifactRawUrl(instanceId, artifactId);
     const r = await this._authedFetch(url, { method: 'GET' });
     if (!r.ok) {
       const detail = await r.text().catch(() => '');
@@ -393,26 +393,26 @@ export class SwarmClient {
     return objectUrl;
   }
 
-  /// Single-row metadata for the deep-linked artefact reader page.
+  /// Single-row metadata for the deep-linked artifact reader page.
   /// Returns null on 404 so the page can render an empty state.
-  getInstanceArtefactMeta(instanceId, artefactId) {
+  getInstanceArtifactMeta(instanceId, artifactId) {
     return this._json(
-      `/v1/instances/${encodeURIComponent(instanceId)}/artefacts/${encodeURIComponent(artefactId)}`,
+      `/v1/instances/${encodeURIComponent(instanceId)}/artifacts/${encodeURIComponent(artifactId)}`,
     ).catch(e => {
       if (e && e.status === 404) return null;
       throw e;
     });
   }
 
-  /// Fetch raw artefact bytes + mime for in-SPA rendering (the
+  /// Fetch raw artifact bytes + mime for in-SPA rendering (the
   /// reader pane uses this to render markdown, images, etc inline
   /// rather than dumping the body into a fresh tab).  Returns
   /// `{ blob, mime, text }` — text is the UTF-8 decode for the
   /// markdown render path; blob is for image / download paths.
   /// The caller is responsible for revoking any objectURL it
   /// creates from `blob`.
-  async fetchInstanceArtefactBytes(instanceId, artefactId) {
-    const url = this.instanceArtefactRawUrl(instanceId, artefactId);
+  async fetchInstanceArtifactBytes(instanceId, artifactId) {
+    const url = this.instanceArtifactRawUrl(instanceId, artifactId);
     const r = await this._authedFetch(url, { method: 'GET' });
     if (!r.ok) {
       const detail = await r.text().catch(() => '');
@@ -429,24 +429,24 @@ export class SwarmClient {
 
   /// Drop a row + its on-disk body.  Idempotent — 204 even when no
   /// row existed or the row wasn't owned by the caller.
-  deleteInstanceArtefact(instanceId, artefactId) {
+  deleteInstanceArtifact(instanceId, artifactId) {
     return this._json(
-      `/v1/instances/${encodeURIComponent(instanceId)}/artefacts/${encodeURIComponent(artefactId)}`,
+      `/v1/instances/${encodeURIComponent(instanceId)}/artifacts/${encodeURIComponent(artifactId)}`,
       { method: 'DELETE' },
     );
   }
 
-  // ─── Anonymous artefact shares ─────────────────────────────────
+  // ─── Anonymous artifact shares ─────────────────────────────────
   //
   // `mintShare` returns `{url, jti, expires_at, label, created_at}`;
   // the URL is shown to the user once and never stored plaintext.
   // listShares returns rows of `{jti, instance_id, chat_id,
-  // artefact_id, created_at, expires_at, revoked_at, label, active}`.
+  // artifact_id, created_at, expires_at, revoked_at, label, active}`.
   // Revocation is by jti and is idempotent.
 
-  mintShare(instanceId, artefactId, body) {
+  mintShare(instanceId, artifactId, body) {
     return this._json(
-      `/v1/instances/${encodeURIComponent(instanceId)}/artefacts/${encodeURIComponent(artefactId)}/shares`,
+      `/v1/instances/${encodeURIComponent(instanceId)}/artifacts/${encodeURIComponent(artifactId)}/shares`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

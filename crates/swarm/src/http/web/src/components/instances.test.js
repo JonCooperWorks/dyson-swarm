@@ -47,14 +47,14 @@ describe('instance subpage rail routing', () => {
     expect(instanceRailHref('next-id', { name: 'instance-tasks', id: 'current' }))
       .toBe('#/i/next-id/tasks');
     expect(instanceRailHref('next-id', { name: 'share-access-log', id: 'current', jti: 'jti' }))
-      .toBe('#/i/next-id/artefacts');
+      .toBe('#/i/next-id/artifacts');
   });
 
-  test('treats deep task and artefact pages as their parent section', () => {
+  test('treats deep task and artifact pages as their parent section', () => {
     expect(instanceSectionFromView({ name: 'instance-task-edit', id: 'current', taskName: 'deploy' }))
       .toBe('tasks');
-    expect(instanceSectionFromView({ name: 'instance-artefact', id: 'current', artefactId: 'a1' }))
-      .toBe('artefacts');
+    expect(instanceSectionFromView({ name: 'instance-artifact', id: 'current', artifactId: 'a1' }))
+      .toBe('artifacts');
   });
 
   test('renders an instance subpage inside the two-pane instance shell', async () => {
@@ -123,7 +123,7 @@ describe('instance subpage rail routing', () => {
     expect(overview).toHaveClass('btn-active');
   });
 
-  test('does not highlight artefacts solely because shared links exist', async () => {
+  test('does not highlight artifacts solely because shared links exist', async () => {
     const row = {
       id: 'a',
       name: 'Alpha',
@@ -136,12 +136,12 @@ describe('instance subpage rail routing', () => {
       network_policy: { kind: 'nolocalnet', entries: [] },
     };
     setInstances([row]);
-    setSharesFor('a', [{ jti: 'jti', artefact_id: 'art', active: true, revoked_at: null }]);
+    setSharesFor('a', [{ jti: 'jti', artifact_id: 'art', active: true, revoked_at: null }]);
     const client = {
       getInstance: () => Promise.resolve(row),
       listInstances: () => Promise.resolve([row]),
       listWebhooks: () => Promise.resolve([]),
-      listShares: () => Promise.resolve([{ jti: 'jti', artefact_id: 'art', active: true, revoked_at: null }]),
+      listShares: () => Promise.resolve([{ jti: 'jti', artifact_id: 'art', active: true, revoked_at: null }]),
     };
 
     render(
@@ -150,8 +150,8 @@ describe('instance subpage rail routing', () => {
       ),
     );
 
-    const artefacts = screen.getByRole('link', { name: /artefacts/i });
-    expect(artefacts).not.toHaveClass('btn-active');
+    const artifacts = screen.getByRole('link', { name: /artifacts/i });
+    expect(artifacts).not.toHaveClass('btn-active');
     expect(screen.getByLabelText('1 active shared')).toBeInTheDocument();
   });
 });
@@ -477,7 +477,7 @@ describe('McpServersPanel', () => {
       servers: [{
         id: 'github',
         label: 'GitHub',
-        description: 'GitHub MCP tools',
+        description: '**GitHub** MCP tools with [docs](https://example.test/github).',
         template: JSON.stringify({
           servers: {
             github: {
@@ -520,8 +520,12 @@ describe('McpServersPanel', () => {
     fireEvent.click(screen.getByRole('button', { name: 'add' }));
     fireEvent.change(screen.getByLabelText('MCP server type'), { target: { value: 'docker_catalog' } });
 
+    expect(screen.getByText(/Pick a server to see its details/)).toBeInTheDocument();
+    expect(screen.queryByText('GitHub MCP tools')).toBeNull();
     expect(screen.queryByLabelText('Read-only MCP JSON template')).toBeNull();
     expect(screen.queryByDisplayValue(/ghcr\.io\/example\/github-mcp/)).toBeNull();
+    fireEvent.change(screen.getByLabelText('Docker server'), { target: { value: 'github' } });
+    expect(await screen.findByRole('link', { name: 'docs' })).toHaveAttribute('href', 'https://example.test/github');
     fireEvent.change(screen.getByLabelText('GitHub token'), { target: { value: 'ghp_secret' } });
     expect(screen.queryByText(/credential/i)).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'provision' }));
@@ -533,6 +537,46 @@ describe('McpServersPanel', () => {
     ));
     expect(client.putMcpJsonConfig).not.toHaveBeenCalled();
     await screen.findByText('github');
+  });
+
+  test('Docker catalog add starts empty and refuses provision until a server is picked', async () => {
+    const client = {
+      listMcpServers: vi.fn().mockResolvedValue([]),
+      listMcpDockerCatalog: vi.fn().mockResolvedValue({
+        allow_raw_json: false,
+        servers: [{
+          id: 'github',
+          label: 'GitHub',
+          description: 'Should stay hidden until selected.',
+          template: JSON.stringify({
+            servers: {
+              github: {
+                type: 'stdio',
+                command: 'docker',
+                args: ['run', '--rm', '-i', 'ghcr.io/example/github-mcp'],
+              },
+            },
+          }),
+          placeholders: [],
+        }],
+      }),
+      putMcpDockerCatalogServer: vi.fn(),
+      putMcpJsonConfig: vi.fn(),
+      putMcpServer: vi.fn(),
+    };
+    renderPanel(client);
+
+    await screen.findByText('no MCP servers attached.');
+    fireEvent.click(screen.getByRole('button', { name: 'add' }));
+    fireEvent.change(screen.getByLabelText('MCP server type'), { target: { value: 'docker_catalog' } });
+
+    expect(screen.getByLabelText('Docker server')).toHaveValue('');
+    expect(screen.getByText(/Pick a server to see its details/)).toBeInTheDocument();
+    expect(screen.queryByText('Should stay hidden until selected.')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'provision' }));
+
+    expect(await screen.findByText('Choose Docker before saving.')).toBeInTheDocument();
+    expect(client.putMcpDockerCatalogServer).not.toHaveBeenCalled();
   });
 
   test('Docker catalog rows with no placeholders have no edit surface', async () => {
@@ -860,6 +904,34 @@ describe('splitMcpSetupRows', () => {
         placeholders: { github_token: 'ghp_secret' },
       }],
     });
+  });
+
+  test('requires an explicit Docker catalog selection', () => {
+    const catalog = {
+      servers: [{
+        id: 'github',
+        label: 'GitHub',
+        template: JSON.stringify({
+          servers: {
+            github: {
+              type: 'stdio',
+              command: 'docker',
+              args: ['run', '--rm', '-i', 'ghcr.io/example/github-mcp'],
+            },
+          },
+        }),
+        placeholders: [],
+      }],
+    };
+
+    expect(() => splitMcpSetupRows([
+      {
+        id: 'catalog',
+        serverType: 'docker_catalog',
+        catalogId: '',
+        placeholders: {},
+      },
+    ], catalog)).toThrow(/Choose Docker before saving/);
   });
 });
 

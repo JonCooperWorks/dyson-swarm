@@ -4,7 +4,7 @@ import { cleanup, render, screen } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 
 import {
-  artefactFilenameMap,
+  artifactFilenameMap,
   ShareAccessLogPage,
   shareAccessLogHref,
   shareFilename,
@@ -15,16 +15,16 @@ import { ApiProvider } from '../hooks/useApi.jsx';
 afterEach(() => { cleanup(); });
 
 describe('share filename helpers', () => {
-  test('uses artefact titles for shared table filenames', () => {
-    const names = artefactFilenameMap([
+  test('uses artifact titles for shared table filenames', () => {
+    const names = artifactFilenameMap([
       { id: 'a1', title: 'report.md' },
       { id: 'a2', title: '   ' },
     ]);
 
-    expect(shareFilename({ artefact_id: 'a1' }, names)).toBe('report.md');
-    expect(shareFilename({ artefact_id: 'a2' }, names)).toBe('a2');
-    expect(shareFilename({ artefact_id: 'missing' }, names)).toBe('missing');
-    expect(shareFilename({ artefact_id: 'a1', artefact_title: ' api.md ' }, new Map())).toBe('api.md');
+    expect(shareFilename({ artifact_id: 'a1' }, names)).toBe('report.md');
+    expect(shareFilename({ artifact_id: 'a2' }, names)).toBe('a2');
+    expect(shareFilename({ artifact_id: 'missing' }, names)).toBe('missing');
+    expect(shareFilename({ artifact_id: 'a1', artifact_title: ' api.md ' }, new Map())).toBe('api.md');
   });
 
   test('builds a stable access-log route', () => {
@@ -38,7 +38,7 @@ describe('shared links UI', () => {
       listShares: () => Promise.resolve([
         {
           jti: 'jti-abc',
-          artefact_id: 'a1',
+          artifact_id: 'a1',
           label: 'review copy',
           active: true,
           created_at: 0,
@@ -52,7 +52,7 @@ describe('shared links UI', () => {
       <ApiProvider client={client} auth={{}}>
         <SharesPanel
           instanceId="inst"
-          artefactRows={[{ id: 'a1', title: 'handoff.md' }]}
+          artifactRows={[{ id: 'a1', title: 'handoff.md' }]}
         />
       </ApiProvider>,
     );
@@ -68,9 +68,9 @@ describe('shared links UI', () => {
     const client = {
       listShareAccesses: () => Promise.resolve([]),
       listShares: () => Promise.resolve([
-        { jti: 'jti-empty', artefact_id: 'a-empty', active: true },
+        { jti: 'jti-empty', artifact_id: 'a-empty', active: true },
       ]),
-      listInstanceArtefacts: () => Promise.resolve([
+      listInstanceArtifacts: () => Promise.resolve([
         { id: 'a-empty', title: 'empty-state.md' },
       ]),
     };

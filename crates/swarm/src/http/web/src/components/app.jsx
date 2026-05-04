@@ -13,7 +13,7 @@ import { TopBar } from './topbar.jsx';
 import { InstancesView, NewInstancePage } from './instances.jsx';
 import { AdminView } from './admin.jsx';
 import { ByokView } from './byok.jsx';
-import { MyArtefactsPage } from './artefacts.jsx';
+import { MyArtifactsPage } from './artifacts.jsx';
 
 export function App() {
   const view = useAppState(s => s.meta.view);
@@ -49,13 +49,13 @@ function renderView(view) {
     case 'instance-task-audit-detail':
     case 'share-access-log':
     case 'instance-shares':
-    case 'instance-artefacts':
-    case 'instance-artefact':
+    case 'instance-artifacts':
+    case 'instance-artifact':
       return <InstancesView view={view}/>;
     case 'instance-new':
       return <NewInstancePage/>;
-    case 'artefacts':
-      return <MyArtefactsPage/>;
+    case 'artifacts':
+      return <MyArtifactsPage/>;
     case 'admin':
     case 'admin-mcp-catalog-new':
     case 'admin-mcp-catalog-edit':

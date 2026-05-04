@@ -31,7 +31,7 @@ const initial = {
     byInstance: {},
   },
   // Per-instance share roster — same shape as webhooks.  Backs the
-  // artefacts button's shared count, artefact row highlights, and
+  // artifacts button's shared count, artifact row highlights, and
   // the shared-links panel.
   shares: {
     byInstance: {},
@@ -151,7 +151,7 @@ export function removeWebhook(instanceId, name) {
   });
 }
 
-// ─── shares (anonymous artefact links) ────────────────────────────
+// ─── shares (anonymous artifact links) ────────────────────────────
 
 export function setSharesFor(instanceId, rows) {
   if (!instanceId) return;
@@ -236,17 +236,17 @@ export function parseHashView() {
   };
   const shares = h.match(/^#\/i\/([^/?#]+)\/shares/);
   if (shares) return { name: 'instance-shares', id: decodeURIComponent(shares[1]) };
-  // Deep-linked single-artefact reader.  Must come before the bare
-  // `#/i/<id>/artefacts` route so a canonical /<art_id> at the tail
+  // Deep-linked single-artifact reader.  Must come before the bare
+  // `#/i/<id>/artifacts` route so a canonical /<art_id> at the tail
   // doesn't get swallowed by the listing route.
-  const instArtefactDetail = h.match(/^#\/i\/([^/?#]+)\/artefacts\/([^/?#]+)/);
-  if (instArtefactDetail) return {
-    name: 'instance-artefact',
-    id: decodeURIComponent(instArtefactDetail[1]),
-    artefactId: decodeURIComponent(instArtefactDetail[2]),
+  const instArtifactDetail = h.match(/^#\/i\/([^/?#]+)\/artifacts\/([^/?#]+)/);
+  if (instArtifactDetail) return {
+    name: 'instance-artifact',
+    id: decodeURIComponent(instArtifactDetail[1]),
+    artifactId: decodeURIComponent(instArtifactDetail[2]),
   };
-  const instArtefacts = h.match(/^#\/i\/([^/?#]+)\/artefacts/);
-  if (instArtefacts) return { name: 'instance-artefacts', id: decodeURIComponent(instArtefacts[1]) };
+  const instArtifacts = h.match(/^#\/i\/([^/?#]+)\/artifacts/);
+  if (instArtifacts) return { name: 'instance-artifacts', id: decodeURIComponent(instArtifacts[1]) };
   const edit = h.match(/^#\/i\/([^/?#]+)\/edit/);
   if (edit) return { name: 'instance-edit', id: decodeURIComponent(edit[1]) };
   const m = h.match(/^#\/i\/([^/?#]+)/);
@@ -265,6 +265,6 @@ export function parseHashView() {
   }
   if (h.startsWith('#/admin')) return { name: 'admin', id: null };
   if (h.startsWith('#/keys')) return { name: 'byok', id: null };
-  if (h.startsWith('#/artefacts')) return { name: 'artefacts', id: null };
+  if (h.startsWith('#/artifacts')) return { name: 'artifacts', id: null };
   return { name: 'instances', id: null };
 }

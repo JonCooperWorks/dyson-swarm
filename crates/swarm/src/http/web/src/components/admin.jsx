@@ -11,6 +11,7 @@
 
 import React from 'react';
 import { useApi } from '../hooks/useApi.jsx';
+import { MarkdownBody } from './markdown.jsx';
 
 const DOCKER_CATALOG_TEMPLATE_PLACEHOLDER = JSON.stringify({
   servers: {
@@ -152,7 +153,9 @@ function DockerCatalogPanel({ client }) {
                 <td data-label="id"><code className="mono-sm">{row.id}</code></td>
                 <td data-label="label">
                   <div>{row.label || row.id}</div>
-                  {row.description ? <div className="muted small">{row.description}</div> : null}
+                  {row.description ? (
+                    <MarkdownBody markdown={row.description} className="md-body md-body-compact mcp-description-markdown"/>
+                  ) : null}
                 </td>
                 <td data-label="source">
                   <span className={`badge badge-${row.source === 'config' ? 'info' : 'ok'}`}>
@@ -258,6 +261,7 @@ function DockerCatalogEditorPage({ client, mode, catalogId }) {
         <p className="muted small">loading...</p>
       ) : initial ? (
         <DockerCatalogForm
+          key={`${mode}:${initial.id || 'new'}`}
           mode={mode}
           initial={initial}
           busy={busy}
@@ -320,6 +324,25 @@ function DockerCatalogForm({ mode, initial, busy, onCancel, onSave }) {
       setErr(null);
     } catch (e) {
       setErr(e?.message || 'could not bind placeholder');
+    }
+  };
+
+  const removePlaceholder = (binding) => {
+    try {
+      setTemplate(removePlaceholderBinding(template, binding));
+      setPlaceholderLabels(curr => {
+        const next = { ...curr };
+        delete next[binding.id];
+        return next;
+      });
+      if (placeholderName === binding.id) {
+        setPlaceholderName('');
+        setFriendlyName('');
+      }
+      if (payloadPath === binding.path) setPayloadPath('');
+      setErr(null);
+    } catch (e) {
+      setErr(e?.message || 'could not remove placeholder');
     }
   };
 
@@ -426,6 +449,14 @@ function DockerCatalogForm({ mode, initial, busy, onCancel, onSave }) {
                               disabled={busy}
                             >
                               reuse
+                            </button>
+                            <button
+                              type="button"
+                              className="btn btn-ghost btn-sm btn-danger"
+                              onClick={() => removePlaceholder(binding)}
+                              disabled={busy}
+                            >
+                              delete
                             </button>
                           </div>
                           {binding.path ? (
@@ -752,6 +783,21 @@ function placeholderSpecsFromTemplate(template, labels = {}) {
     secret: true,
     placeholder: null,
   }));
+}
+
+function removePlaceholderBinding(template, binding) {
+  const token = binding?.token || `{{placeholder.${binding?.id || ''}}}`;
+  if (!binding?.path) {
+    return template.replaceAll(token, '');
+  }
+  const payload = JSON.parse(template);
+  const path = parsePayloadPath(binding.path);
+  const current = getJsonPathValue(payload, path);
+  if (typeof current !== 'string') {
+    throw new Error('placeholder path is no longer a string value');
+  }
+  setJsonPathValue(payload, path, current.replaceAll(token, ''));
+  return JSON.stringify(payload, null, 2);
 }
 
 // ─── Users panel ─────────────────────────────────────────────────

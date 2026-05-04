@@ -632,7 +632,7 @@
 @media (max-width: 720px) {
   /* Hoist action buttons above the title block on mobile and keep
      them pinned to the top of the scrolling detail pane.  When a
-     subpage (tasks / edit / artefacts) is open, lift it above the
+     subpage (tasks / edit / artifacts) is open, lift it above the
      employee card too — the subpage is what the user actually came
      to see, the title block is just orientation. */
   .detail-header {
@@ -1018,20 +1018,20 @@
   margin-top: 8px;
 }
 
-/* ── Artefact reader ─────────────────────────────────────────────
+/* ── Artifact reader ─────────────────────────────────────────────
  * Reports need more breathing room than edit forms.  The list view
  * gets enough width for its table; the reader becomes a document
  * surface with Markdown typography that matches the Dyson chat reader
  * instead of looking like unstyled HTML dropped into a panel. */
-.page-artefacts,
-.page-artefact-reader {
+.page-artifacts,
+.page-artifact-reader {
   max-width: 1120px;
 }
-.page-artefact-reader .page-title {
+.page-artifact-reader .page-title {
   max-width: 100%;
   overflow-wrap: anywhere;
 }
-.artefact-actions-bar {
+.artifact-actions-bar {
   position: relative;
   z-index: 3;
   display: flex;
@@ -1041,15 +1041,15 @@
   margin-bottom: 12px;
   padding: 8px 12px;
 }
-.artefact-actions-bar .share-menu-popover {
+.artifact-actions-bar .share-menu-popover {
   left: 0;
   right: auto;
 }
-.artefact-body-panel {
+.artifact-body-panel {
   padding: 0;
   overflow: hidden;
 }
-.artefact-body-frame {
+.artifact-body-frame {
   padding: 22px 28px 30px;
   min-width: 0;
 }
@@ -1218,13 +1218,48 @@
   color: var(--fg-muted);
   font-size: 12.5px;
 }
+.md-body-compact {
+  width: 100%;
+  margin: 6px 0 0;
+  color: var(--fg-muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.md-body-compact p { margin: 0 0 7px; }
+.md-body-compact ul,
+.md-body-compact ol {
+  margin: 5px 0 8px;
+  padding-left: 18px;
+}
+.md-body-compact li { margin: 2px 0; }
+.md-body-compact h1,
+.md-body-compact h2,
+.md-body-compact h3,
+.md-body-compact h4,
+.md-body-compact h5,
+.md-body-compact h6 {
+  margin: 8px 0 5px;
+  padding: 0;
+  border: 0;
+  font-size: 13px;
+  color: var(--fg);
+  text-transform: none;
+  letter-spacing: 0;
+}
+.md-body-compact code {
+  font-size: 0.9em;
+  padding: 1px 4px;
+}
+.mcp-description-markdown {
+  max-width: 70ch;
+}
 @media (max-width: 720px) {
-  .page-artefacts,
-  .page-artefact-reader {
+  .page-artifacts,
+  .page-artifact-reader {
     padding-left: 12px;
     padding-right: 12px;
   }
-  .artefact-body-frame { padding: 16px 14px 22px; }
+  .artifact-body-frame { padding: 16px 14px 22px; }
   .md-body {
     font-size: 14px;
     line-height: 1.65;
@@ -1622,10 +1657,10 @@
 .row-actions { text-align: right; }
 .row-actions .btn { margin-left: 4px; }
 .mono-sm { font-family: var(--mono); font-size: 11px; }
-.artefact-row-shared td {
+.artifact-row-shared td {
   background: color-mix(in srgb, var(--accent) 5%, transparent);
 }
-.artefact-shared-badge {
+.artifact-shared-badge {
   margin-left: 8px;
   vertical-align: middle;
 }
@@ -1711,11 +1746,11 @@
     color: var(--fg-muted);
     margin-bottom: 2px;
   }
-  .artefact-rows tr {
+  .artifact-rows tr {
     display: flex;
     flex-direction: column;
   }
-  .artefact-rows td.row-actions {
+  .artifact-rows td.row-actions {
     order: -1;
     display: flex;
     align-items: center;
@@ -1725,10 +1760,10 @@
   }
   .rows td.row-actions { text-align: left; }
   .rows td.row-actions .btn { margin-left: 0; margin-right: 4px; }
-  .artefact-rows td.row-actions .btn { margin: 0; }
-  .artefact-rows .share-menu { flex: 0 0 auto; }
-  .artefact-rows .share-menu-popover { left: 0; right: auto; }
-  .artefact-rows td[data-label="cached"] { border-bottom: none; }
+  .artifact-rows td.row-actions .btn { margin: 0; }
+  .artifact-rows .share-menu { flex: 0 0 auto; }
+  .artifact-rows .share-menu-popover { left: 0; right: auto; }
+  .artifact-rows td[data-label="cached"] { border-bottom: none; }
   /* Some long inline styles on tasks.jsx audit rows force max-width
      + nowrap — undo those on mobile so the user-agent string wraps
      instead of clipping. */
@@ -2534,4 +2569,20 @@
   .audit-task-filter { width: 100%; }
   .audit-meta { grid-template-columns: 1fr; }
   .audit-meta dt { margin-top: 6px; }
+}
+
+@media (max-width: 700px) {
+  .byok-key-input,
+  .mcp-json-textarea,
+  .admin-catalog-form .field :where(
+    input:not([type]),
+    input[type="text"],
+    input[type="password"],
+    input[type="url"],
+    input[type="email"],
+    select,
+    textarea
+  ) {
+    font-size: 16px;
+  }
 }

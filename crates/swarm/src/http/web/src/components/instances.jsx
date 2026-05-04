@@ -21,7 +21,8 @@ import {
   setWebhooksFor, setSharesFor,
 } from '../store/app.js';
 import { TasksListPage, TaskFormPage, AuditListPage, AuditDetailPage } from './tasks.jsx';
-import { InstanceArtefactsPage, ArtefactPage } from './artefacts.jsx';
+import { InstanceArtifactsPage, ArtifactPage } from './artifacts.jsx';
+import { MarkdownBody } from './markdown.jsx';
 import { ShareAccessLogPage } from './shares.jsx';
 
 // Links inside task markdown open in a new tab — the task pane is a
@@ -74,10 +75,10 @@ export function instanceSectionFromView(view) {
   if (view.name === 'instance-edit') return 'edit';
   if (view.name && view.name.startsWith('instance-task')) return 'tasks';
   if (view.name === 'instance-tasks') return 'tasks';
-  if (view.name === 'share-access-log') return 'artefacts';
-  if (view.name === 'instance-shares') return 'artefacts';
-  if (view.name === 'instance-artefacts') return 'artefacts';
-  if (view.name === 'instance-artefact') return 'artefacts';
+  if (view.name === 'share-access-log') return 'artifacts';
+  if (view.name === 'instance-shares') return 'artifacts';
+  if (view.name === 'instance-artifacts') return 'artifacts';
+  if (view.name === 'instance-artifact') return 'artifacts';
   return 'overview';
 }
 
@@ -88,8 +89,8 @@ export function instanceRailHref(id, view) {
       return `#/i/${enc}/edit`;
     case 'tasks':
       return `#/i/${enc}/tasks`;
-    case 'artefacts':
-      return `#/i/${enc}/artefacts`;
+    case 'artifacts':
+      return `#/i/${enc}/artifacts`;
     default:
       return `#/i/${enc}`;
   }
@@ -1305,7 +1306,7 @@ export function splitMcpSetupRows(rows, dockerCatalog = null) {
       names.add(serverName);
       dockerConfigs.push(config);
     } else if (serverType === 'docker_catalog') {
-      const catalogId = row.catalogId || catalogServers[0]?.id || '';
+      const catalogId = row.catalogId || '';
       const server = catalogServers.find(s => s.id === catalogId);
       if (!server) {
         throw new Error('Choose Docker before saving.');
@@ -1397,7 +1398,7 @@ function McpServerCard({ row, dockerCatalog, onChange, onChangeAuth, onRemove })
   const serverType = row.serverType || 'remote';
   const authKind = row.auth?.kind || 'none';
   const catalogServers = dockerCatalog?.servers || [];
-  const selectedCatalog = catalogServers.find(s => s.id === row.catalogId) || catalogServers[0] || null;
+  const selectedCatalog = catalogServers.find(s => s.id === row.catalogId) || null;
   const parsedDockerName = serverType === 'docker'
     ? mcpServerNameFromText(row.jsonText || '')
     : null;
@@ -1437,7 +1438,8 @@ function McpServerCard({ row, dockerCatalog, onChange, onChangeAuth, onRemove })
           value={serverType}
           onChange={next => onChange({
             serverType: next,
-            catalogId: next === 'docker_catalog' ? (selectedCatalog?.id || '') : row.catalogId,
+            catalogId: next === 'docker_catalog' ? '' : row.catalogId,
+            placeholders: next === 'docker_catalog' ? {} : row.placeholders,
           })}
           dockerCatalog={dockerCatalog}
         />
@@ -1448,7 +1450,9 @@ function McpServerCard({ row, dockerCatalog, onChange, onChangeAuth, onRemove })
               <select
                 value={selectedCatalog?.id || ''}
                 onChange={e => onChange({ catalogId: e.target.value, placeholders: {} })}
+                aria-label="Docker server"
               >
+                <option value="">Pick a Docker server…</option>
                 {catalogServers.map(server => (
                   <option key={server.id} value={server.id}>
                     {server.label || server.id}
@@ -1456,7 +1460,9 @@ function McpServerCard({ row, dockerCatalog, onChange, onChangeAuth, onRemove })
                 ))}
               </select>
               {selectedCatalog?.description ? (
-                <span className="hint muted small">{selectedCatalog.description}</span>
+                <MarkdownBody markdown={selectedCatalog.description} className="md-body md-body-compact mcp-description-markdown"/>
+              ) : !selectedCatalog ? (
+                <span className="hint muted small">Pick a server to see its details and required fields.</span>
               ) : null}
             </label>
             {selectedCatalog ? (
@@ -1467,9 +1473,13 @@ function McpServerCard({ row, dockerCatalog, onChange, onChangeAuth, onRemove })
                   onChange={setPlaceholder}
                 />
               </>
-            ) : (
+            ) : catalogServers.length === 0 ? (
               <p className="muted small mcp-card-note">
                 No Docker entries are available on this swarm.
+              </p>
+            ) : (
+              <p className="muted small mcp-card-note">
+                Choose a Docker server to continue.
               </p>
             )}
           </>
@@ -1896,7 +1906,7 @@ function InstanceDetail({ id, onNew, view }) {
     if (!slot) return null;
     return slot.rows.filter(r => r.enabled).length;
   });
-  // Active share count for the artefacts button badge — same
+  // Active share count for the artifacts button badge — same
   // shape as the tasks badge.  Active = not revoked AND not expired.
   const activeShareCount = useAppState(s => {
     const slot = id ? s.shares.byInstance[id] : null;
@@ -1963,7 +1973,7 @@ function InstanceDetail({ id, onNew, view }) {
     return () => { cancelled = true; };
   }, [client, id]);
 
-  // Shares list — fed into the artefacts button's count badge.  Same
+  // Shares list — fed into the artifacts button's count badge.  Same
   // pattern as webhooks above.
   React.useEffect(() => {
     if (!id) return;
@@ -2134,13 +2144,13 @@ function InstanceDetail({ id, onNew, view }) {
               : null}
           </a>
           <a
-            className={`btn btn-ghost ${activeSection === 'artefacts' ? 'btn-active' : ''}`}
-            href={`#/i/${encodeURIComponent(id)}/artefacts`}
+            className={`btn btn-ghost ${activeSection === 'artifacts' ? 'btn-active' : ''}`}
+            href={`#/i/${encodeURIComponent(id)}/artifacts`}
             aria-disabled={busy}
             onClick={(e) => { if (busy) e.preventDefault(); }}
-            title="agent artefacts cached on swarm, with active shared links counted in the badge"
+            title="agent artifacts cached on swarm, with active shared links counted in the badge"
           >
-            artefacts
+            artifacts
             {activeShareCount > 0
               ? <span className="btn-count-badge" aria-label={`${activeShareCount} active shared`}>{activeShareCount}</span>
               : null}
@@ -2230,10 +2240,10 @@ function InstanceSubpage({ view, instanceId }) {
     case 'share-access-log':
       return <ShareAccessLogPage instanceId={instanceId} jti={view.jti} embedded/>;
     case 'instance-shares':
-    case 'instance-artefacts':
-      return <InstanceArtefactsPage instanceId={instanceId} embedded/>;
-    case 'instance-artefact':
-      return <ArtefactPage instanceId={instanceId} artefactId={view.artefactId} embedded/>;
+    case 'instance-artifacts':
+      return <InstanceArtifactsPage instanceId={instanceId} embedded/>;
+    case 'instance-artifact':
+      return <ArtifactPage instanceId={instanceId} artifactId={view.artifactId} embedded/>;
     default:
       return null;
   }
@@ -2535,7 +2545,7 @@ function EmptyDetail({ onNew, hasInstances }) {
             <h1 className="empty-title">pick an agent</h1>
             <p className="empty-sub">
               Pick an agent from the left rail to inspect runtime, tools,
-              webhooks, and artefacts. Or create a new one for a fresh job.
+              webhooks, and artifacts. Or create a new one for a fresh job.
             </p>
             <div className="empty-actions">
               <button className="btn btn-primary" onClick={onNew}>create agent</button>
@@ -2546,7 +2556,7 @@ function EmptyDetail({ onNew, hasInstances }) {
             <h1 className="empty-title">build your swarm</h1>
             <p className="empty-sub">
               Agents are long-lived workers with their own brief, model,
-              memory, tools, webhooks, and artefacts. Start with one and
+              memory, tools, webhooks, and artifacts. Start with one and
               scale when you need more hands.
             </p>
             <div className="empty-actions">
@@ -3512,7 +3522,6 @@ function McpServerEditModal({
   const initialIsCatalog = isCatalogMcpRow(initial);
   const initialIsDocker = isDockerMcpRow(initial) && !initialIsCatalog;
   const initialCatalog = catalog.servers.find(s => s.id === initial?.docker_catalog_id)
-    || catalog.servers[0]
     || null;
   const [serverType, setServerType] = React.useState(
     initialIsCatalog ? 'docker_catalog' : (initialIsDocker ? 'docker' : 'remote')
@@ -3541,8 +3550,7 @@ function McpServerEditModal({
   const [err, setErr] = React.useState(null);
   const isDockerJsonMode = (isNew && serverType === 'docker') || (!isNew && initialIsDocker);
   const isDockerCatalogMode = (isNew && serverType === 'docker_catalog') || (!isNew && initialIsCatalog);
-  const selectedCatalog = catalog.servers.find(s => s.id === catalogId)
-    || (isNew ? catalog.servers[0] : null);
+  const selectedCatalog = catalog.servers.find(s => s.id === catalogId) || null;
 
   // Auth kind changed mid-edit → drop any "keep existing" sentinels.
   // Switching shape clears the stored creds anyway (server-side), so
@@ -3684,7 +3692,9 @@ function McpServerEditModal({
                     setCatalogPlaceholders({});
                   }}
                   disabled={busy || !isNew}
+                  aria-label="Docker server"
                 >
+                  {isNew ? <option value="">Pick a Docker server…</option> : null}
                   {catalog.servers.map(server => (
                     <option key={server.id} value={server.id}>
                       {server.label || server.id}
@@ -3692,7 +3702,9 @@ function McpServerEditModal({
                   ))}
                 </select>
                 {selectedCatalog?.description ? (
-                  <span className="hint muted small">{selectedCatalog.description}</span>
+                  <MarkdownBody markdown={selectedCatalog.description} className="md-body md-body-compact mcp-description-markdown"/>
+                ) : !selectedCatalog ? (
+                  <span className="hint muted small">Pick a server to see its details and required fields.</span>
                 ) : null}
               </label>
               {selectedCatalog ? (
@@ -3704,8 +3716,10 @@ function McpServerEditModal({
                     keepExisting={!isNew}
                   />
                 </>
-              ) : (
+              ) : catalog.servers.length === 0 ? (
                 <p className="muted small">No Docker entries are available on this swarm.</p>
+              ) : (
+                <p className="muted small">Choose a Docker server to continue.</p>
               )}
             </>
           ) : isDockerJsonMode ? (

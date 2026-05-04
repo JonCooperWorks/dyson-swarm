@@ -22,6 +22,10 @@ use crate::shares::service::{MintedShare, ShareServiceError};
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route(
+            "/v1/instances/:id/artifacts/:artefact_id/shares",
+            post(mint_share),
+        )
+        .route(
             "/v1/instances/:id/artefacts/:artefact_id/shares",
             post(mint_share),
         )
@@ -39,8 +43,8 @@ pub struct ShareView {
     pub jti: String,
     pub instance_id: String,
     pub chat_id: String,
-    pub artefact_id: String,
-    pub artefact_title: Option<String>,
+    pub artifact_id: String,
+    pub artifact_title: Option<String>,
     pub created_at: i64,
     pub expires_at: i64,
     pub revoked_at: Option<i64>,
@@ -60,8 +64,8 @@ impl ShareView {
             jti: r.jti,
             instance_id: r.instance_id,
             chat_id: r.chat_id,
-            artefact_id: r.artefact_id,
-            artefact_title: r.artefact_title,
+            artifact_id: r.artefact_id,
+            artifact_title: r.artefact_title,
             created_at: r.created_at,
             expires_at: r.expires_at,
             revoked_at: r.revoked_at,
@@ -230,4 +234,31 @@ async fn rotate_key(
         .await
         .map_err(|e| err_to_status(&e))?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn share_view_serializes_artifact_spelling() {
+        let view = ShareView::from_row(ShareRow {
+            jti: "jti-1".to_string(),
+            instance_id: "inst-1".to_string(),
+            chat_id: "chat-1".to_string(),
+            artefact_id: "art-1".to_string(),
+            artefact_title: Some("report.md".to_string()),
+            created_by: "user-1".to_string(),
+            created_at: 1,
+            expires_at: crate::now_secs() + 60,
+            revoked_at: None,
+            label: None,
+        });
+
+        let value = serde_json::to_value(view).unwrap();
+        assert_eq!(value["artifact_id"], "art-1");
+        assert_eq!(value["artifact_title"], "report.md");
+        assert!(value.get("artefact_id").is_none());
+        assert!(value.get("artefact_title").is_none());
+    }
 }

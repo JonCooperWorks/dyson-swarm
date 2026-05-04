@@ -86,7 +86,7 @@ describe('EditInstancePage layout', () => {
     renderEdit(makeRow());
     // Wait for the form to materialise (useEffect re-fetches on mount).
     const networkHeading = await screen.findByRole('heading', { name: /network access/i });
-    const toolsTitle = await screen.findByText(/^tools$/i);
+    const toolsTitle = await screen.findByText(/^built-in tools$/i);
 
     // DOM order: comparing positions inside the same parent stack.
     const stack = networkHeading.closest('section').parentElement;
@@ -205,7 +205,7 @@ describe('EditInstancePage parity with hire form', () => {
     const identity = await screen.findByRole('heading', { name: /^identity$/i });
     const model = await screen.findByRole('heading', { name: /^model$/i });
     const network = await screen.findByRole('heading', { name: /^network access$/i });
-    const tools = await screen.findByText(/^tools$/i);
+    const tools = await screen.findByText(/^built-in tools$/i);
 
     // All four headings live inside the same form element.
     const form = identity.closest('form');

@@ -184,7 +184,7 @@ mod tests {
         let webhooks_svc = Arc::new(crate::webhooks::WebhookService::new(
             webhook_store,
             delivery_store,
-            svc.clone(),
+            user_secrets.clone(),
             instance_svc.clone(),
             Arc::new(crate::webhooks::NullWebhookDispatcher),
             cipher_dir.clone(),
@@ -256,6 +256,7 @@ mod tests {
             state,
             AuthState::dangerous_no_auth(),
             user_auth,
+            axum::Router::new(),
             axum::Router::new(),
             axum::Router::new(),
         );

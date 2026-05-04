@@ -14,6 +14,7 @@ import { setInstances, setSharesFor, setWebhooksFor } from '../store/app.js';
 import {
   profileLabel,
   serializeMcpServers,
+  splitMcpSetupRows,
   isAirgap,
   toolBlockedByNetwork,
   NETWORK_REQUIRED_TOOL_NAMES,
@@ -23,6 +24,8 @@ import {
   POLICY_OPTIONS,
   CubeProfilePicker,
   McpServersPanel,
+  NewInstanceForm,
+  parseMcpCliJsonConfig,
   findCubeProfile,
   InstancesView,
   instanceRailHref,
@@ -31,6 +34,7 @@ import {
 
 afterEach(() => {
   cleanup();
+  window.history.pushState(null, '', '/');
   setInstances([]);
   setWebhooksFor('a', []);
   setSharesFor('a', []);
@@ -81,11 +85,11 @@ describe('instance subpage rail routing', () => {
 
     expect(screen.getAllByText('Alpha').length).toBeGreaterThan(0);
     expect(screen.getByText('Beta')).toBeInTheDocument();
-    expect(screen.getByText(/no tasks yet/)).toBeInTheDocument();
+    expect(screen.getByText(/no webhooks yet/)).toBeInTheDocument();
     expect(screen.getByText('Beta').closest('a')).toHaveAttribute('href', '#/i/b/tasks');
   });
 
-  test('offers an instance tab back to the instance overview', () => {
+  test('offers an overview tab back to the agent overview', () => {
     const row = {
       id: 'a',
       name: 'Alpha',
@@ -114,9 +118,9 @@ describe('instance subpage rail routing', () => {
       ),
     );
 
-    const instance = screen.getByRole('link', { name: 'instance' });
-    expect(instance).toHaveAttribute('href', '#/i/a');
-    expect(instance).toHaveClass('btn-active');
+    const overview = screen.getByRole('link', { name: 'overview' });
+    expect(overview).toHaveAttribute('href', '#/i/a');
+    expect(overview).toHaveClass('btn-active');
   });
 
   test('does not highlight artefacts solely because shared links exist', async () => {
@@ -311,8 +315,12 @@ describe('McpServersPanel', () => {
   const h = React.createElement;
 
   function renderPanel(client, props = {}) {
+    const fullClient = {
+      listMcpDockerCatalog: vi.fn().mockResolvedValue({ allow_raw_json: true, servers: [] }),
+      ...client,
+    };
     return render(
-      h(ApiProvider, { client, auth: { config: { cube_profiles: [] } } },
+      h(ApiProvider, { client: fullClient, auth: { config: { cube_profiles: [] } } },
         h(McpServersPanel, {
           instanceId: 'inst-1',
           policyKind: 'nolocalnet',
@@ -333,11 +341,11 @@ describe('McpServersPanel', () => {
     renderPanel(client);
 
     await screen.findByText('no MCP servers attached.');
-    expect(screen.queryByLabelText('VS Code-style MCP JSON config')).toBeNull();
+    expect(screen.queryByLabelText('MCP JSON config')).toBeNull();
 
     fireEvent.click(screen.getByRole('button', { name: 'add' }));
     expect(screen.getByText('add mcp server')).toBeInTheDocument();
-    expect(screen.queryByLabelText('VS Code-style MCP JSON config')).toBeNull();
+    expect(screen.queryByLabelText('MCP JSON config')).toBeNull();
 
     fireEvent.change(screen.getByLabelText('name'), { target: { value: 'linear' } });
     fireEvent.change(screen.getByLabelText('URL'), { target: { value: 'https://api.linear.app/mcp' } });
@@ -355,9 +363,24 @@ describe('McpServersPanel', () => {
     expect(client.putMcpJsonConfig).not.toHaveBeenCalled();
   });
 
-  test('CLI add path shows the JSON editor and saves through the single-server config API', async () => {
+  test('Docker JSON add path is hidden when the catalog disallows raw JSON', async () => {
+    const client = {
+      listMcpServers: vi.fn().mockResolvedValue([]),
+      listMcpDockerCatalog: vi.fn().mockResolvedValue({ allow_raw_json: false, servers: [] }),
+      putMcpServer: vi.fn(),
+      putMcpJsonConfig: vi.fn(),
+    };
+    renderPanel(client);
+
+    await screen.findByText('no MCP servers attached.');
+    fireEvent.click(screen.getByRole('button', { name: 'add' }));
+    expect(screen.queryByRole('option', { name: 'Docker JSON' })).toBeNull();
+    expect(screen.getByLabelText('MCP server type')).toHaveValue('remote');
+  });
+
+  test('Docker add path shows the JSON editor and saves through the single-server config API', async () => {
     let rows = [];
-    const cliConfig = {
+    const dockerConfig = {
       servers: {
         github: {
           type: 'stdio',
@@ -373,7 +396,7 @@ describe('McpServersPanel', () => {
         rows = [{
           name: 'github',
           url: 'docker://ghcr.io/example/github-mcp',
-          server_type: 'cli',
+          server_type: 'docker',
           auth_kind: 'none',
           connected: true,
         }];
@@ -384,20 +407,171 @@ describe('McpServersPanel', () => {
 
     await screen.findByText('no MCP servers attached.');
     fireEvent.click(screen.getByRole('button', { name: 'add' }));
-    fireEvent.change(screen.getByLabelText('MCP server type'), { target: { value: 'cli' } });
+    expect(screen.getByRole('option', { name: 'Docker JSON' })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('MCP server type'), { target: { value: 'docker' } });
 
-    const editor = screen.getByLabelText('VS Code-style MCP JSON config');
-    fireEvent.change(editor, { target: { value: JSON.stringify(cliConfig, null, 2) } });
+    const editor = screen.getByLabelText('MCP JSON config');
+    expect(editor).toHaveValue('');
+    expect(editor.getAttribute('placeholder')).toContain('<container-image>');
+    expect(editor.getAttribute('placeholder')).not.toContain('ghcr.io/example/github-mcp');
+    expect(screen.queryByLabelText('Example MCP JSON shape')).toBeNull();
+    fireEvent.change(editor, { target: { value: JSON.stringify(dockerConfig, null, 2) } });
     fireEvent.click(screen.getByRole('button', { name: 'save' }));
 
     await waitFor(() => expect(client.putMcpJsonConfig).toHaveBeenCalledTimes(1));
-    expect(client.putMcpJsonConfig).toHaveBeenCalledWith('inst-1', cliConfig);
+    expect(client.putMcpJsonConfig).toHaveBeenCalledWith('inst-1', dockerConfig);
     expect(client.putMcpServer).not.toHaveBeenCalled();
     await screen.findByText('github');
-    expect(screen.queryByLabelText('VS Code-style MCP JSON config')).toBeNull();
+    expect(screen.queryByLabelText('MCP JSON config')).toBeNull();
   });
 
-  test('CLI JSON editor rejects HTTP configs so remote servers stay on the remote API path', async () => {
+  test('Docker rows can be edited through their saved MCP JSON', async () => {
+    const savedConfig = {
+      servers: {
+        github: {
+          type: 'stdio',
+          command: 'docker',
+          args: ['run', '-i', '--rm', 'ghcr.io/example/github-mcp'],
+        },
+      },
+    };
+    const updatedConfig = {
+      servers: {
+        github: {
+          type: 'stdio',
+          command: 'docker',
+          args: ['run', '--rm', '-i', '--entrypoint', 'python', 'ghcr.io/example/github-mcp', './entrypoint.py'],
+        },
+      },
+    };
+    const client = {
+      listMcpServers: vi.fn().mockResolvedValue([{
+        name: 'github',
+        url: 'docker://ghcr.io/example/github-mcp',
+        server_type: 'docker',
+        auth_kind: 'none',
+        connected: true,
+      }]),
+      getMcpJsonConfig: vi.fn().mockResolvedValue({ config: savedConfig }),
+      putMcpJsonConfig: vi.fn().mockResolvedValue({ ok: true }),
+      putMcpServer: vi.fn(),
+    };
+    renderPanel(client);
+
+    await screen.findByText('github');
+    fireEvent.click(screen.getByRole('button', { name: 'edit' }));
+
+    await waitFor(() => expect(client.getMcpJsonConfig).toHaveBeenCalledWith('inst-1', 'github'));
+    const editor = screen.getByLabelText('MCP JSON config');
+    expect(editor).toHaveValue(JSON.stringify(savedConfig, null, 2));
+    fireEvent.change(editor, { target: { value: JSON.stringify(updatedConfig, null, 2) } });
+    fireEvent.click(screen.getByRole('button', { name: 'save' }));
+
+    await waitFor(() => expect(client.putMcpJsonConfig).toHaveBeenCalledWith('inst-1', updatedConfig));
+    expect(client.putMcpServer).not.toHaveBeenCalled();
+  });
+
+  test('Docker catalog presets show read-only JSON and save only credentials', async () => {
+    const catalog = {
+      allow_raw_json: false,
+      servers: [{
+        id: 'github',
+        label: 'GitHub',
+        description: 'GitHub MCP tools',
+        template: JSON.stringify({
+          servers: {
+            github: {
+              type: 'stdio',
+              command: 'docker',
+              args: ['run', '--rm', '-i', '-e', 'GITHUB_TOKEN', 'ghcr.io/example/github-mcp'],
+              env: { GITHUB_TOKEN: '{{credential.github_token}}' },
+            },
+          },
+        }),
+        credentials: [{
+          id: 'github_token',
+          label: 'GitHub token',
+          required: true,
+          secret: true,
+        }],
+      }],
+    };
+    let rows = [];
+    const client = {
+      listMcpServers: vi.fn(async () => rows),
+      listMcpDockerCatalog: vi.fn().mockResolvedValue(catalog),
+      putMcpDockerCatalogServer: vi.fn(async () => {
+        rows = [{
+          name: 'github',
+          url: 'docker://ghcr.io/example/github-mcp',
+          server_type: 'docker',
+          docker_catalog_id: 'github',
+          auth_kind: 'none',
+          connected: true,
+        }];
+        return { ok: true, name: 'github' };
+      }),
+      putMcpJsonConfig: vi.fn(),
+      putMcpServer: vi.fn(),
+    };
+    renderPanel(client);
+
+    await screen.findByText('no MCP servers attached.');
+    fireEvent.click(screen.getByRole('button', { name: 'add' }));
+    fireEvent.change(screen.getByLabelText('MCP server type'), { target: { value: 'docker_catalog' } });
+
+    expect(screen.getByDisplayValue(/ghcr\.io\/example\/github-mcp/)).toHaveAttribute('readonly');
+    fireEvent.change(screen.getByLabelText('GitHub token'), { target: { value: 'ghp_secret' } });
+    fireEvent.click(screen.getByRole('button', { name: 'save' }));
+
+    await waitFor(() => expect(client.putMcpDockerCatalogServer).toHaveBeenCalledWith(
+      'inst-1',
+      'github',
+      { github_token: 'ghp_secret' },
+    ));
+    expect(client.putMcpJsonConfig).not.toHaveBeenCalled();
+    await screen.findByText('github');
+  });
+
+  test('Docker catalog rows with no placeholders have no edit surface', async () => {
+    const client = {
+      listMcpServers: vi.fn().mockResolvedValue([{
+        name: 'github',
+        url: 'docker://ghcr.io/example/github-mcp',
+        server_type: 'docker',
+        docker_catalog_id: 'github',
+        auth_kind: 'none',
+        connected: true,
+      }]),
+      listMcpDockerCatalog: vi.fn().mockResolvedValue({
+        allow_raw_json: false,
+        servers: [{
+          id: 'github',
+          label: 'GitHub',
+          template: JSON.stringify({
+            servers: {
+              github: {
+                type: 'stdio',
+                command: 'docker',
+                args: ['run', '--rm', '-i', 'ghcr.io/example/github-mcp'],
+              },
+            },
+          }),
+          credentials: [],
+        }],
+      }),
+      getMcpJsonConfig: vi.fn(),
+      putMcpJsonConfig: vi.fn(),
+      putMcpServer: vi.fn(),
+    };
+    renderPanel(client);
+
+    await screen.findByText('github');
+    expect(screen.queryByRole('button', { name: 'edit' })).toBeNull();
+    expect(client.getMcpJsonConfig).not.toHaveBeenCalled();
+  });
+
+  test('Docker add path does not submit the grey example when the editor is empty', async () => {
     const client = {
       listMcpServers: vi.fn().mockResolvedValue([]),
       putMcpServer: vi.fn(),
@@ -407,8 +581,26 @@ describe('McpServersPanel', () => {
 
     await screen.findByText('no MCP servers attached.');
     fireEvent.click(screen.getByRole('button', { name: 'add' }));
-    fireEvent.change(screen.getByLabelText('MCP server type'), { target: { value: 'cli' } });
-    fireEvent.change(screen.getByLabelText('VS Code-style MCP JSON config'), {
+    fireEvent.change(screen.getByLabelText('MCP server type'), { target: { value: 'docker' } });
+    fireEvent.click(screen.getByRole('button', { name: 'save' }));
+
+    expect(await screen.findByText(/before saving/)).toBeInTheDocument();
+    expect(client.putMcpJsonConfig).not.toHaveBeenCalled();
+    expect(client.putMcpServer).not.toHaveBeenCalled();
+  });
+
+  test('Docker JSON editor rejects HTTP configs so remote servers stay on the remote API path', async () => {
+    const client = {
+      listMcpServers: vi.fn().mockResolvedValue([]),
+      putMcpServer: vi.fn(),
+      putMcpJsonConfig: vi.fn(),
+    };
+    renderPanel(client);
+
+    await screen.findByText('no MCP servers attached.');
+    fireEvent.click(screen.getByRole('button', { name: 'add' }));
+    fireEvent.change(screen.getByLabelText('MCP server type'), { target: { value: 'docker' } });
+    fireEvent.change(screen.getByLabelText('MCP JSON config'), {
       target: {
         value: JSON.stringify({
           servers: {
@@ -425,6 +617,35 @@ describe('McpServersPanel', () => {
     expect(await screen.findByText(/Use the remote MCP form/)).toBeInTheDocument();
     expect(client.putMcpJsonConfig).not.toHaveBeenCalled();
     expect(client.putMcpServer).not.toHaveBeenCalled();
+  });
+});
+
+describe('parseMcpCliJsonConfig', () => {
+  test('accepts Claude-style mcpServers configs', () => {
+    const config = {
+      mcpServers: {
+        massive: {
+          command: 'docker',
+          args: ['run', '--rm', '-i', 'joncooperworks/mcp_massive:latest'],
+        },
+      },
+    };
+
+    expect(parseMcpCliJsonConfig(JSON.stringify(config))).toEqual(config);
+  });
+
+  test('rejects configs with both server maps', () => {
+    const config = {
+      servers: {},
+      mcpServers: {
+        massive: {
+          command: 'docker',
+          args: ['run', 'joncooperworks/mcp_massive:latest'],
+        },
+      },
+    };
+
+    expect(() => parseMcpCliJsonConfig(JSON.stringify(config))).toThrow(/either `servers` or `mcpServers`/);
   });
 });
 
@@ -533,6 +754,164 @@ describe('serializeMcpServers', () => {
         },
       },
     ]);
+  });
+});
+
+describe('splitMcpSetupRows', () => {
+  test('separates hire-time remote specs from Docker JSON configs', () => {
+    const dockerConfig = {
+      mcpServers: {
+        massive: {
+          command: 'docker',
+          args: ['run', '--rm', '-i', 'joncooperworks/mcp_massive:latest'],
+        },
+      },
+    };
+
+    expect(splitMcpSetupRows([
+      {
+        id: 'remote',
+        serverType: 'remote',
+        name: 'linear',
+        url: 'https://api.linear.app/mcp',
+        auth: { kind: 'none' },
+      },
+      {
+        id: 'docker',
+        serverType: 'docker',
+        jsonText: JSON.stringify(dockerConfig),
+      },
+    ])).toEqual({
+      remote: [{
+        name: 'linear',
+        url: 'https://api.linear.app/mcp',
+        auth: { kind: 'none' },
+      }],
+      dockerConfigs: [dockerConfig],
+      dockerCatalogServers: [],
+    });
+  });
+
+  test('rejects duplicate names across remote and Docker setup rows', () => {
+    const dockerConfig = {
+      servers: {
+        linear: {
+          type: 'stdio',
+          command: 'docker',
+          args: ['run', '--rm', '-i', 'ghcr.io/example/linear-mcp'],
+        },
+      },
+    };
+
+    expect(() => splitMcpSetupRows([
+      {
+        id: 'remote',
+        serverType: 'remote',
+        name: 'linear',
+        url: 'https://api.linear.app/mcp',
+        auth: { kind: 'none' },
+      },
+      {
+        id: 'docker',
+        serverType: 'docker',
+        jsonText: JSON.stringify(dockerConfig),
+      },
+    ])).toThrow(/configured more than once/);
+  });
+
+  test('collects Docker catalog credentials without sending rendered JSON', () => {
+    const catalog = {
+      servers: [{
+        id: 'github',
+        label: 'GitHub',
+        template: JSON.stringify({
+          servers: {
+            github: {
+              type: 'stdio',
+              command: 'docker',
+              args: ['run', '--rm', '-i', 'ghcr.io/example/github-mcp'],
+              env: { GITHUB_TOKEN: '{{credential.github_token}}' },
+            },
+          },
+        }),
+        credentials: [{
+          id: 'github_token',
+          label: 'GitHub token',
+          required: true,
+          secret: true,
+        }],
+      }],
+    };
+
+    expect(splitMcpSetupRows([
+      {
+        id: 'catalog',
+        serverType: 'docker_catalog',
+        catalogId: 'github',
+        credentials: { github_token: 'ghp_secret' },
+      },
+    ], catalog)).toEqual({
+      remote: [],
+      dockerConfigs: [],
+      dockerCatalogServers: [{
+        catalogId: 'github',
+        credentials: { github_token: 'ghp_secret' },
+      }],
+    });
+  });
+});
+
+describe('NewInstanceForm MCP setup', () => {
+  test('lets a new agent attach a Docker MCP server before redirecting', async () => {
+    const dockerConfig = {
+      servers: {
+        github: {
+          type: 'stdio',
+          command: 'docker',
+          args: ['run', '--rm', '-i', 'ghcr.io/example/github-mcp'],
+        },
+      },
+    };
+    const client = {
+      createInstance: vi.fn().mockResolvedValue({
+        id: 'inst-1',
+        url: 'https://inst-1.swarm.example',
+      }),
+      putMcpJsonConfig: vi.fn().mockResolvedValue({ ok: true }),
+      probeInstance: vi.fn().mockResolvedValue({ status: 'healthy' }),
+      listMcpDockerCatalog: vi.fn().mockResolvedValue({ allow_raw_json: true, servers: [] }),
+    };
+
+    render(React.createElement(
+      ApiProvider,
+      {
+        client,
+        auth: {
+          config: {
+            default_models: ['openai/gpt-5.1'],
+            default_template_id: 'tpl-default',
+            cube_profiles: [],
+          },
+        },
+      },
+      React.createElement(NewInstanceForm),
+    ));
+
+    fireEvent.click(screen.getByRole('button', { name: /add MCP server/i }));
+    await screen.findByRole('option', { name: 'Docker JSON' });
+    fireEvent.change(screen.getByLabelText('MCP server type'), { target: { value: 'docker' } });
+    expect(screen.getByText('docker config')).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('MCP JSON config'), {
+      target: { value: JSON.stringify(dockerConfig, null, 2) },
+    });
+    expect(screen.getByText('github')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'create agent' }));
+
+    await waitFor(() => expect(client.createInstance).toHaveBeenCalledTimes(1));
+    expect(client.createInstance.mock.calls[0][0]).not.toHaveProperty('mcp_servers');
+    await waitFor(() => expect(client.putMcpJsonConfig).toHaveBeenCalledWith('inst-1', dockerConfig));
+    expect(client.probeInstance).toHaveBeenCalledWith('inst-1');
   });
 });
 

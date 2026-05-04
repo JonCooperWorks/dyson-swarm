@@ -202,6 +202,19 @@ function clearReturnToFromUrl() {
   } catch { /* non-DOM test env */ }
 }
 
+// A callback URL can be stale after a browser back/forward replay, a
+// second auth attempt overwriting the in-flight PKCE state, or a tab
+// restore that lost sessionStorage.  Once we know we cannot use the
+// code, scrub it so retry can start a clean authorization flow instead
+// of replaying the same dead callback forever.
+function clearAuthCallbackFromUrl() {
+  try {
+    const url = new URL(window.location.href);
+    url.search = '';
+    window.history.replaceState(null, '', url.toString());
+  } catch { /* non-DOM test env */ }
+}
+
 function readPending() {
   try {
     const raw = sessionStorage.getItem(PENDING_KEY);
@@ -308,7 +321,7 @@ async function startAuthorizationFlow(cfg, discovery, opts = {}) {
   window.location.assign(url.toString());
 }
 
-async function handleCallback(cfg, discovery) {
+export async function handleCallback(cfg, discovery) {
   const params = new URLSearchParams(window.location.search);
   const code = params.get('code');
   const state = params.get('state');
@@ -318,7 +331,8 @@ async function handleCallback(cfg, discovery) {
   writePending(null);
   if (!pending || pending.state !== state) {
     writeTokens(null);
-    throw new Error('auth callback: state mismatch');
+    clearAuthCallbackFromUrl();
+    return null;
   }
 
   const body = new URLSearchParams({

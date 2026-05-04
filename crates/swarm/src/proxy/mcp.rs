@@ -12,6 +12,7 @@
 //! Real upstream URL + tokens stay encrypted in the user secret store
 //! and are decrypted in-process per request.
 
+use std::collections::BTreeMap;
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
 
@@ -24,7 +25,8 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
 use crate::auth::{CallerIdentity, extract_bearer};
-use crate::error::SwarmError;
+use crate::db::mcp_catalog::{McpDockerCatalogRow, SqlxMcpDockerCatalogStore};
+use crate::error::{StoreError, SwarmError};
 use crate::instance::InstanceService;
 use crate::mcp_servers::{
     self, AuthMetadata, DcrRequest, McpAuthSpec, McpOAuthTokens, McpRuntimeSpec, McpServerEntry,
@@ -55,6 +57,18 @@ pub struct McpService {
     /// When absent, remote HTTP/SSE MCP still works; container stdio
     /// entries return a clear 503.
     pub runtime_socket_path: Option<PathBuf>,
+    /// Operator-curated Docker stdio presets.  Users see a slim
+    /// credential surface and read-only JSON preview instead of a
+    /// free-form Docker command surface.
+    pub docker_catalog: Vec<mcp_servers::McpDockerCatalogServer>,
+    /// Whether raw Docker MCP JSON is accepted from user-session
+    /// routes.  Trusted nodes can keep this on; public nodes can
+    /// require catalog presets only.
+    pub allow_user_docker_json: bool,
+    /// DB-backed source of admin-managed Docker MCP presets.  When
+    /// absent, the static config vector above is used as a fallback so
+    /// small unit tests can construct the service without a pool.
+    pub docker_catalog_store: Option<Arc<SqlxMcpDockerCatalogStore>>,
 }
 
 impl McpService {
@@ -75,6 +89,9 @@ impl McpService {
             public_origin,
             instance_svc: None,
             runtime_socket_path: None,
+            docker_catalog: Vec::new(),
+            allow_user_docker_json: false,
+            docker_catalog_store: None,
         })
     }
 
@@ -91,10 +108,57 @@ impl McpService {
         self
     }
 
+    pub fn with_docker_catalog(
+        mut self,
+        catalog: Vec<mcp_servers::McpDockerCatalogServer>,
+        allow_user_docker_json: bool,
+    ) -> Self {
+        self.docker_catalog = catalog;
+        self.allow_user_docker_json = allow_user_docker_json;
+        self
+    }
+
+    pub fn with_docker_catalog_store(mut self, store: Arc<SqlxMcpDockerCatalogStore>) -> Self {
+        self.docker_catalog_store = Some(store);
+        self
+    }
+
     fn redirect_uri(&self) -> Option<String> {
         self.public_origin
             .as_deref()
             .map(|o| format!("{}/mcp/oauth/callback", o.trim_end_matches('/')))
+    }
+
+    async fn docker_catalog_rows(&self) -> Result<Vec<McpDockerCatalogRow>, StoreError> {
+        if let Some(store) = &self.docker_catalog_store {
+            return store.list().await;
+        }
+        Ok(self
+            .docker_catalog
+            .iter()
+            .cloned()
+            .map(|server| McpDockerCatalogRow {
+                server,
+                source: "config".into(),
+                created_at: 0,
+                updated_at: 0,
+                deleted_at: None,
+            })
+            .collect())
+    }
+
+    async fn get_docker_catalog_server(
+        &self,
+        id: &str,
+    ) -> Result<Option<mcp_servers::McpDockerCatalogServer>, StoreError> {
+        if let Some(store) = &self.docker_catalog_store {
+            return store.get(id).await.map(|row| row.map(|row| row.server));
+        }
+        Ok(self
+            .docker_catalog
+            .iter()
+            .find(|server| server.id == id)
+            .cloned())
     }
 }
 
@@ -111,7 +175,12 @@ pub fn router(svc: Arc<McpService>) -> Router {
 /// Router so `CallerIdentity` is already on the request extensions.
 pub fn user_router(svc: Arc<McpService>) -> Router {
     Router::new()
+        .route("/v1/mcp/docker-catalog", get(list_docker_catalog))
         .route("/v1/instances/:id/mcp/servers", get(list_servers))
+        .route(
+            "/v1/instances/:id/mcp/docker-catalog/:catalog_id",
+            axum::routing::put(put_docker_catalog_server),
+        )
         .route(
             "/v1/instances/:id/mcp/config",
             get(get_vscode_config)
@@ -135,6 +204,21 @@ pub fn user_router(svc: Arc<McpService>) -> Router {
             axum::routing::put(put_enabled_tools),
         )
         .route("/v1/instances/:id/mcp/oauth/start", post(oauth_start))
+        .with_state(svc)
+}
+
+/// `/v1/admin/mcp/...` routes — mounted into the admin-only router.
+pub fn admin_router(svc: Arc<McpService>) -> Router {
+    Router::new()
+        .route(
+            "/v1/admin/mcp/docker-catalog",
+            get(admin_list_docker_catalog),
+        )
+        .route(
+            "/v1/admin/mcp/docker-catalog/:catalog_id",
+            axum::routing::put(admin_put_docker_catalog_server)
+                .delete(admin_delete_docker_catalog_server),
+        )
         .with_state(svc)
 }
 
@@ -391,10 +475,75 @@ async fn ensure_fresh_oauth(
 struct RuntimeForwardRequest<'a> {
     instance_id: &'a str,
     server_name: &'a str,
-    command: &'a str,
-    args: &'a [String],
-    env: &'a std::collections::HashMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    command: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    args: Option<&'a [String]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    env: Option<&'a std::collections::HashMap<String, String>>,
+    transport: RuntimeTransportSpec<'a>,
     request_json: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind")]
+enum RuntimeTransportSpec<'a> {
+    DockerStdio {
+        command: &'a str,
+        args: &'a [String],
+        env: &'a std::collections::HashMap<String, String>,
+    },
+    HttpStreamable {
+        url: &'a str,
+        #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+        headers: BTreeMap<String, String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        auth_bearer_env: Option<&'a str>,
+    },
+}
+
+impl<'a> RuntimeForwardRequest<'a> {
+    fn docker(
+        instance_id: &'a str,
+        server_name: &'a str,
+        command: &'a str,
+        args: &'a [String],
+        env: &'a std::collections::HashMap<String, String>,
+        request_json: &'a str,
+    ) -> Self {
+        Self {
+            instance_id,
+            server_name,
+            command: Some(command),
+            args: Some(args),
+            env: Some(env),
+            transport: RuntimeTransportSpec::DockerStdio { command, args, env },
+            request_json,
+        }
+    }
+
+    fn http_streamable(
+        instance_id: &'a str,
+        server_name: &'a str,
+        url: &'a str,
+        headers: BTreeMap<String, String>,
+        auth_bearer_env: Option<&'a str>,
+        request_json: &'a str,
+    ) -> Self {
+        Self {
+            instance_id,
+            server_name,
+            command: None,
+            args: None,
+            env: None,
+            transport: RuntimeTransportSpec::HttpStreamable {
+                url,
+                headers,
+                auth_bearer_env,
+            },
+            request_json,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -420,24 +569,15 @@ async fn forward_runtime_stdio(
             "mcp runtime helper not configured",
         );
     };
-    let Some(McpRuntimeSpec::DockerStdio { command, args, env }) = entry.runtime.as_ref() else {
-        return error_resp(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "invalid mcp runtime entry",
-        );
-    };
     let request_json = match std::str::from_utf8(body_bytes) {
         Ok(s) => s,
         Err(_) => return error_resp(StatusCode::BAD_REQUEST, "JSON-RPC body must be UTF-8"),
     };
-    let request = RuntimeForwardRequest {
-        instance_id,
-        server_name,
-        command,
-        args,
-        env,
-        request_json,
-    };
+    let request =
+        match runtime_forward_request_for_entry(instance_id, server_name, entry, request_json) {
+            Ok(request) => request,
+            Err(msg) => return error_resp(StatusCode::INTERNAL_SERVER_ERROR, &msg),
+        };
     let runtime_resp = match call_runtime(socket_path, &request).await {
         Ok(r) => r,
         Err(err) => {
@@ -489,6 +629,58 @@ async fn forward_runtime_stdio(
     builder
         .body(Body::from(body))
         .unwrap_or_else(|_| error_resp(StatusCode::INTERNAL_SERVER_ERROR, "build resp"))
+}
+
+fn runtime_forward_request_for_entry<'a>(
+    instance_id: &'a str,
+    server_name: &'a str,
+    entry: &'a McpServerEntry,
+    request_json: &'a str,
+) -> Result<RuntimeForwardRequest<'a>, String> {
+    match entry.runtime.as_ref() {
+        Some(McpRuntimeSpec::DockerStdio { command, args, env }) => {
+            Ok(RuntimeForwardRequest::docker(
+                instance_id,
+                server_name,
+                command,
+                args,
+                env,
+                request_json,
+            ))
+        }
+        Some(McpRuntimeSpec::HttpStreamable {
+            url,
+            headers,
+            auth_bearer_env,
+        }) => {
+            let mut runtime_headers: BTreeMap<String, String> = headers.clone();
+            match &entry.auth {
+                McpAuthSpec::None => {}
+                McpAuthSpec::Bearer { token } => {
+                    runtime_headers.insert("Authorization".into(), format!("Bearer {token}"));
+                }
+                McpAuthSpec::Oauth { .. } => {
+                    let tokens = entry
+                        .oauth_tokens
+                        .as_ref()
+                        .ok_or_else(|| "oauth not authorised yet".to_string())?;
+                    runtime_headers.insert(
+                        "Authorization".into(),
+                        format!("Bearer {}", tokens.access_token),
+                    );
+                }
+            }
+            Ok(RuntimeForwardRequest::http_streamable(
+                instance_id,
+                server_name,
+                url,
+                runtime_headers,
+                auth_bearer_env.as_deref(),
+                request_json,
+            ))
+        }
+        None => Err("invalid mcp runtime entry".into()),
+    }
 }
 
 async fn call_runtime(
@@ -822,12 +1014,168 @@ fn html_escape(s: &str) -> String {
 // ───────────────────────────────────────────────────────────────────
 
 #[derive(Serialize)]
+struct DockerCatalogResponse {
+    allow_raw_json: bool,
+    servers: Vec<DockerCatalogServerSummary>,
+}
+
+#[derive(Serialize)]
+struct DockerCatalogServerSummary {
+    id: String,
+    label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    template: String,
+    credentials: Vec<DockerCatalogCredentialSummary>,
+}
+
+#[derive(Serialize)]
+struct DockerCatalogCredentialSummary {
+    id: String,
+    label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    required: bool,
+    secret: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    placeholder: Option<String>,
+}
+
+async fn list_docker_catalog(
+    State(svc): State<Arc<McpService>>,
+) -> Result<Json<DockerCatalogResponse>, Response<Body>> {
+    let rows = svc.docker_catalog_rows().await.map_err(store_err_to_resp)?;
+    Ok(Json(DockerCatalogResponse {
+        allow_raw_json: svc.allow_user_docker_json,
+        servers: rows
+            .iter()
+            .map(|row| docker_catalog_summary(&row.server))
+            .collect(),
+    }))
+}
+
+#[derive(Serialize)]
+struct AdminDockerCatalogResponse {
+    allow_raw_json: bool,
+    servers: Vec<AdminDockerCatalogServerSummary>,
+}
+
+#[derive(Serialize)]
+struct AdminDockerCatalogServerSummary {
+    #[serde(flatten)]
+    server: DockerCatalogServerSummary,
+    source: String,
+    created_at: i64,
+    updated_at: i64,
+}
+
+#[derive(Deserialize)]
+struct AdminPutDockerCatalogBody {
+    label: String,
+    #[serde(default)]
+    description: Option<String>,
+    template: String,
+    #[serde(default)]
+    credentials: Vec<mcp_servers::McpDockerCredentialSpec>,
+}
+
+async fn admin_list_docker_catalog(
+    State(svc): State<Arc<McpService>>,
+) -> Result<Json<AdminDockerCatalogResponse>, Response<Body>> {
+    let rows = svc.docker_catalog_rows().await.map_err(store_err_to_resp)?;
+    Ok(Json(AdminDockerCatalogResponse {
+        allow_raw_json: svc.allow_user_docker_json,
+        servers: rows
+            .iter()
+            .map(|row| admin_docker_catalog_summary(row))
+            .collect(),
+    }))
+}
+
+async fn admin_put_docker_catalog_server(
+    State(svc): State<Arc<McpService>>,
+    Path(catalog_id): Path<String>,
+    Json(body): Json<AdminPutDockerCatalogBody>,
+) -> Result<Json<AdminDockerCatalogServerSummary>, Response<Body>> {
+    let store = svc.docker_catalog_store.as_ref().ok_or_else(|| {
+        error_resp(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "mcp docker catalog store not configured",
+        )
+    })?;
+    let server = mcp_servers::McpDockerCatalogServer {
+        id: catalog_id,
+        label: body.label,
+        description: body.description,
+        template: body.template,
+        credentials: body.credentials,
+    };
+    mcp_servers::validate_docker_catalog_server(&server)
+        .map_err(|err| error_resp(StatusCode::BAD_REQUEST, &err))?;
+    let row = store
+        .upsert_admin(&server)
+        .await
+        .map_err(store_err_to_resp)?;
+    Ok(Json(admin_docker_catalog_summary(&row)))
+}
+
+async fn admin_delete_docker_catalog_server(
+    State(svc): State<Arc<McpService>>,
+    Path(catalog_id): Path<String>,
+) -> Result<Json<serde_json::Value>, Response<Body>> {
+    let store = svc.docker_catalog_store.as_ref().ok_or_else(|| {
+        error_resp(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "mcp docker catalog store not configured",
+        )
+    })?;
+    let deleted = store.delete(&catalog_id).await.map_err(store_err_to_resp)?;
+    Ok(Json(serde_json::json!({ "ok": true, "deleted": deleted })))
+}
+
+fn docker_catalog_summary(
+    server: &mcp_servers::McpDockerCatalogServer,
+) -> DockerCatalogServerSummary {
+    DockerCatalogServerSummary {
+        id: server.id.clone(),
+        label: server.label.clone(),
+        description: server.description.clone(),
+        template: server.template.clone(),
+        credentials: server
+            .credentials
+            .iter()
+            .map(|credential| DockerCatalogCredentialSummary {
+                id: credential.id.clone(),
+                label: credential.label.clone(),
+                description: credential.description.clone(),
+                required: credential.required,
+                secret: credential.secret,
+                placeholder: credential.placeholder.clone(),
+            })
+            .collect(),
+    }
+}
+
+fn admin_docker_catalog_summary(row: &McpDockerCatalogRow) -> AdminDockerCatalogServerSummary {
+    AdminDockerCatalogServerSummary {
+        server: docker_catalog_summary(&row.server),
+        source: row.source.clone(),
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+    }
+}
+
+#[derive(Serialize)]
 struct ServerSummary {
     name: String,
     url: String,
     /// `remote` for HTTP/SSE servers created through the field UI,
-    /// `cli` for Docker stdio servers created from VS Code-style JSON.
+    /// `docker` for Docker stdio servers created from MCP JSON.
     server_type: &'static str,
+    /// Catalog id when the Docker server was created from an
+    /// operator-curated preset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    docker_catalog_id: Option<String>,
     auth_kind: &'static str,
     /// True when an OAuth flow has completed — surfaced so the UI can
     /// render a "connect" vs. "reconnect" button.
@@ -841,6 +1189,42 @@ struct ServerSummary {
     /// prefill); `Some(vec)` ⇒ explicit allowlist.
     #[serde(skip_serializing_if = "Option::is_none")]
     enabled_tools: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+struct PutDockerCatalogBody {
+    #[serde(default)]
+    credentials: BTreeMap<String, String>,
+}
+
+async fn put_docker_catalog_server(
+    State(svc): State<Arc<McpService>>,
+    Path((instance_id, catalog_id)): Path<(String, String)>,
+    axum::Extension(caller): axum::Extension<CallerIdentity>,
+    Json(body): Json<PutDockerCatalogBody>,
+) -> Result<Json<serde_json::Value>, Response<Body>> {
+    if svc.runtime_socket_path.is_none() {
+        return Err(error_resp(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "docker mcp runtime not configured",
+        ));
+    }
+    let catalog = svc
+        .get_docker_catalog_server(&catalog_id)
+        .await
+        .map_err(store_err_to_resp)?
+        .ok_or_else(|| error_resp(StatusCode::NOT_FOUND, "no such docker mcp catalog entry"))?;
+    let isvc = svc.instance_svc.as_ref().ok_or_else(|| {
+        error_resp(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "mcp management not configured",
+        )
+    })?;
+    let name = isvc
+        .put_docker_catalog_mcp_server(&caller.user_id, &instance_id, &catalog, body.credentials)
+        .await
+        .map_err(swarm_err_to_resp)?;
+    Ok(Json(serde_json::json!({ "ok": true, "name": name })))
 }
 
 async fn list_servers(
@@ -886,7 +1270,12 @@ async fn list_servers(
             out.push(ServerSummary {
                 name,
                 url,
-                server_type: if e.runtime.is_some() { "cli" } else { "remote" },
+                server_type: if e.runtime.is_some() {
+                    "docker"
+                } else {
+                    "remote"
+                },
+                docker_catalog_id: e.docker_catalog.as_ref().map(|binding| binding.id.clone()),
                 auth_kind,
                 connected,
                 tools_catalog: e.tools_catalog,
@@ -948,10 +1337,14 @@ async fn get_server(
         name,
         url: entry.url,
         server_type: if entry.runtime.is_some() {
-            "cli"
+            "docker"
         } else {
             "remote"
         },
+        docker_catalog_id: entry
+            .docker_catalog
+            .as_ref()
+            .map(|binding| binding.id.clone()),
         auth_kind,
         connected,
         tools_catalog: entry.tools_catalog,
@@ -975,6 +1368,7 @@ struct GetVscodeConfigResponse {
 async fn get_vscode_config(
     State(svc): State<Arc<McpService>>,
     Path(instance_id): Path<String>,
+    uri: Uri,
     axum::Extension(caller): axum::Extension<CallerIdentity>,
 ) -> Result<Json<GetVscodeConfigResponse>, Response<Body>> {
     let isvc = svc.instance_svc.as_ref().ok_or_else(|| {
@@ -983,11 +1377,56 @@ async fn get_vscode_config(
             "mcp management not configured",
         )
     })?;
+    let server = uri.query().and_then(|query| query_param(query, "server"));
     let config = isvc
-        .get_vscode_mcp_config(&caller.user_id, &instance_id)
+        .get_vscode_mcp_config(&caller.user_id, &instance_id, server.as_deref())
         .await
         .map_err(swarm_err_to_resp)?;
     Ok(Json(GetVscodeConfigResponse { config }))
+}
+
+fn query_param(query: &str, key: &str) -> Option<String> {
+    query.split('&').find_map(|part| {
+        let (k, v) = part.split_once('=').unwrap_or((part, ""));
+        (percent_decode_query_component(k) == key).then(|| percent_decode_query_component(v))
+    })
+}
+
+fn percent_decode_query_component(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 2 < bytes.len() => {
+                if let (Some(hi), Some(lo)) = (hex_value(bytes[i + 1]), hex_value(bytes[i + 2])) {
+                    out.push((hi << 4) | lo);
+                    i += 3;
+                } else {
+                    out.push(bytes[i]);
+                    i += 1;
+                }
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_value(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
 }
 
 async fn put_vscode_config(
@@ -996,6 +1435,12 @@ async fn put_vscode_config(
     axum::Extension(caller): axum::Extension<CallerIdentity>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, Response<Body>> {
+    if !svc.allow_user_docker_json {
+        return Err(error_resp(
+            StatusCode::FORBIDDEN,
+            "raw docker mcp JSON is disabled by the operator; choose a catalog entry",
+        ));
+    }
     let isvc = svc.instance_svc.as_ref().ok_or_else(|| {
         error_resp(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -1331,18 +1776,9 @@ async fn post_jsonrpc_for_entry(
     let Some(socket_path) = svc.runtime_socket_path.as_deref() else {
         return Err("mcp runtime helper not configured".into());
     };
-    let Some(McpRuntimeSpec::DockerStdio { command, args, env }) = entry.runtime.as_ref() else {
-        return Err("invalid mcp runtime entry".into());
-    };
     let request_json = serde_json::to_string(body).map_err(|e| format!("encode JSON-RPC: {e}"))?;
-    let request = RuntimeForwardRequest {
-        instance_id,
-        server_name,
-        command,
-        args,
-        env,
-        request_json: &request_json,
-    };
+    let request =
+        runtime_forward_request_for_entry(instance_id, server_name, entry, &request_json)?;
     let resp = call_runtime(socket_path, &request).await?;
     if !(200..300).contains(&resp.status) {
         return Err(format!("runtime HTTP {}: {}", resp.status, resp.body));
@@ -1502,6 +1938,15 @@ fn swarm_err_to_resp(err: SwarmError) -> Response<Body> {
         _ => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
     };
     error_resp(status, &msg)
+}
+
+fn store_err_to_resp(err: StoreError) -> Response<Body> {
+    let status = match &err {
+        StoreError::NotFound => StatusCode::NOT_FOUND,
+        StoreError::Constraint(_) | StoreError::Malformed(_) => StatusCode::BAD_REQUEST,
+        StoreError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    error_resp(status, &err.to_string())
 }
 
 // ───────────────────────────────────────────────────────────────────
@@ -1742,6 +2187,8 @@ mod tests {
             assert_eq!(req["instance_id"], "i-1");
             assert_eq!(req["server_name"], "echo");
             assert_eq!(req["command"], "docker");
+            assert_eq!(req["transport"]["kind"], "DockerStdio");
+            assert_eq!(req["transport"]["command"], "docker");
             let resp = serde_json::json!({
                 "status": 200,
                 "content_type": "application/json",
@@ -1757,14 +2204,14 @@ mod tests {
 
         let args = vec!["run".to_string(), "example/mcp".to_string()];
         let env = std::collections::HashMap::new();
-        let req = RuntimeForwardRequest {
-            instance_id: "i-1",
-            server_name: "echo",
-            command: "docker",
-            args: &args,
-            env: &env,
-            request_json: r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
-        };
+        let req = RuntimeForwardRequest::docker(
+            "i-1",
+            "echo",
+            "docker",
+            &args,
+            &env,
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+        );
         let resp = call_runtime(&socket, &req).await.unwrap();
         assert_eq!(resp.status, 200);
         assert!(resp.body.contains("\"ok\":true"));

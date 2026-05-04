@@ -11,10 +11,12 @@ import {
   computeCookieDomain,
   computeCookieAttributes,
   cookieDomainsToClear,
+  handleCallback,
   parseReturnTo,
 } from './auth.js';
 
 afterEach(() => {
+  sessionStorage.clear();
   vi.unstubAllGlobals();
 });
 
@@ -153,5 +155,34 @@ describe('parseReturnTo', () => {
     expect(parseReturnTo('', apex)).toBeNull();
     expect(parseReturnTo('not a url', apex)).toBeNull();
     expect(parseReturnTo('https://swarm.example.com/', null)).toBeNull();
+  });
+});
+
+describe('handleCallback', () => {
+  test('recovers from stale callback state instead of trapping retry on the same URL', async () => {
+    window.history.pushState(null, '', '/?code=old-code&state=old-state#/i/abc');
+    sessionStorage.setItem('swarm:auth:pending', JSON.stringify({
+      verifier: 'new-verifier',
+      state: 'new-state',
+      returnTo: '#/i/abc',
+      issuedAt: Date.now(),
+    }));
+    sessionStorage.setItem('swarm:auth', JSON.stringify({
+      access_token: 'stale-token',
+      expires_at: Date.now() + 60_000,
+    }));
+    const fetch = vi.fn();
+    vi.stubGlobal('fetch', fetch);
+
+    await expect(handleCallback(
+      { client_id: 'client-id' },
+      { token_endpoint: 'https://issuer.example/token' },
+    )).resolves.toBeNull();
+
+    expect(window.location.search).toBe('');
+    expect(window.location.hash).toBe('#/i/abc');
+    expect(sessionStorage.getItem('swarm:auth:pending')).toBeNull();
+    expect(sessionStorage.getItem('swarm:auth')).toBeNull();
+    expect(fetch).not.toHaveBeenCalled();
   });
 });

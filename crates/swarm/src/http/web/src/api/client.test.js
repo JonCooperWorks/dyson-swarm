@@ -90,7 +90,7 @@ describe('SwarmClient', () => {
     });
   });
 
-  test('CLI MCP JSON uses only the single-server config API path', async () => {
+  test('Docker MCP JSON uses only the single-server config API path', async () => {
     const fetchImpl = vi.fn().mockResolvedValue(jsonResponse({ ok: true }));
     const client = new SwarmClient({ fetch: fetchImpl, getToken: () => null });
     const config = {
@@ -107,6 +107,41 @@ describe('SwarmClient', () => {
     expect(url).toBe('/v1/instances/inst%2F1/mcp/config');
     expect(init.method).toBe('PUT');
     expect(JSON.parse(init.body)).toEqual(config);
+  });
+
+  test('Docker MCP JSON fetch can be scoped to one server', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse({ config: { servers: {} } }));
+    const client = new SwarmClient({ fetch: fetchImpl, getToken: () => null });
+    await client.getMcpJsonConfig('inst/1', 'github server');
+    const [url, init] = fetchImpl.mock.calls[0];
+    expect(url).toBe('/v1/instances/inst%2F1/mcp/config?server=github%20server');
+    expect(init.headers.get('accept')).toBe('application/json');
+  });
+
+  test('admin Docker MCP catalog methods use admin routes', async () => {
+    const fetchImpl = vi.fn(() => Promise.resolve(jsonResponse({ ok: true })));
+    const client = new SwarmClient({ fetch: fetchImpl, getToken: () => null });
+    await client.adminListMcpDockerCatalog();
+    await client.adminPutMcpDockerCatalogServer('github/preset', {
+      label: 'GitHub',
+      description: null,
+      template: '{"servers":{}}',
+      credentials: [{ id: 'github_token', label: 'GitHub token' }],
+    });
+    await client.adminDeleteMcpDockerCatalogServer('github/preset');
+
+    expect(fetchImpl.mock.calls[0][0]).toBe('/v1/admin/mcp/docker-catalog');
+    expect(fetchImpl.mock.calls[0][1].headers.get('accept')).toBe('application/json');
+    expect(fetchImpl.mock.calls[1][0]).toBe('/v1/admin/mcp/docker-catalog/github%2Fpreset');
+    expect(fetchImpl.mock.calls[1][1].method).toBe('PUT');
+    expect(JSON.parse(fetchImpl.mock.calls[1][1].body)).toEqual({
+      label: 'GitHub',
+      description: null,
+      template: '{"servers":{}}',
+      credentials: [{ id: 'github_token', label: 'GitHub token' }],
+    });
+    expect(fetchImpl.mock.calls[2][0]).toBe('/v1/admin/mcp/docker-catalog/github%2Fpreset');
+    expect(fetchImpl.mock.calls[2][1].method).toBe('DELETE');
   });
 
   test('204 No Content returns null instead of throwing on JSON parse', async () => {

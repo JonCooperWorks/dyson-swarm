@@ -2,9 +2,9 @@
 //!
 //! - `WebhookService` glues:
 //!     1. `WebhookStore`         — metadata (name, description, scheme, enabled)
-//!     2. `SecretsService`       — signing keys (sealed under owner's age cipher)
+//!     2. `UserSecretsService`   — signing keys (sealed under owner's age cipher)
 //!     3. `DeliveryStore`        — audit log (metadata + sealed body)
-//!     4. `WebhookDispatcher`    — kicks off a fresh agent conversation
+//!     4. `WebhookDispatcher`    — posts into the agent's webhook chat
 //!     5. `CipherDirectory`      — owner-keyed age ciphers; used to seal
 //!                                 audit bodies at write time and open
 //!                                 them on the detail-page read.
@@ -32,7 +32,7 @@ use uuid::Uuid;
 use crate::envelope::CipherDirectory;
 use crate::error::StoreError;
 use crate::instance::InstanceService;
-use crate::secrets::{SecretsError, SecretsService};
+use crate::secrets::{SecretsError, UserSecretsService};
 use crate::traits::{
     DeliveryRow, DeliveryStore, InstanceRow, WebhookAuthScheme, WebhookRow, WebhookStore,
 };
@@ -52,19 +52,39 @@ pub(crate) const AGE_ARMOR_PREFIX: &[u8] = b"-----BEGIN AGE ENCRYPTED FILE-----"
 /// would refuse downstream.
 pub const MAX_WEBHOOK_BODY: usize = 4 * 1024 * 1024;
 
+/// Stable HTTP chat id prefix used by swarm webhook delivery inside
+/// each dyson sandbox.  The webhook name is already slug-validated
+/// (`[a-z0-9_-]`, max 64), so prefix + name is safe as a Dyson chat id
+/// and stays within Dyson's requested-id limit of 80 chars.
+pub const WEBHOOK_CHAT_ID_PREFIX: &str = "c-swarm-webhook-";
+pub const WEBHOOK_CHAT_TITLE_PREFIX: &str = "Webhook: ";
+
 /// Default page size for "recent deliveries" panel.  Caps higher to
 /// keep the SPA's payload bounded; operators with shell access can
 /// query the table directly.
 pub const DEFAULT_DELIVERY_LIMIT: u32 = 50;
 pub const MAX_DELIVERY_LIMIT: u32 = 200;
 
-/// Convention for the `secret_name` column: signing keys are stored
-/// in `instance_secrets` with this prefix so the SPA's regular
-/// secrets panel can hide them (they're managed, not user-set).
-pub const WEBHOOK_SECRET_PREFIX: &str = "_webhook_";
+/// Legacy convention for webhook signing keys when they lived in
+/// `instance_secrets`.  Anything with this prefix is managed
+/// infrastructure state and must never be exposed to an agent runtime.
+pub const LEGACY_WEBHOOK_SECRET_PREFIX: &str = "_webhook_";
 
-pub fn webhook_secret_name(webhook_name: &str) -> String {
-    format!("{WEBHOOK_SECRET_PREFIX}{webhook_name}")
+/// Convention for the `secret_name` column: signing keys are stored in
+/// `user_secrets` under a per-instance, per-webhook key.  They verify
+/// inbound webhooks only; they are not agent-readable runtime secrets.
+pub const WEBHOOK_SECRET_PREFIX: &str = "webhook:";
+
+pub fn webhook_secret_name(instance_id: &str, webhook_name: &str) -> String {
+    format!("{WEBHOOK_SECRET_PREFIX}{instance_id}:{webhook_name}")
+}
+
+pub fn webhook_chat_id(webhook_name: &str) -> String {
+    format!("{WEBHOOK_CHAT_ID_PREFIX}{webhook_name}")
+}
+
+pub fn webhook_chat_title(webhook_name: &str) -> String {
+    format!("{WEBHOOK_CHAT_TITLE_PREFIX}{webhook_name}")
 }
 
 /// Lower-cased name accepted for the URL path.  Slug-ish: ascii
@@ -103,10 +123,10 @@ pub enum WebhookError {
     Dispatch(String),
 }
 
-/// One ready-to-write spec.  `secret` is plaintext on the way in;
-/// the service seals it via `SecretsService` and stores the resulting
-/// `secret_name` pointer on the row.  `secret = None` is only valid
-/// for `auth_scheme = None`; the service enforces this at PUT time.
+/// One ready-to-write spec.  `secret` is plaintext on the way in; the
+/// service seals it via `UserSecretsService` and stores the resulting
+/// `secret_name` pointer on the row.  `secret = None` is only valid for
+/// `auth_scheme = None`; the service enforces this at PUT time.
 #[derive(Debug, Clone)]
 pub struct WebhookSpec {
     pub instance_id: String,
@@ -124,8 +144,9 @@ pub struct WebhookSpec {
 /// standing up an agent HTTP server.
 #[async_trait]
 pub trait WebhookDispatcher: Send + Sync {
-    /// Mint a fresh conversation in the agent and post the payload as
-    /// the first turn.  `description` is the operator-authored task
+    /// Find or create the agent's stable webhook conversation and
+    /// post the payload as the next turn.  `description` is the
+    /// operator-authored task
     /// brief; `headers` is the safe-allowlisted header subset to
     /// forward; `body` is the raw inbound body bytes.
     ///
@@ -189,6 +210,65 @@ impl HttpWebhookDispatcher {
             sandbox_domain.trim_end_matches('/')
         )
     }
+
+    async fn ensure_webhook_chat_id(
+        &self,
+        base: &str,
+        bearer: &str,
+        webhook_name: &str,
+    ) -> Result<String, String> {
+        let target_id = webhook_chat_id(webhook_name);
+        let target_title = webhook_chat_title(webhook_name);
+        let list_resp = self
+            .http
+            .get(format!("{base}/api/conversations"))
+            .header("Authorization", bearer)
+            .send()
+            .await
+            .map_err(|e| format!("list-conversations send: {e}"))?;
+        let list_status = list_resp.status();
+        if !list_status.is_success() {
+            let body = list_resp.text().await.unwrap_or_default();
+            return Err(format!("list-conversations {list_status}: {body}"));
+        }
+        let conversations: Vec<ConversationSummary> = list_resp
+            .json()
+            .await
+            .map_err(|e| format!("list-conversations parse: {e}"))?;
+        if let Some(existing) = find_webhook_chat(&conversations, &target_id, &target_title) {
+            return Ok(existing.to_string());
+        }
+
+        let create_resp = self
+            .http
+            .post(format!("{base}/api/conversations"))
+            .header("Authorization", bearer)
+            .header("X-Dyson-CSRF", "swarm-webhook")
+            .json(&serde_json::json!({
+                "id": target_id,
+                "title": target_title,
+            }))
+            .send()
+            .await
+            .map_err(|e| format!("create-conversation send: {e}"))?;
+        let create_status = create_resp.status();
+        if !create_status.is_success() {
+            let body = create_resp.text().await.unwrap_or_default();
+            return Err(format!("create-conversation {create_status}: {body}"));
+        }
+        let created: CreateConversationResponse = create_resp
+            .json()
+            .await
+            .map_err(|e| format!("create-conversation parse: {e}"))?;
+        if created.id != webhook_chat_id(webhook_name) {
+            tracing::debug!(
+                requested = %webhook_chat_id(webhook_name),
+                returned = %created.id,
+                "dyson ignored requested webhook chat id; using returned compatibility chat"
+            );
+        }
+        Ok(created.id)
+    }
 }
 
 #[async_trait]
@@ -212,32 +292,10 @@ impl WebhookDispatcher for HttpWebhookDispatcher {
         let base = Self::cube_base_url(&self.sandbox_domain, port, sandbox_id);
         let bearer = format!("Bearer {}", instance.bearer_token);
 
-        // 1. Mint a fresh conversation.  Title carries the webhook
-        //    name + ts so it sorts naturally in the agent's chat list.
-        let now = chrono_seconds();
-        let title = format!("webhook: {webhook_name} @ {now}");
-        let create_resp = self
-            .http
-            .post(format!("{base}/api/conversations"))
-            .header("Authorization", &bearer)
-            .header("X-Dyson-CSRF", "swarm-webhook")
-            .json(&serde_json::json!({ "title": title }))
-            .send()
-            .await
-            .map_err(|e| format!("create-conversation send: {e}"))?;
-        let create_status = create_resp.status();
-        if !create_status.is_success() {
-            let body = create_resp.text().await.unwrap_or_default();
-            return Err(format!("create-conversation {create_status}: {body}"));
-        }
-        let created: serde_json::Value = create_resp
-            .json()
-            .await
-            .map_err(|e| format!("create-conversation parse: {e}"))?;
-        let chat_id = created
-            .get("id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| "create-conversation: response missing id".to_string())?;
+        // 1. Find or create this webhook URL's stable conversation.
+        let chat_id = self
+            .ensure_webhook_chat_id(&base, &bearer, webhook_name)
+            .await?;
 
         // 2. Compose the prompt and POST a turn.
         let prompt = render_prompt(description, headers, body);
@@ -245,7 +303,7 @@ impl WebhookDispatcher for HttpWebhookDispatcher {
             .http
             .post(format!(
                 "{base}/api/conversations/{}/turn",
-                urlencode(chat_id)
+                urlencode(&chat_id)
             ))
             .header("Authorization", &bearer)
             .header("X-Dyson-CSRF", "swarm-webhook")
@@ -262,8 +320,26 @@ impl WebhookDispatcher for HttpWebhookDispatcher {
     }
 }
 
-fn chrono_seconds() -> i64 {
-    crate::now_secs()
+#[derive(Debug, serde::Deserialize)]
+struct ConversationSummary {
+    id: String,
+    title: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct CreateConversationResponse {
+    id: String,
+}
+
+fn find_webhook_chat<'a>(
+    conversations: &'a [ConversationSummary],
+    target_id: &str,
+    target_title: &str,
+) -> Option<&'a str> {
+    conversations
+        .iter()
+        .find(|c| c.id == target_id || c.title == target_title)
+        .map(|c| c.id.as_str())
 }
 
 /// Build the prompt shipped to the agent.  Bodies are best-effort
@@ -325,13 +401,13 @@ fn urlencode(s: &str) -> String {
 pub struct WebhookService {
     webhooks: Arc<dyn WebhookStore>,
     deliveries: Arc<dyn DeliveryStore>,
-    secrets: Arc<SecretsService>,
+    user_secrets: Arc<UserSecretsService>,
     instances: Arc<InstanceService>,
     dispatcher: Arc<dyn WebhookDispatcher>,
     /// Per-user age ciphers — used to seal audit bodies so the SQLite
     /// file can't be read offline to recover historical webhook
-    /// payloads.  Same directory used by `SecretsService` so we don't
-    /// bring a second key namespace into the picture.
+    /// payloads.  Same directory used by the secret services so we
+    /// don't bring a second key namespace into the picture.
     ciphers: Arc<dyn CipherDirectory>,
 }
 
@@ -339,7 +415,7 @@ impl WebhookService {
     pub fn new(
         webhooks: Arc<dyn WebhookStore>,
         deliveries: Arc<dyn DeliveryStore>,
-        secrets: Arc<SecretsService>,
+        user_secrets: Arc<UserSecretsService>,
         instances: Arc<InstanceService>,
         dispatcher: Arc<dyn WebhookDispatcher>,
         ciphers: Arc<dyn CipherDirectory>,
@@ -347,7 +423,7 @@ impl WebhookService {
         Self {
             webhooks,
             deliveries,
-            secrets,
+            user_secrets,
             instances,
             dispatcher,
             ciphers,
@@ -397,9 +473,9 @@ impl WebhookService {
                 existing.as_ref().and_then(|r| r.secret_name.as_ref()),
             ) {
                 (Some(plain), _) => {
-                    let target = webhook_secret_name(&spec.name);
-                    self.secrets
-                        .put(owner_id, &spec.instance_id, &target, plain)
+                    let target = webhook_secret_name(&spec.instance_id, &spec.name);
+                    self.user_secrets
+                        .put(owner_id, &target, plain.as_bytes())
                         .await?;
                     Some(target)
                 }
@@ -441,15 +517,10 @@ impl WebhookService {
     ) -> Result<(), WebhookError> {
         self.ensure_owner(owner_id, instance_id).await?;
         // Cascade the linked signing key, best-effort.  A failed
-        // secret delete is logged but doesn't block the row delete —
-        // the orphan would be invisible (not exposed in the SPA's
-        // secrets list because of the `_webhook_` prefix filter).
+        // secret delete is logged but doesn't block the row delete.
         if let Ok(Some(row)) = self.webhooks.get(instance_id, name).await
             && let Some(secret_name) = row.secret_name.as_deref()
-            && let Err(e) = self
-                .secrets
-                .delete(owner_id, instance_id, secret_name)
-                .await
+            && let Err(e) = self.user_secrets.delete(owner_id, secret_name).await
         {
             tracing::warn!(
                 instance = %instance_id, webhook = %name, error = %e,
@@ -777,12 +848,12 @@ impl WebhookService {
             .secret_name
             .as_deref()
             .ok_or(WebhookError::SignatureMismatch)?;
-        let listed = self.secrets.list(owner_id, &row.instance_id).await?;
-        listed
-            .into_iter()
-            .find(|(n, _)| n == secret_name)
-            .map(|(_, v)| v)
-            .ok_or(WebhookError::SignatureMismatch)
+        let bytes = self
+            .user_secrets
+            .get(owner_id, secret_name)
+            .await?
+            .ok_or(WebhookError::SignatureMismatch)?;
+        String::from_utf8(bytes).map_err(|_| WebhookError::SignatureMismatch)
     }
 
     async fn ensure_owner(&self, owner_id: &str, instance_id: &str) -> Result<(), WebhookError> {
@@ -812,7 +883,39 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::traits::WebhookAuthScheme;
+    use crate::network_policy::NetworkPolicy;
+    use crate::traits::{
+        CreateSandboxArgs, CubeClient, InstanceRow, InstanceStatus, InstanceStore, SandboxInfo,
+        SecretStore, SnapshotInfo, TokenStore, WebhookAuthScheme,
+    };
+
+    struct StubCube;
+
+    #[async_trait::async_trait]
+    impl CubeClient for StubCube {
+        async fn create_sandbox(
+            &self,
+            _: CreateSandboxArgs,
+        ) -> Result<SandboxInfo, crate::error::CubeError> {
+            unreachable!()
+        }
+
+        async fn destroy_sandbox(&self, _: &str) -> Result<(), crate::error::CubeError> {
+            unreachable!()
+        }
+
+        async fn snapshot_sandbox(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> Result<SnapshotInfo, crate::error::CubeError> {
+            unreachable!()
+        }
+
+        async fn delete_snapshot(&self, _: &str, _: &str) -> Result<(), crate::error::CubeError> {
+            unreachable!()
+        }
+    }
 
     #[test]
     fn validate_name_accepts_slug() {
@@ -842,8 +945,107 @@ mod tests {
     }
 
     #[test]
-    fn webhook_secret_name_uses_prefix() {
-        assert_eq!(webhook_secret_name("ping"), "_webhook_ping");
+    fn webhook_secret_name_scopes_to_instance() {
+        assert_eq!(webhook_secret_name("i1", "ping"), "webhook:i1:ping");
+    }
+
+    #[tokio::test]
+    async fn put_stores_verifier_key_outside_instance_secrets() {
+        let pool = crate::db::open_in_memory().await.unwrap();
+        let owner = "00000000000000a100000000000000a1";
+        sqlx::query(
+            "INSERT INTO users (id, subject, email, display_name, status, created_at, activated_at) \
+             VALUES (?, ?, NULL, 'Webhook Owner', 'active', 0, 0)",
+        )
+        .bind(owner)
+        .bind(owner)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let keys_tmp = tempfile::tempdir().unwrap();
+        let cipher_dir: Arc<dyn crate::envelope::CipherDirectory> =
+            Arc::new(crate::envelope::AgeCipherDirectory::new(keys_tmp.path()).unwrap());
+        let system_cipher = cipher_dir.system().unwrap();
+        let instances_store: Arc<dyn InstanceStore> = Arc::new(
+            crate::db::instances::SqlxInstanceStore::new(pool.clone(), system_cipher.clone()),
+        );
+        let secret_store: Arc<dyn SecretStore> =
+            Arc::new(crate::db::secrets::SqlxSecretStore::new(pool.clone()));
+        let token_store: Arc<dyn TokenStore> = Arc::new(crate::db::tokens::SqlxTokenStore::new(
+            pool.clone(),
+            system_cipher,
+        ));
+        instances_store
+            .create(InstanceRow {
+                id: "i1".into(),
+                owner_id: owner.into(),
+                name: String::new(),
+                task: String::new(),
+                cube_sandbox_id: None,
+                template_id: "tpl".into(),
+                status: InstanceStatus::Live,
+                bearer_token: "bt".into(),
+                pinned: false,
+                expires_at: None,
+                last_active_at: crate::now_secs(),
+                last_probe_at: None,
+                last_probe_status: None,
+                created_at: crate::now_secs(),
+                destroyed_at: None,
+                rotated_to: None,
+                network_policy: NetworkPolicy::Open,
+                network_policy_cidrs: Vec::new(),
+                models: Vec::new(),
+                tools: Vec::new(),
+            })
+            .await
+            .unwrap();
+        let instance_svc = Arc::new(InstanceService::new(
+            Arc::new(StubCube),
+            instances_store,
+            secret_store.clone(),
+            token_store,
+            "http://swarm.test/llm",
+        ));
+        let user_secrets = Arc::new(UserSecretsService::new(
+            Arc::new(crate::db::secrets::SqlxUserSecretStore::new(pool.clone())),
+            cipher_dir.clone(),
+        ));
+        let svc = WebhookService::new(
+            Arc::new(crate::db::webhooks::SqlxWebhookStore::new(pool.clone())),
+            Arc::new(crate::db::webhooks::SqlxDeliveryStore::new(pool.clone())),
+            user_secrets.clone(),
+            instance_svc,
+            Arc::new(NullWebhookDispatcher),
+            cipher_dir,
+        );
+
+        let row = svc
+            .put(
+                owner,
+                WebhookSpec {
+                    instance_id: "i1".into(),
+                    name: "ping".into(),
+                    description: "verify me".into(),
+                    auth_scheme: WebhookAuthScheme::HmacSha256,
+                    secret_plaintext: Some("super-secret".into()),
+                    enabled: true,
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(row.secret_name.as_deref(), Some("webhook:i1:ping"));
+        assert!(
+            secret_store.list("i1").await.unwrap().is_empty(),
+            "webhook verifier keys must not be stored in agent runtime secrets"
+        );
+        let stored = user_secrets
+            .get(owner, "webhook:i1:ping")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(String::from_utf8(stored).unwrap(), "super-secret");
     }
 
     #[test]
@@ -900,6 +1102,68 @@ mod tests {
         let s = render_prompt("brief", &[], &[0xff, 0xfe]);
         assert!(s.contains("non-utf8"));
         assert!(s.contains("fffe"));
+    }
+
+    #[test]
+    fn webhook_chat_id_is_safe_and_distinct_per_webhook_name() {
+        let mail = webhook_chat_id("mail");
+        let github = webhook_chat_id("github");
+        assert_eq!(mail, "c-swarm-webhook-mail");
+        assert_eq!(github, "c-swarm-webhook-github");
+        assert_ne!(mail, github);
+        assert!(mail.starts_with("c-"));
+        assert!(
+            mail.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'),
+            "webhook chat id must be safe as a dyson chat-history directory"
+        );
+
+        let max_name = "a".repeat(64);
+        let max_id = webhook_chat_id(&max_name);
+        assert_eq!(max_id.len(), 80, "must fit dyson's requested-id limit");
+        assert!(
+            max_id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'),
+            "webhook chat id must be safe as a dyson chat-history directory"
+        );
+    }
+
+    #[test]
+    fn find_webhook_chat_prefers_stable_id_or_compat_title() {
+        let target_id = webhook_chat_id("mail");
+        let target_title = webhook_chat_title("mail");
+        let by_id = vec![
+            ConversationSummary {
+                id: "c-0001".into(),
+                title: "other".into(),
+            },
+            ConversationSummary {
+                id: target_id.clone(),
+                title: "after restart".into(),
+            },
+        ];
+        assert_eq!(
+            find_webhook_chat(&by_id, &target_id, &target_title),
+            Some(target_id.as_str())
+        );
+
+        let by_title = vec![ConversationSummary {
+            id: "c-0002".into(),
+            title: target_title.clone(),
+        }];
+        assert_eq!(
+            find_webhook_chat(&by_title, &target_id, &target_title),
+            Some("c-0002")
+        );
+
+        let github_id = webhook_chat_id("github");
+        let github_title = webhook_chat_title("github");
+        assert_eq!(
+            find_webhook_chat(&by_title, &github_id, &github_title),
+            None,
+            "mail's compatibility title must not catch github deliveries"
+        );
     }
 
     #[test]

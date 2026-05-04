@@ -40,12 +40,40 @@ export function InactiveAccountSplash({ onLogout }) {
 }
 
 export function BootErrorSplash({ message, onRetry }) {
+  const detail = classifyBootError(message);
   return (
     <main className="splash">
       <h1>swarm</h1>
-      <p>Couldn't reach the API.</p>
-      <p className="muted small">{message || 'unknown error'}</p>
+      <p>{detail.title}</p>
+      <p className="muted small">{detail.body}</p>
       {onRetry ? <button onClick={onRetry} className="btn">retry</button> : null}
     </main>
   );
+}
+
+function classifyBootError(message) {
+  const text = String(message || '').trim();
+  const lower = text.toLowerCase();
+  if (lower.includes('auth callback') || lower.includes('state mismatch')) {
+    return {
+      title: 'Sign-in could not finish.',
+      body: text || 'The browser sign-in session expired or no longer matches this tab. Retry sign-in from this page.',
+    };
+  }
+  if (lower.includes('inactive') || lower.includes('not activated')) {
+    return {
+      title: 'Account pending activation.',
+      body: text || 'Your account exists, but an administrator still needs to activate it.',
+    };
+  }
+  if (lower.includes('failed to fetch') || lower.includes('network') || lower.includes('api')) {
+    return {
+      title: "Couldn't reach the API.",
+      body: text || 'The API did not respond. Check the deployment and retry.',
+    };
+  }
+  return {
+    title: 'Swarm could not finish loading.',
+    body: text || 'Unknown error.',
+  };
 }

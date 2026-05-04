@@ -1,7 +1,8 @@
 /* swarm — Tasks (webhooks) views.
  *
- * Five pages, all reachable from the instance detail header's
- * `tasks <badge>` button:
+ * Five pages, all reachable from the agent detail header's
+ * `webhooks <badge>` button. Routes remain /tasks for backward
+ * compatibility; user-facing copy calls them webhooks.
  *
  *   #/i/<id>/tasks                       → TasksListPage   (roster)
  *   #/i/<id>/tasks/new                   → TaskFormPage    (create)
@@ -15,6 +16,9 @@
  */
 
 import React from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import remarkBreaks from 'remark-breaks';
 import { useApi } from '../hooks/useApi.jsx';
 import { useAppState } from '../hooks/useAppState.js';
 import {
@@ -41,8 +45,37 @@ const SCHEMES = [
   },
 ];
 
+const TASK_SLUG_RE = /^[a-z0-9_-]{1,64}$/;
+const TASK_URL_PLACEHOLDER = 'webhook-name';
+const TASK_MARKDOWN_PLUGINS = [remarkGfm, remarkBreaks];
+const TASK_MARKDOWN_COMPONENTS = {
+  a: ({ node, ...props }) => (
+    <a {...props} target="_blank" rel="noopener noreferrer"/>
+  ),
+};
+
 function schemeLabel(s) {
   return SCHEMES.find(x => x.value === s)?.label || s;
+}
+
+function schemeBadgeClass(s) {
+  if (s === 'none') return 'badge-warn';
+  if (s === 'hmac_sha256') return 'badge-ok';
+  return 'badge-info';
+}
+
+function validTaskSlug(name) {
+  const slug = (name || '').trim();
+  return TASK_SLUG_RE.test(slug);
+}
+
+function webhookUrlFor(instanceId, name, { showPlaceholder = false } = {}) {
+  const slug = (name || '').trim();
+  const hasValidSlug = validTaskSlug(slug);
+  if (!hasValidSlug && !showPlaceholder) return null;
+  if (typeof window === 'undefined') return null;
+  const urlSlug = hasValidSlug ? encodeURIComponent(slug) : TASK_URL_PLACEHOLDER;
+  return `${window.location.origin}/webhooks/${encodeURIComponent(instanceId)}/${urlSlug}`;
 }
 
 // ─── List page ────────────────────────────────────────────────────
@@ -87,7 +120,7 @@ export function TasksListPage({ instanceId, embedded = false }) {
   };
 
   const remove = async (row) => {
-    if (!window.confirm(`Delete task "${row.name}"? The webhook URL will stop accepting requests immediately.`)) {
+    if (!window.confirm(`Delete webhook "${row.name}"? The URL will stop accepting requests immediately.`)) {
       return;
     }
     try {
@@ -103,11 +136,11 @@ export function TasksListPage({ instanceId, embedded = false }) {
     <Shell className={embedded ? 'instance-subpage' : 'page page-edit'}>
       <header className={embedded ? 'subpage-header' : 'page-header'}>
         {embedded ? null : <a className="btn btn-ghost btn-sm" href={backHref}>← back</a>}
-        <h1 className={embedded ? 'subpage-title' : 'page-title'}>tasks</h1>
+        <h1 className={embedded ? 'subpage-title' : 'page-title'}>webhooks</h1>
         <p className="page-sub muted">
-          Webhook-triggered jobs for this agent.  Each task exposes a URL;
-          when called and signature-verified, the payload kicks off a
-          fresh agent conversation seeded with the task brief.
+          One URL per provider. When a signed request arrives, swarm
+          records the delivery and posts it into that webhook's stable chat
+          using the webhook instructions.
         </p>
       </header>
 
@@ -115,7 +148,7 @@ export function TasksListPage({ instanceId, embedded = false }) {
 
       <section className="panel">
         <div className="panel-header">
-          <div className="panel-title">tasks</div>
+          <div className="panel-title">webhook receivers</div>
           <div className="panel-actions">
             <button
               className="btn btn-ghost btn-sm"
@@ -125,8 +158,8 @@ export function TasksListPage({ instanceId, embedded = false }) {
             >
               {refreshing ? '…' : '↻'}
             </button>
-            <a className="btn btn-ghost btn-sm" href={auditHref} title="cross-task delivery audit log">audit</a>
-            <a className="btn btn-sm" href={newHref}>+ new</a>
+            <a className="btn btn-ghost btn-sm" href={auditHref} title="delivery audit log">audit</a>
+            <a className="btn btn-sm" href={newHref}>new webhook</a>
           </div>
         </div>
         {rows.length === 0 ? (
@@ -153,15 +186,15 @@ function TasksEmpty({ newHref, auditHref }) {
   return (
     <EmptyState
       glyph="↯"
-      title="no tasks yet"
+      title="no webhooks yet"
       actions={(
         <>
-        <a className="btn btn-primary btn-sm" href={newHref}>+ new</a>
+        <a className="btn btn-primary btn-sm" href={newHref}>new webhook</a>
         <a className="btn btn-ghost btn-sm" href={auditHref}>audit</a>
         </>
       )}
     >
-      Create one webhook URL, then watch every delivery in audit.
+      Create one provider URL, then watch every delivery in audit.
     </EmptyState>
   );
 }
@@ -187,13 +220,10 @@ function TaskRow({ row, instanceId, onToggle, onDelete }) {
         <span className={`badge ${row.enabled ? 'badge-ok' : 'badge-faint'}`}>
           {row.enabled ? 'enabled' : 'disabled'}
         </span>
-        <span className="badge badge-warn small">{schemeLabel(row.auth_scheme)}</span>
+        <span className={`badge ${schemeBadgeClass(row.auth_scheme)} small`}>
+          {schemeLabel(row.auth_scheme)}
+        </span>
       </div>
-      {row.description ? (
-        <div className="tasks-row-desc muted small">{row.description}</div>
-      ) : (
-        <div className="tasks-row-desc muted small"><em>no instructions</em></div>
-      )}
       <div className="tasks-row-url">
         <code className="mono-sm" title={fullUrl}>{fullUrl}</code>
         <button type="button" className="btn btn-ghost btn-sm" onClick={copy}>
@@ -227,12 +257,12 @@ export function TaskFormPage({ instanceId, taskName, embedded = false }) {
   return (
     <Shell className={embedded ? 'instance-subpage' : 'page page-edit'}>
       <header className={embedded ? 'subpage-header' : 'page-header'}>
-        <a className="btn btn-ghost btn-sm" href={backHref}>← tasks</a>
-        <h1 className={embedded ? 'subpage-title' : 'page-title'}>{editing ? 'edit task' : 'new task'}</h1>
+        <a className="btn btn-ghost btn-sm" href={backHref}>← webhooks</a>
+        <h1 className={embedded ? 'subpage-title' : 'page-title'}>{editing ? 'edit webhook' : 'new webhook'}</h1>
         <p className="page-sub muted">
           {editing
-            ? 'Update the brief, rotate the signing key, or disable the URL.'
-            : 'Expose a webhook URL on this agent.  When called and verified, the payload kicks off a fresh conversation.'}
+            ? 'Update the instructions, rotate the shared secret, or disable the URL.'
+            : 'Create a provider-facing URL. When called and verified, the payload is posted into a stable chat for that webhook.'}
         </p>
       </header>
       <TaskForm instanceId={instanceId} taskName={taskName}/>
@@ -318,18 +348,30 @@ function TaskForm({ instanceId, taskName }) {
     return <div className="muted">loading…</div>;
   }
 
-  const fullUrl = editing && typeof window !== 'undefined'
-    ? `${window.location.origin}/webhooks/${encodeURIComponent(instanceId)}/${encodeURIComponent(taskName)}`
-    : null;
+  const activeSlug = editing ? taskName : name;
+  const urlReady = validTaskSlug(activeSlug);
+  const fullUrl = webhookUrlFor(instanceId, activeSlug, { showPlaceholder: true });
 
   return (
     <div className="edit-stack">
       <form id="task-form" onSubmit={submit} className="form page-form">
         <section className="page-section">
-          <h2 className="section-title">identity</h2>
+          <h2 className="section-title">provider URL</h2>
+          {fullUrl ? (
+            <label className={`field task-provider-url ${urlReady ? '' : 'pending'}`}>
+              <span>provider URL</span>
+              <UrlField value={fullUrl} disabled={!urlReady}/>
+              <small className="muted">
+                {urlReady
+                  ? 'Copy this into the provider. Configure the provider with the shared secret below.'
+                  : 'Enter a URL-safe webhook name below to unlock copy.'}
+              </small>
+            </label>
+          ) : null}
           <label className="field">
             <span>name</span>
             <input
+              aria-label="name"
               value={name}
               onChange={e => setName(e.target.value.toLowerCase())}
               placeholder="github-deploy"
@@ -340,35 +382,14 @@ function TaskForm({ instanceId, taskName }) {
               title="lowercase letters, digits, hyphens or underscores; max 64"
             />
             <small className="muted">
-              URL-safe slug.  Lowercase ASCII letters, digits, hyphens, underscores.
+              This becomes the final segment of the provider URL. Lowercase ASCII letters, digits, hyphens, underscores.
               {editing ? ' (immutable on edit)' : ''}
-            </small>
-          </label>
-          {fullUrl ? (
-            <label className="field">
-              <span>url</span>
-              <UrlField value={fullUrl}/>
-            </label>
-          ) : null}
-          <label className="field">
-            <span>instructions</span>
-            <textarea
-              className="textarea"
-              value={description}
-              onChange={e => setDescription(e.target.value)}
-              placeholder="Triage GitHub issues opened in foo/bar — read the body, label spam, ping me on real reports."
-              rows={5}
-              disabled={submitting}
-            />
-            <small className="muted">
-              Prepended to every fired webhook's prompt.  Tell the agent what to do
-              with the payload that arrives.
             </small>
           </label>
         </section>
 
         <section className="page-section">
-          <h2 className="section-title">signature</h2>
+          <h2 className="section-title">verification</h2>
           <div className="task-scheme-grid">
             {SCHEMES.map(s => (
               <label key={s.value} className={`task-scheme ${scheme === s.value ? 'selected' : ''} ${s.value === 'none' ? 'danger' : ''}`}>
@@ -389,19 +410,19 @@ function TaskForm({ instanceId, taskName }) {
           </div>
           {needsSecret ? (
             <label className="field">
-              <span>{requireSecretOnSave ? 'secret' : 'rotate secret'}</span>
+              <span>{requireSecretOnSave ? 'shared secret' : 'rotate shared secret'}</span>
               <input
                 type="password"
                 value={secret}
                 onChange={e => setSecret(e.target.value)}
-                placeholder={requireSecretOnSave ? 'paste a strong random string' : 'leave blank to keep existing'}
+                placeholder={requireSecretOnSave ? 'paste or generate a strong random string' : 'leave blank to keep existing'}
                 disabled={submitting}
                 autoComplete="off"
               />
               <small className="muted">
                 {scheme === 'hmac_sha256'
-                  ? 'Used as the HMAC key. Caller signs the body and sends the hex digest as X-Swarm-Signature: sha256=<hex>.'
-                  : 'Sent verbatim by the caller as Authorization: Bearer <secret>. Constant-time compared on receipt.'}
+                  ? 'Use the same secret in the provider. It signs the body and sends X-Swarm-Signature: sha256=<hex>.'
+                  : 'Use the same secret in the provider as Authorization: Bearer <secret>.'}
               </small>
             </label>
           ) : (
@@ -420,7 +441,31 @@ function TaskForm({ instanceId, taskName }) {
         </section>
 
         <section className="page-section">
-          <h2 className="section-title">availability</h2>
+          <h2 className="section-title">agent instructions</h2>
+          <label className="field">
+            <span>instructions</span>
+            <textarea
+              className="textarea"
+              value={description}
+              onChange={e => setDescription(e.target.value)}
+              placeholder="Triage GitHub issues opened in foo/bar — read the body, label spam, ping me on real reports."
+              rows={5}
+              disabled={submitting}
+            />
+            <small className="muted">
+              Prepended to every webhook delivery. Tell the agent what to do with each payload.
+            </small>
+          </label>
+          {description.trim() ? (
+            <section className="task-instructions-preview" aria-label="instructions preview">
+              <div className="muted small">preview</div>
+              <TaskMarkdown markdown={description}/>
+            </section>
+          ) : null}
+        </section>
+
+        <section className="page-section">
+          <h2 className="section-title">status</h2>
           <label className="field check">
             <input
               type="checkbox"
@@ -431,7 +476,7 @@ function TaskForm({ instanceId, taskName }) {
             <span>accept incoming webhook calls</span>
           </label>
           <small className="muted">
-            When unchecked, the public URL returns 404.  The row stays
+            When unchecked, the provider URL returns 404. The row stays
             so the configuration sticks; flip back on to resume.
           </small>
         </section>
@@ -448,7 +493,7 @@ function TaskForm({ instanceId, taskName }) {
           className="btn btn-primary btn-lg"
           disabled={submitting}
         >
-          {submitting ? 'saving…' : (editing ? 'save' : 'create task')}
+          {submitting ? 'saving…' : (editing ? 'save' : 'create webhook')}
         </button>
         <a className="btn btn-ghost" href={backHref}>cancel</a>
       </div>
@@ -456,10 +501,24 @@ function TaskForm({ instanceId, taskName }) {
   );
 }
 
-function UrlField({ value }) {
+const TaskMarkdown = React.memo(function TaskMarkdown({ markdown }) {
+  return (
+    <div className="task-prose">
+      <ReactMarkdown
+        remarkPlugins={TASK_MARKDOWN_PLUGINS}
+        components={TASK_MARKDOWN_COMPONENTS}
+      >
+        {markdown}
+      </ReactMarkdown>
+    </div>
+  );
+});
+
+function UrlField({ value, disabled = false }) {
   const [copied, setCopied] = React.useState(false);
   const copy = async (e) => {
     e.preventDefault();
+    if (disabled) return;
     try {
       await navigator.clipboard.writeText(value);
       setCopied(true);
@@ -468,9 +527,9 @@ function UrlField({ value }) {
   };
   return (
     <div className="task-url-field">
-      <input value={value} readOnly className="mono-sm"/>
-      <button type="button" className="btn btn-ghost btn-sm" onClick={copy}>
-        {copied ? 'copied!' : 'copy'}
+      <input aria-label="url" value={value} readOnly className="mono-sm" aria-invalid={disabled ? 'true' : undefined}/>
+      <button type="button" className="btn btn-ghost btn-sm" onClick={copy} disabled={disabled}>
+        {disabled ? 'name first' : (copied ? 'copied!' : 'copy')}
       </button>
     </div>
   );
@@ -515,7 +574,7 @@ function DeliveriesPanel({ instanceId, taskName }) {
         <p className="muted small">loading…</p>
       ) : rows.length === 0 ? (
         <EmptyState title="no deliveries yet">
-          Fire this task URL to see each delivery recorded here.
+          Fire this webhook URL to see each delivery recorded here.
         </EmptyState>
       ) : (
         <ul className="deliveries-list">
@@ -633,10 +692,10 @@ export function AuditListPage({ instanceId, embedded = false }) {
   return (
     <Shell className={embedded ? 'instance-subpage' : 'page page-edit'}>
       <header className={embedded ? 'subpage-header' : 'page-header'}>
-        <a className="btn btn-ghost btn-sm" href={backHref}>← tasks</a>
+        <a className="btn btn-ghost btn-sm" href={backHref}>← webhooks</a>
         <h1 className={embedded ? 'subpage-title' : 'page-title'}>audit</h1>
         <p className="page-sub muted">
-          Every webhook fire on this agent, newest first.  Click a row
+          Every webhook delivery on this agent, newest first. Click a row
           to read the request body the agent saw.
         </p>
       </header>
@@ -661,9 +720,9 @@ export function AuditListPage({ instanceId, embedded = false }) {
             className="audit-task-filter"
             value={webhookFilter}
             onChange={e => { setWebhookFilter(e.target.value); setCursors([null]); }}
-            title="filter by task"
+            title="filter by webhook"
           >
-            <option value="">all tasks</option>
+            <option value="">all webhooks</option>
             {filterNames.map(n => (
               <option key={n} value={n}>{n}</option>
             ))}
@@ -688,7 +747,7 @@ export function AuditListPage({ instanceId, embedded = false }) {
           <table className="rows audit-table">
             <thead><tr>
               <th>when</th>
-              <th>task</th>
+              <th>webhook</th>
               <th>status</th>
               <th>latency</th>
               <th>size</th>
@@ -703,7 +762,7 @@ export function AuditListPage({ instanceId, embedded = false }) {
                     <td data-label="when" className="muted small">
                       <a className="audit-row-link" href={detailHref}>{fmtTime(d.fired_at, { style: 'locale' })}</a>
                     </td>
-                    <td data-label="task">
+                    <td data-label="webhook">
                       <code className="mono-sm">{d.webhook_name}</code>
                       {deletedTask ? (
                         <span className="badge badge-faint small audit-deleted-task">deleted</span>
@@ -810,7 +869,7 @@ export function AuditDetailPage({ instanceId, deliveryId, embedded = false }) {
             <div className="panel-title">metadata</div>
             <dl className="audit-meta">
               <dt>id</dt><dd><code className="mono-sm">{row.id}</code></dd>
-              <dt>task</dt>
+              <dt>webhook</dt>
               <dd>
                 <code className="mono-sm">{row.webhook_name}</code>{' '}
                 {slot && taskNames.includes(row.webhook_name) ? (
@@ -818,7 +877,7 @@ export function AuditDetailPage({ instanceId, deliveryId, embedded = false }) {
                     className="muted small"
                     href={`#/i/${encodeURIComponent(instanceId)}/tasks/${encodeURIComponent(row.webhook_name)}`}
                   >
-                    open task
+                    open webhook
                   </a>
                 ) : slot ? (
                   <span className="badge badge-faint small">deleted</span>
@@ -931,8 +990,8 @@ function AuditEmpty({ filtered, onClear }) {
       ) : null}
     >
       {filtered
-        ? 'Pick a different task, or clear the filter.'
-        : 'Each successful or failed webhook fire records a row here. POST to a task URL to see one show up.'}
+        ? 'Pick a different webhook, or clear the filter.'
+        : 'Each successful or failed webhook delivery records a row here. POST to a webhook URL to see one show up.'}
     </EmptyState>
   );
 }

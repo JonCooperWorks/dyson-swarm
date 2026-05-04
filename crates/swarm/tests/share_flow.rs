@@ -241,7 +241,7 @@ async fn build() -> Fixture {
     let webhooks_svc = Arc::new(dyson_swarm::webhooks::WebhookService::new(
         webhook_store,
         delivery_store,
-        secrets_svc.clone(),
+        user_secrets_svc.clone(),
         instance_svc.clone(),
         Arc::new(dyson_swarm::webhooks::NullWebhookDispatcher),
         cipher_dir.clone(),
@@ -300,6 +300,7 @@ async fn build() -> Fixture {
         app_state,
         AuthState::dangerous_no_auth(),
         user_auth,
+        Router::new(),
         Router::new(),
         Router::new(),
     );

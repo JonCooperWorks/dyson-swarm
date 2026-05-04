@@ -177,6 +177,11 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         pool.clone(),
         cipher_dir.clone(),
     ));
+    let state_files = std::sync::Arc::new(dyson_swarm::state_files::StateFileService::new(
+        pool.clone(),
+        cfg.backup.local_cache_dir.clone(),
+        cipher_dir.clone(),
+    ));
 
     // Dyson agents inside cube sandboxes can't reach swarm's bind
     // (which is loopback 127.0.0.1:8080 by design — Caddy is the only
@@ -277,6 +282,7 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     // stolen sqlite row leaks nothing without their age key — same
     // posture as the OpenRouter BYOK path.
     instance_svc = instance_svc.with_mcp_secrets(user_secrets_svc.clone());
+    instance_svc = instance_svc.with_state_files(state_files.clone());
     let instance_svc = Arc::new(instance_svc);
 
     // Name push sweep.  Every swarm restart re-pushes the per-instance
@@ -547,6 +553,21 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         .hostname
         .as_deref()
         .map(|h| format!("https://{}", h.trim_end_matches('/')));
+    let (mcp_runtime_socket, docker_catalog, allow_user_docker_json) =
+        match cfg.mcp_runtime.as_ref() {
+            Some(runtime) => (
+                Some(runtime.socket_path.clone()),
+                runtime.docker_catalog.clone(),
+                runtime.allow_user_docker_json,
+            ),
+            None => (None, Vec::new(), false),
+        };
+    let mcp_catalog_store =
+        Arc::new(dyson_swarm::db::mcp_catalog::SqlxMcpDockerCatalogStore::new(pool.clone()));
+    if let Err(err) = mcp_catalog_store.seed_config(&docker_catalog).await {
+        tracing::error!(error = %err, "mcp docker catalog seed failed");
+        return ExitCode::from(2);
+    }
     let mcp_svc = match dyson_swarm::proxy::mcp::McpService::new(
         tokens_store.clone(),
         instances_store.clone(),
@@ -555,7 +576,9 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     ) {
         Ok(s) => Arc::new(
             s.with_instance_svc(instance_svc.clone())
-                .with_runtime_socket(cfg.mcp_runtime.as_ref().map(|r| r.socket_path.clone())),
+                .with_runtime_socket(mcp_runtime_socket)
+                .with_docker_catalog(docker_catalog, allow_user_docker_json)
+                .with_docker_catalog_store(mcp_catalog_store),
         ),
         Err(err) => {
             tracing::error!(error = %err, "mcp service init failed");
@@ -563,7 +586,8 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         }
     };
     let mcp_router = dyson_swarm::proxy::mcp::router(mcp_svc.clone());
-    let mcp_user_router = dyson_swarm::proxy::mcp::user_router(mcp_svc);
+    let mcp_user_router = dyson_swarm::proxy::mcp::user_router(mcp_svc.clone());
+    let mcp_admin_router = dyson_swarm::proxy::mcp::admin_router(mcp_svc);
     let llm_router = llm_router.merge(mcp_router);
 
     // Authenticator chain: bearer first (cheap, in-DB lookup), then OIDC if
@@ -620,7 +644,7 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     let webhooks_svc = Arc::new(dyson_swarm::webhooks::WebhookService::new(
         webhook_store,
         delivery_store,
-        secrets_svc.clone(),
+        user_secrets_svc.clone(),
         instance_svc.clone(),
         webhook_dispatcher,
         cipher_dir.clone(),
@@ -648,12 +672,6 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         cfg.backup.local_cache_dir.clone(),
         cipher_dir.clone(),
     ));
-    let state_files = std::sync::Arc::new(dyson_swarm::state_files::StateFileService::new(
-        pool.clone(),
-        cfg.backup.local_cache_dir.clone(),
-        cipher_dir.clone(),
-    ));
-
     let app_state = http::AppState {
         secrets: secrets_svc,
         user_secrets: user_secrets_svc,
@@ -684,7 +702,14 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         artefact_cache,
         state_files,
     };
-    let app = http::router(app_state, auth, user_auth, llm_router, mcp_user_router);
+    let app = http::router(
+        app_state,
+        auth,
+        user_auth,
+        llm_router,
+        mcp_user_router,
+        mcp_admin_router,
+    );
 
     let listener = match tokio::net::TcpListener::bind(&cfg.bind).await {
         Ok(l) => l,

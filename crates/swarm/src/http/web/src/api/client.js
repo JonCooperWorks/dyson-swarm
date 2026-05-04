@@ -213,8 +213,8 @@ export class SwarmClient {
   // Each row is `{ name, description, auth_scheme, enabled, has_secret,
   // path, created_at, updated_at }`.  Signing keys never round-trip in
   // either direction — `has_secret` is the only signal the client gets,
-  // and the secret lives in the standard owner-sealed instance_secrets
-  // store under the convention name `_webhook_<name>`.
+  // and the secret lives in owner-sealed infrastructure storage that is
+  // not passed into the agent runtime.
 
   listWebhooks(instanceId) {
     return this._json(
@@ -536,6 +536,23 @@ export class SwarmClient {
       { method: 'POST' },
     );
   }
+  adminListMcpDockerCatalog() {
+    return this._json('/v1/admin/mcp/docker-catalog', {
+      headers: { Accept: 'application/json' },
+    });
+  }
+  adminPutMcpDockerCatalogServer(id, { label, description = null, template, credentials = [] }) {
+    return this._json(`/v1/admin/mcp/docker-catalog/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ label, description, template, credentials }),
+    });
+  }
+  adminDeleteMcpDockerCatalogServer(id) {
+    return this._json(`/v1/admin/mcp/docker-catalog/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    });
+  }
 
   // ─── Provider keys (BYOK) ──────────────────────────────────────────
   //
@@ -579,8 +596,8 @@ export class SwarmClient {
   // ─── Per-instance MCP servers ──────────────────────────────────────
   //
   // Records live in user_secrets sealed under the user's age cipher.
-  // CLI stdio servers can be added from one VS Code-style JSON object;
-  // the agent only ever sees a swarm proxy URL.
+  // Docker stdio servers can be added from one MCP JSON object; the
+  // agent only ever sees a swarm proxy URL.
 
   /// `[{name, url, auth_kind, connected}, ...]` for one instance.
   /// `connected` is true for bearer/none entries (always usable) and
@@ -596,9 +613,27 @@ export class SwarmClient {
     );
   }
 
-  getMcpJsonConfig(instanceId) {
+  listMcpDockerCatalog() {
+    return this._json('/v1/mcp/docker-catalog', {
+      headers: { Accept: 'application/json' },
+    });
+  }
+
+  putMcpDockerCatalogServer(instanceId, catalogId, credentials = {}) {
     return this._json(
-      `/v1/instances/${encodeURIComponent(instanceId)}/mcp/config`,
+      `/v1/instances/${encodeURIComponent(instanceId)}/mcp/docker-catalog/${encodeURIComponent(catalogId)}`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ credentials }),
+      },
+    );
+  }
+
+  getMcpJsonConfig(instanceId, serverName = null) {
+    const qs = serverName ? `?server=${encodeURIComponent(serverName)}` : '';
+    return this._json(
+      `/v1/instances/${encodeURIComponent(instanceId)}/mcp/config${qs}`,
       { headers: { Accept: 'application/json' } },
     );
   }

@@ -139,6 +139,7 @@ pub fn router(
     user_auth: UserAuthState,
     extra: Router,
     mcp_user_router: Router,
+    mcp_admin_router: Router,
 ) -> Router {
     // Admin-only routes — Stage 5 layered:
     // 1. user_middleware resolves the caller's CallerIdentity (OIDC
@@ -157,7 +158,8 @@ pub fn router(
     // every admin endpoint and the marker header would never fire.
     let admin_handlers = proxy_admin::router(state.clone())
         .merge(crate::http::admin_users::router(state.clone()))
-        .merge(instances::admin_router(state.clone()));
+        .merge(instances::admin_router(state.clone()))
+        .merge(mcp_admin_router);
     let admin = if auth.dangerous_no_auth {
         admin_handlers.layer(middleware::from_fn_with_state(
             auth.clone(),
@@ -342,7 +344,7 @@ mod tests {
         let webhooks_svc = Arc::new(crate::webhooks::WebhookService::new(
             webhook_store,
             delivery_store,
-            svc.clone(),
+            user_secrets.clone(),
             instance_svc.clone(),
             Arc::new(crate::webhooks::NullWebhookDispatcher),
             cipher_dir.clone(),
@@ -399,7 +401,14 @@ mod tests {
     async fn spawn(state: AppState, auth: AuthState, user_auth: UserAuthState) -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let app = router(state, auth, user_auth, Router::new(), Router::new());
+        let app = router(
+            state,
+            auth,
+            user_auth,
+            Router::new(),
+            Router::new(),
+            Router::new(),
+        );
         tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });

@@ -128,7 +128,7 @@ function InstanceList({ selectedId, onNew, view }) {
   return (
     <aside className="left-rail">
       <div className="rail-header">
-        <div className="rail-title">your instances</div>
+        <div className="rail-title">agents</div>
         <div className="rail-actions">
           <button className="btn btn-ghost btn-sm" onClick={refresh} disabled={refreshing} title="refresh">
             {refreshing ? '…' : '↻'}
@@ -138,7 +138,12 @@ function InstanceList({ selectedId, onNew, view }) {
       </div>
       <ul className="rail-list">
         {order.length === 0 ? (
-          <li className="rail-empty muted small">your roster's empty — hire one →</li>
+          <li className="rail-empty">
+            <div className="muted small">No agents yet.</div>
+            <button type="button" className="btn btn-primary btn-sm" onClick={onNew}>
+              create agent
+            </button>
+          </li>
         ) : order.map(id => {
           const row = byId[id];
           const label = row.name && row.name.trim() ? row.name : '(unnamed)';
@@ -267,13 +272,11 @@ export function profileLabel(p) {
   return `${p.name} — ${p.disk_gb} GB disk · ${vcpu} · ${ram}`;
 }
 
-// ─── New instance — dedicated page ─────────────────────────────────
+// ─── New agent — dedicated page ────────────────────────────────────
 //
-// Each Dyson is an employee.  The form reads top-down like an offer
-// letter: who they are, what they do, then the infrastructure bits.
-// Promoted from a modal to a dedicated page so there's room for the
-// full configuration surface (template, ttl, and — coming next —
-// per-instance network policy fed to the cube's BPF egress filter).
+// User-facing copy treats the sandbox/runtime as implementation
+// detail.  The flow starts with the agent brief and model, then lets
+// operators tune capabilities and runtime when they need to.
 
 export function NewInstancePage() {
   // ESC navigates back to the list — same affordance the modal had,
@@ -290,10 +293,10 @@ export function NewInstancePage() {
     <main className="page page-new">
       <header className="page-header">
         <a className="btn btn-ghost btn-sm" href="#/">← back</a>
-        <h1 className="page-title">hire a new agent</h1>
+        <h1 className="page-title">create agent</h1>
         <p className="page-sub muted">
-          Each agent is a long-lived employee.  Fill in the offer letter,
-          then click hire.
+          Give it a brief, pick a model, and decide what it can reach.
+          You can change the brief, model, tools, and network policy later.
         </p>
       </header>
       <NewInstanceForm/>
@@ -568,13 +571,13 @@ function ToolsPicker({ value, onChange, policyKind }) {
   }, [policyKind]);
   return (
     <ToolPicker
-      title="tools"
+      title="built-in tools"
       allNames={ALL_TOOL_NAMES}
       groups={TOOL_GROUPS}
       value={value}
       onChange={onChange}
       cellMeta={cellMeta}
-      hint="Built-in tools the agent registers on boot.  Air-gapped employees start with nothing — pick only what the task actually needs."
+      hint="Pick what the agent can call directly. Air-gapped agents start with nothing enabled, so opt in only the tools the brief needs."
     />
   );
 }
@@ -637,7 +640,7 @@ function ToolsView({ instance }) {
   );
 }
 
-function NewInstanceForm() {
+export function NewInstanceForm() {
   const { client, auth } = useApi();
   const [name, setName] = React.useState('');
   const [task, setTask] = React.useState('');
@@ -688,6 +691,27 @@ function NewInstanceForm() {
   // identifier for React keys; the server-side wire shape (without
   // `id`) is built in `submit`.
   const [mcpServers, setMcpServers] = React.useState([]);
+  const [mcpDockerCatalog, setMcpDockerCatalog] = React.useState({
+    allow_raw_json: false,
+    servers: [],
+  });
+  React.useEffect(() => {
+    let alive = true;
+    if (!client.listMcpDockerCatalog) return () => { alive = false; };
+    client.listMcpDockerCatalog()
+      .then(catalog => {
+        if (alive) {
+          setMcpDockerCatalog({
+            allow_raw_json: Boolean(catalog?.allow_raw_json),
+            servers: Array.isArray(catalog?.servers) ? catalog.servers : [],
+          });
+        }
+      })
+      .catch(err => {
+        console.warn('[swarm] mcp docker catalog load failed', err);
+      });
+    return () => { alive = false; };
+  }, [client]);
   // Built-in tool include list.  Airgap default → empty picker,
   // operator opts in tool-by-tool.  initialTools handles both
   // halves (airgap = [], everything else = ALL).
@@ -745,8 +769,8 @@ function NewInstanceForm() {
       //   | { kind: "allowlist", entries: [...] }
       //   | { kind: "denylist", entries: [...] }
       req.network_policy = serializeNetworkPolicy(networkPolicy);
-      const mcp = serializeMcpServers(mcpServers);
-      if (mcp.length > 0) req.mcp_servers = mcp;
+      const mcp = splitMcpSetupRows(mcpServers, mcpDockerCatalog);
+      if (mcp.remote.length > 0) req.mcp_servers = mcp.remote;
       // Surface the tool include list in the env envelope so dyson
       // can read SWARM_TOOLS at boot.  Skip when every tool is
       // ticked AND the kind isn't airgap — that's the implicit
@@ -767,6 +791,16 @@ function NewInstanceForm() {
       const result = await client.createInstance(req);
 
       if (result?.id) {
+        for (const config of mcp.dockerConfigs) {
+          await client.putMcpJsonConfig(result.id, config);
+        }
+        for (const preset of mcp.dockerCatalogServers) {
+          await client.putMcpDockerCatalogServer(
+            result.id,
+            preset.catalogId,
+            preset.credentials,
+          );
+        }
         await waitUntilHealthy(client, result.id);
         window.location.hash = `#/i/${encodeURIComponent(result.id)}`;
       } else {
@@ -784,7 +818,7 @@ function NewInstanceForm() {
   if (phase === 'provisioning') {
     return (
       <section className="page-section">
-        <p className="muted small">getting your agent ready…</p>
+        <p className="muted small">creating your agent…</p>
         <div className="progress-bar"><div className="progress-bar-indeterminate"/></div>
         <p className="muted small" style={{ marginTop: 12 }}>
           By the time this redirects, your agent is live and reachable.
@@ -796,7 +830,7 @@ function NewInstanceForm() {
   return (
     <form onSubmit={submit} className="form page-form">
       <section className="page-section">
-        <h2 className="section-title">identity</h2>
+        <h2 className="section-title">agent</h2>
         <label className="field">
           <span>name</span>
           <input
@@ -807,18 +841,16 @@ function NewInstanceForm() {
           />
         </label>
         <label className="field">
-          <span>task</span>
+          <span>brief</span>
           <textarea
             className="textarea"
             value={task}
             onChange={e => setTask(e.target.value)}
-            placeholder={`What this employee does, in prose.\n\nExample: Watch for new PRs in github.com/foo/bar. Comment with style-guide violations and link to the relevant section. Don't approve or merge.`}
+            placeholder={`What this agent should do.\n\nExample: Watch for new PRs in github.com/foo/bar. Comment with style-guide violations and link to the relevant section. Don't approve or merge.`}
             rows={6}
           />
           <span className="hint muted small">
-            The agent reads this on first boot as <code>SWARM_TASK</code>.
-            You can edit it later, but changes don't propagate to a
-            running employee.
+            This is the agent's working brief. You can edit it later.
           </span>
         </label>
       </section>
@@ -833,7 +865,7 @@ function NewInstanceForm() {
       </section>
 
       <section className="page-section">
-        <h2 className="section-title">network access</h2>
+        <h2 className="section-title">network</h2>
         <NetworkPolicyPicker value={networkPolicy} onChange={setNetworkPolicy}/>
       </section>
 
@@ -844,19 +876,21 @@ function NewInstanceForm() {
       />
 
       <section className="page-section">
-        <h2 className="section-title">MCP servers</h2>
-        <McpServersEditor value={mcpServers} onChange={setMcpServers}/>
+        <h2 className="section-title">connected tools</h2>
+        <McpServersEditor
+          value={mcpServers}
+          onChange={setMcpServers}
+          dockerCatalog={mcpDockerCatalog}
+        />
         <span className="hint muted small">
-          MCP traffic flows through swarm — the agent only sees a swarm
-          proxy URL, never your upstream URL or its credentials. Bearer
-          tokens and OAuth refresh tokens land in your encrypted user
-          secret store. OAuth connections finish in a browser tab after
-          you hire the agent.
+          Add remote MCP servers or admin-curated Docker presets. Swarm
+          seals upstream URLs and credentials; the agent only sees a
+          swarm proxy URL.
         </span>
       </section>
 
       <section className="page-section">
-        <h2 className="section-title">infrastructure</h2>
+        <h2 className="section-title">runtime</h2>
         {cubeProfiles.length >= 1 ? (
           <CubeProfilePicker
             profiles={cubeProfiles}
@@ -876,10 +910,20 @@ function NewInstanceForm() {
           />
           <span className="hint muted small">
             Auto-destroyed by the TTL sweeper after this many seconds.
-            Leave blank for a long-lived employee.
+            Leave blank for a long-lived agent.
           </span>
         </label>
       </section>
+
+      <SetupSummary
+        name={name}
+        models={models}
+        networkPolicy={networkPolicy}
+        tools={tools}
+        mcpServers={mcpServers}
+        templateId={templateId}
+        cubeProfiles={cubeProfiles}
+      />
 
       {error ? <div className="error">{error}</div> : null}
       <div className="page-actions">
@@ -889,11 +933,69 @@ function NewInstanceForm() {
           disabled={submitting || models.length === 0 || !templateId.trim()}
           title={models.length === 0 ? 'pick at least one model' : ''}
         >
-          {submitting ? 'hiring…' : 'hire'}
+          {submitting ? 'creating…' : 'create agent'}
         </button>
         <a className="btn btn-ghost" href="#/">cancel</a>
       </div>
     </form>
+  );
+}
+
+function SetupSummary({
+  name,
+  models,
+  networkPolicy,
+  tools,
+  mcpServers,
+  templateId,
+  cubeProfiles,
+}) {
+  const profile = findCubeProfile(templateId, cubeProfiles);
+  const agentLabel = name.trim() || 'Unnamed agent';
+  const networkLabel = POLICY_OPTIONS.find(p => p.kind === networkPolicy.kind)?.label || networkPolicy.kind;
+  const dockerCount = (mcpServers || []).filter(r => (r.serverType || 'remote') === 'docker').length;
+  const remoteCount = (mcpServers || []).filter(r => (r.serverType || 'remote') !== 'docker').length;
+  const mcpCount = dockerCount + remoteCount;
+  const toolCount = tools.length;
+  const lockedDown = networkPolicy.kind === 'airgap' && toolCount === 0 && mcpCount === 0;
+
+  return (
+    <section className={`setup-summary ${lockedDown ? 'setup-summary-warn' : ''}`}>
+      <div className="setup-summary-head">
+        <div>
+          <h2 className="section-title">review</h2>
+          <p className="setup-summary-title">{agentLabel}</p>
+        </div>
+        <span className={`badge ${lockedDown ? 'badge-warn' : 'badge-info'}`}>
+          {lockedDown ? 'locked down' : 'ready'}
+        </span>
+      </div>
+      <div className="setup-summary-grid">
+        <SummaryFact label="model" value={models[0] || 'pick one'}/>
+        <SummaryFact label="network" value={networkLabel}/>
+        <SummaryFact label="built-in tools" value={`${toolCount} enabled`}/>
+        <SummaryFact
+          label="MCP"
+          value={mcpCount === 0 ? 'none' : `${mcpCount} server${mcpCount === 1 ? '' : 's'}`}
+        />
+        <SummaryFact label="runtime" value={profile ? profile.name : (templateId || 'default')}/>
+      </div>
+      {lockedDown ? (
+        <p className="setup-summary-note">
+          This agent will start with no network, no built-in tools, and no MCP servers.
+          That is secure, but it may feel inert until you enable a capability.
+        </p>
+      ) : null}
+    </section>
+  );
+}
+
+function SummaryFact({ label, value }) {
+  return (
+    <div className="setup-summary-fact">
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
   );
 }
 
@@ -967,7 +1069,7 @@ export const POLICY_OPTIONS = [
   {
     kind: 'airgap',
     label: 'Air-gapped (LLM + MCP only)',
-    help: 'No outbound traffic at all, except to the swarm /llm and /mcp proxies. The agent can still call its model and any attached MCP servers (swarm forwards on its behalf), but the public internet is closed. The default — pick a wider profile only when the task actually needs it.',
+    help: 'No outbound traffic at all, except to the swarm /llm and /mcp proxies. The agent can still call its model and any attached MCP servers (swarm forwards on its behalf), but the public internet is closed. The default — pick a wider profile only when the brief actually needs it.',
   },
   {
     kind: 'allowlist',
@@ -1143,6 +1245,7 @@ function serializeNetworkPolicy(p) {
 // The form just collects the metadata.
 export function serializeMcpServers(rows) {
   return rows
+    .filter(r => (r.serverType || 'remote') === 'remote')
     .map(r => {
       const name = (r.name || '').trim();
       const url = (r.url || '').trim();
@@ -1176,19 +1279,77 @@ export function serializeMcpServers(rows) {
     .filter(Boolean);
 }
 
+export function splitMcpSetupRows(rows, dockerCatalog = null) {
+  const remote = serializeMcpServers(rows);
+  const names = new Set();
+  for (const spec of remote) {
+    if (names.has(spec.name)) {
+      throw new Error(`MCP server "${spec.name}" is configured more than once.`);
+    }
+    names.add(spec.name);
+  }
+
+  const dockerConfigs = [];
+  const dockerCatalogServers = [];
+  const catalogServers = Array.isArray(dockerCatalog?.servers) ? dockerCatalog.servers : [];
+  for (const row of rows || []) {
+    const serverType = row.serverType || 'remote';
+    if (serverType === 'docker') {
+      const text = row.jsonText || '';
+      if (!text.trim()) continue;
+      const config = parseMcpCliJsonConfig(text);
+      const serverName = mcpServerNameFromConfig(config);
+      if (names.has(serverName)) {
+        throw new Error(`MCP server "${serverName}" is configured more than once.`);
+      }
+      names.add(serverName);
+      dockerConfigs.push(config);
+    } else if (serverType === 'docker_catalog') {
+      const catalogId = row.catalogId || catalogServers[0]?.id || '';
+      const server = catalogServers.find(s => s.id === catalogId);
+      if (!server) {
+        throw new Error('Choose a Docker MCP preset before saving.');
+      }
+      const serverName = mcpServerNameFromText(server.template || '');
+      if (!serverName) {
+        throw new Error(`Docker MCP preset "${server.label || server.id}" has an invalid JSON template.`);
+      }
+      if (names.has(serverName)) {
+        throw new Error(`MCP server "${serverName}" is configured more than once.`);
+      }
+      const credentials = {};
+      for (const field of server.credentials || []) {
+        const value = row.credentials?.[field.id] || '';
+        if (field.required && !String(value).trim()) {
+          throw new Error(`${field.label || field.id} is required for ${server.label || server.id}.`);
+        }
+        if (String(value).trim()) credentials[field.id] = value;
+      }
+      names.add(serverName);
+      dockerCatalogServers.push({ catalogId, credentials });
+    }
+  }
+  return { remote, dockerConfigs, dockerCatalogServers };
+}
+
 let mcpRowCounter = 0;
-function freshMcpRow() {
+function freshMcpRow(serverType = 'remote') {
   mcpRowCounter += 1;
   return {
     id: `mcp-${mcpRowCounter}-${Date.now()}`,
+    serverType,
     name: '',
     url: '',
     auth: { kind: 'none' },
+    jsonText: '',
+    catalogId: '',
+    credentials: {},
   };
 }
 
-function McpServersEditor({ value, onChange }) {
+function McpServersEditor({ value, onChange, dockerCatalog = null }) {
   const rows = value || [];
+  const catalog = normalizeDockerCatalog(dockerCatalog);
   const update = (id, patch) =>
     onChange(rows.map(r => (r.id === id ? { ...r, ...patch } : r)));
   const updateAuth = (id, patch) =>
@@ -1202,9 +1363,9 @@ function McpServersEditor({ value, onChange }) {
     return (
       <div className="mcp-empty">
         <p className="muted small" style={{ margin: 0 }}>
-          No MCP servers attached. The agent hires fine without any —
-          add one if you want it to call out to Linear, GitHub, your
-          own server, or anything that speaks streamable-HTTP MCP.
+          No MCP servers attached. Add one when this agent needs Linear,
+          GitHub, a Docker stdio server, or any streamable-HTTP MCP
+          provider.
         </p>
         <button type="button" className="btn btn-ghost btn-sm" onClick={add}>
           + add MCP server
@@ -1219,6 +1380,7 @@ function McpServersEditor({ value, onChange }) {
         <McpServerCard
           key={row.id}
           row={row}
+          dockerCatalog={catalog}
           onChange={patch => update(row.id, patch)}
           onChangeAuth={patch => updateAuth(row.id, patch)}
           onRemove={() => remove(row.id)}
@@ -1231,16 +1393,34 @@ function McpServersEditor({ value, onChange }) {
   );
 }
 
-function McpServerCard({ row, onChange, onChangeAuth, onRemove }) {
+function McpServerCard({ row, dockerCatalog, onChange, onChangeAuth, onRemove }) {
+  const serverType = row.serverType || 'remote';
   const authKind = row.auth?.kind || 'none';
+  const catalogServers = dockerCatalog?.servers || [];
+  const selectedCatalog = catalogServers.find(s => s.id === row.catalogId) || catalogServers[0] || null;
+  const parsedDockerName = serverType === 'docker'
+    ? mcpServerNameFromText(row.jsonText || '')
+    : null;
+  const parsedCatalogName = serverType === 'docker_catalog' && selectedCatalog
+    ? mcpServerNameFromText(selectedCatalog.template || '')
+    : null;
+  const displayName = serverType === 'docker'
+    ? (parsedDockerName || 'docker config')
+    : (serverType === 'docker_catalog'
+      ? (parsedCatalogName || selectedCatalog?.label || 'docker preset')
+      : (row.name?.trim() || 'unnamed'));
+  const setCredential = (id, value) =>
+    onChange({ credentials: { ...(row.credentials || {}), [id]: value } });
   return (
     <div className="mcp-card panel">
       <div className="mcp-card-head">
         <div className="mcp-card-title">
           <code className="mcp-card-name">
-            {row.name?.trim() || 'unnamed'}
+            {displayName}
           </code>
-          <span className={`mcp-auth-pill mcp-auth-${authKind}`}>{authKind}</span>
+          <span className={`mcp-auth-pill mcp-auth-${serverType === 'docker' || serverType === 'docker_catalog' ? 'docker' : authKind}`}>
+            {serverType === 'docker' || serverType === 'docker_catalog' ? 'docker' : authKind}
+          </span>
         </div>
         <button
           type="button"
@@ -1253,6 +1433,61 @@ function McpServerCard({ row, onChange, onChangeAuth, onRemove }) {
         </button>
       </div>
       <div className="mcp-card-body">
+        <McpServerTypeField
+          value={serverType}
+          onChange={next => onChange({
+            serverType: next,
+            catalogId: next === 'docker_catalog' ? (selectedCatalog?.id || '') : row.catalogId,
+          })}
+          dockerCatalog={dockerCatalog}
+        />
+        {serverType === 'docker_catalog' ? (
+          <>
+            <label className="field">
+              <span>preset</span>
+              <select
+                value={selectedCatalog?.id || ''}
+                onChange={e => onChange({ catalogId: e.target.value, credentials: {} })}
+              >
+                {catalogServers.map(server => (
+                  <option key={server.id} value={server.id}>
+                    {server.label || server.id}
+                  </option>
+                ))}
+              </select>
+              {selectedCatalog?.description ? (
+                <span className="hint muted small">{selectedCatalog.description}</span>
+              ) : null}
+            </label>
+            {selectedCatalog ? (
+              <>
+                <McpCatalogCredentialFields
+                  server={selectedCatalog}
+                  values={row.credentials || {}}
+                  onChange={setCredential}
+                />
+                <McpDockerTemplatePreview template={selectedCatalog.template}/>
+              </>
+            ) : (
+              <p className="muted small mcp-card-note">
+                No Docker MCP presets are available on this swarm.
+              </p>
+            )}
+          </>
+        ) : serverType === 'docker' ? (
+          <>
+            <p className="muted small mcp-card-note">
+              Paste one Docker-backed stdio server under `servers` or
+              `mcpServers`. Swarm seals the JSON and gives the agent only
+              a swarm proxy URL.
+            </p>
+            <McpDockerJsonField
+              value={row.jsonText || ''}
+              onChange={jsonText => onChange({ jsonText })}
+            />
+          </>
+        ) : (
+          <>
         <label className="field">
           <span>name</span>
           <input
@@ -1320,8 +1555,107 @@ function McpServerCard({ row, onChange, onChangeAuth, onRemove }) {
         {authKind === 'oauth' ? (
           <McpOAuthFields auth={row.auth} onChangeAuth={onChangeAuth}/>
         ) : null}
+          </>
+        )}
       </div>
     </div>
+  );
+}
+
+function McpServerTypeField({ value, onChange, disabled = false, dockerCatalog = null }) {
+  const catalog = normalizeDockerCatalog(dockerCatalog);
+  const hasCatalog = catalog.servers.length > 0;
+  return (
+    <label className="field">
+      <span>type</span>
+      <select
+        value={value}
+        onChange={e => onChange(e.target.value)}
+        disabled={disabled}
+        aria-label="MCP server type"
+      >
+        <option value="remote">remote HTTP/SSE</option>
+        {hasCatalog ? <option value="docker_catalog">Docker preset</option> : null}
+        {catalog.allow_raw_json || value === 'docker' ? (
+          <option value="docker">Docker JSON</option>
+        ) : null}
+      </select>
+    </label>
+  );
+}
+
+function normalizeDockerCatalog(catalog) {
+  return {
+    allow_raw_json: catalog?.allow_raw_json === true,
+    servers: Array.isArray(catalog?.servers) ? catalog.servers : [],
+  };
+}
+
+function McpDockerJsonField({ value, onChange, disabled = false, autoFocus = false }) {
+  return (
+    <textarea
+      className="mcp-json-textarea"
+      value={value}
+      placeholder={MCP_JSON_CONFIG_EXAMPLE}
+      onChange={e => onChange(e.target.value)}
+      spellCheck={false}
+      disabled={disabled}
+      autoFocus={autoFocus}
+      aria-label="MCP JSON config"
+    />
+  );
+}
+
+function McpDockerTemplatePreview({ template }) {
+  return (
+    <label className="field">
+      <span>JSON</span>
+      <textarea
+        className="mcp-json-textarea mcp-json-preview"
+        value={formatMcpJsonTemplate(template)}
+        readOnly
+        spellCheck={false}
+        aria-label="Read-only MCP JSON template"
+      />
+    </label>
+  );
+}
+
+function formatMcpJsonTemplate(template) {
+  if (!template) return '';
+  try {
+    return JSON.stringify(JSON.parse(template), null, 2);
+  } catch {
+    return template;
+  }
+}
+
+function McpCatalogCredentialFields({ server, values, onChange, keepExisting = false }) {
+  const credentials = server?.credentials || [];
+  if (credentials.length === 0) {
+    return <p className="muted small mcp-card-note">This preset does not need credentials.</p>;
+  }
+  return (
+    <>
+      {credentials.map(field => (
+        <label className="field" key={field.id}>
+          <span>{field.label || field.id}</span>
+          <input
+            type={field.secret === false ? 'text' : 'password'}
+            value={values?.[field.id] || ''}
+            onChange={e => onChange(field.id, e.target.value)}
+            placeholder={field.placeholder || ''}
+            autoComplete="off"
+            aria-label={field.label || field.id}
+          />
+          <span className="hint muted small">
+            {field.description || (keepExisting
+              ? `Leave ${MCP_KEEP_TOKEN} to keep the stored value.`
+              : 'Sealed in your user secret store; the agent never sees it directly.')}
+          </span>
+        </label>
+      ))}
+    </>
   );
 }
 
@@ -1642,8 +1976,8 @@ function InstanceDetail({ id, onNew, view }) {
     return () => { cancelled = true; };
   }, [client, id]);
 
-  // Webhooks list — fed into the "tasks" button's count badge.  Quiet
-  // on failure (the badge just stays hidden); the dedicated tasks page
+  // Webhooks list — fed into the "webhooks" button's count badge. Quiet
+  // on failure (the badge just stays hidden); the dedicated page
   // surfaces real errors when the user navigates in.
   React.useEffect(() => {
     if (!id) return;
@@ -1710,7 +2044,7 @@ function InstanceDetail({ id, onNew, view }) {
   );
 
   const destroy = async () => {
-    if (!confirm(`destroy instance ${id}? this is permanent.`)) return;
+    if (!confirm(`destroy agent ${displayName}? this is permanent.`)) return;
     setBusy(true); setErr(null);
     try {
       await client.destroyInstance(id);
@@ -1731,7 +2065,7 @@ function InstanceDetail({ id, onNew, view }) {
     const label = row.name && row.name.trim() ? row.name : id;
     const warning =
       `RESET ${label} on the latest template?\n\n` +
-      `The agent keeps its name, task, models, ` +
+      `The agent keeps its name, brief, models, ` +
       `tools, network policy, secrets, MCP servers, URL, and bearer ` +
       `token.  Memory, chats, knowledge base, and learned skills are ` +
       `replayed from the sealed swarm mirror.  Any in-flight work will ` +
@@ -1800,9 +2134,9 @@ function InstanceDetail({ id, onNew, view }) {
             href={`#/i/${encodeURIComponent(id)}`}
             aria-disabled={busy}
             onClick={(e) => { if (busy) e.preventDefault(); }}
-            title="instance data, runtime, snapshots, network, tools, secrets, and instructions"
+            title="runtime, snapshots, network, tools, secrets, MCP, and instructions"
           >
-            instance
+            overview
           </a>
           <a
             className={`btn btn-ghost ${activeSection === 'edit' ? 'btn-active' : ''}`}
@@ -1817,9 +2151,9 @@ function InstanceDetail({ id, onNew, view }) {
             href={`#/i/${encodeURIComponent(id)}/tasks`}
             aria-disabled={busy}
             onClick={(e) => { if (busy) e.preventDefault(); }}
-            title="webhook-triggered tasks for this agent"
+            title="webhook triggers for this agent"
           >
-            tasks
+            webhooks
             {enabledTaskCount > 0
               ? <span className="btn-count-badge" aria-label={`${enabledTaskCount} enabled`}>{enabledTaskCount}</span>
               : null}
@@ -1829,7 +2163,7 @@ function InstanceDetail({ id, onNew, view }) {
             href={`#/i/${encodeURIComponent(id)}/artefacts`}
             aria-disabled={busy}
             onClick={(e) => { if (busy) e.preventDefault(); }}
-            title="artefacts cached on swarm, with active shared links counted in the badge"
+            title="agent artefacts cached on swarm, with active shared links counted in the badge"
           >
             artefacts
             {activeShareCount > 0
@@ -1840,7 +2174,7 @@ function InstanceDetail({ id, onNew, view }) {
             className="btn btn-danger"
             onClick={reset}
             disabled={busy || row.status === 'destroyed'}
-            title="hire a fresh agent on the latest template, replaying mirrored memory, chats, kb, and skills"
+            title="create a fresh runtime on the latest template, replaying mirrored memory, chats, kb, and skills"
           >
             reset
           </button>
@@ -1893,7 +2227,7 @@ function InstanceDetail({ id, onNew, view }) {
                 <TaskProse markdown={row.task}/>
               ) : (
                 <p className="muted small">
-                  no task description — tap <em>edit</em> to write one.
+                  no brief yet — tap <em>edit</em> to write one.
                 </p>
               )}
             </div>
@@ -2152,7 +2486,7 @@ function EditInstanceForm({ instance, backHref, formId }) {
             />
           </label>
           <label className="field">
-            <span>task</span>
+            <span>brief</span>
             <textarea
               className="textarea"
               value={task}
@@ -2225,24 +2559,24 @@ function EmptyDetail({ onNew, hasInstances }) {
           <>
             <h1 className="empty-title">pick an agent</h1>
             <p className="empty-sub">
-              your roster is on the left — pick one to inspect, edit, or
-              fire it up. or hire a new employee for a new task.
+              Pick an agent from the left rail to inspect runtime, tools,
+              webhooks, and artefacts. Or create a new one for a fresh job.
             </p>
             <div className="empty-actions">
-              <button className="btn btn-primary" onClick={onNew}>+ hire an agent</button>
+              <button className="btn btn-primary" onClick={onNew}>create agent</button>
             </div>
           </>
         ) : (
           <>
             <h1 className="empty-title">build your swarm</h1>
             <p className="empty-sub">
-              agents are long-lived workers you put to work — one per task,
-              each with its own brief, model, and memory. start with one
-              employee; scale to hundreds.
+              Agents are long-lived workers with their own brief, model,
+              memory, tools, webhooks, and artefacts. Start with one and
+              scale when you need more hands.
             </p>
             <div className="empty-actions">
               <button className="btn btn-primary btn-lg" onClick={onNew}>
-                hire your first agent
+                create your first agent
               </button>
             </div>
             <p className="empty-hint muted small">
@@ -2691,12 +3025,12 @@ function McpErrorNotice({ notice, compact = false }) {
   );
 }
 
-const DEFAULT_MCP_JSON_CONFIG = `{
+const MCP_JSON_CONFIG_EXAMPLE = `{
   "servers": {
-    "github": {
+    "server-name": {
       "type": "stdio",
       "command": "docker",
-      "args": ["run", "-i", "--rm", "ghcr.io/example/github-mcp"]
+      "args": ["run", "-i", "--rm", "<container-image>"]
     }
   }
 }`;
@@ -2707,11 +3041,15 @@ const DEFAULT_MCP_JSON_CONFIG = `{
 // instance, lets the user add / edit / delete / disconnect, and
 // kicks off OAuth flows in a new tab.  Remote HTTP/SSE servers keep
 // the original field-based flow; Docker stdio servers are added via
-// the VS Code-style JSON editor exposed only from Add -> CLI.
+// the MCP JSON editor exposed from Add -> Docker.
 
 export function McpServersPanel({ instanceId, policyKind, disabled }) {
   const { client } = useApi();
   const [rows, setRows] = React.useState(null);
+  const [dockerCatalog, setDockerCatalog] = React.useState({
+    allow_raw_json: false,
+    servers: [],
+  });
   const [err, setErr] = React.useState(null);
   const [busy, setBusy] = React.useState(false);
   // editing: null | { mode: 'new' } | { mode: 'edit', row }
@@ -2720,8 +3058,20 @@ export function McpServersPanel({ instanceId, policyKind, disabled }) {
 
   const refresh = React.useCallback(async () => {
     try {
-      const list = await client.listMcpServers(instanceId);
+      const [list, catalog] = await Promise.all([
+        client.listMcpServers(instanceId),
+        client.listMcpDockerCatalog().catch(err => {
+          console.warn('[swarm] mcp docker catalog load failed', err);
+          return null;
+        }),
+      ]);
       setRows(Array.isArray(list) ? list : []);
+      if (catalog) {
+        setDockerCatalog({
+          allow_raw_json: Boolean(catalog?.allow_raw_json),
+          servers: Array.isArray(catalog?.servers) ? catalog.servers : [],
+        });
+      }
     } catch (e) {
       setErr(formatMcpPanelError(e, 'list'));
     }
@@ -2795,21 +3145,46 @@ export function McpServersPanel({ instanceId, policyKind, disabled }) {
     }
   };
 
-  // Edit-button path: fetch the FULL URL via getMcpServer (the listing
-  // strips query strings) so the modal pre-fills with whatever the
-  // operator originally saved.  Shows a transient busy state while
-  // the round-trip lands; on failure we fall back to the stripped row
-  // so the user can still edit (worst case: they re-paste the URL).
-  const openEdit = async (row) => {
-    if (row.server_type === 'cli') return;
+  const submitDockerCatalog = async ({ catalogId, credentials }) => {
     setBusy(true); setErr(null);
     try {
-      const detail = await client.getMcpServer(instanceId, row.name);
-      setEditing({ mode: 'edit', row: detail || row });
+      await client.putMcpDockerCatalogServer(instanceId, catalogId, credentials);
+      await refresh();
+      setEditing(null);
+    } catch (e) {
+      setErr(formatMcpPanelError(e, 'save'));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Edit-button path: remote rows fetch the FULL URL via getMcpServer
+  // because the listing strips query strings. Docker rows fetch the
+  // sealed raw MCP JSON so the textarea can round-trip what the
+  // operator pasted. On failure we still open the modal with row data.
+  const openEdit = async (row) => {
+    setBusy(true); setErr(null);
+    try {
+      if (isCatalogMcpRow(row)) {
+        setEditing({ mode: 'edit', row });
+      } else if (isDockerMcpRow(row)) {
+        const detail = await client.getMcpJsonConfig(instanceId, row.name);
+        setEditing({
+          mode: 'edit',
+          row: {
+            ...row,
+            server_type: 'docker',
+            raw_config: detail?.config || null,
+          },
+        });
+      } else {
+        const detail = await client.getMcpServer(instanceId, row.name);
+        setEditing({ mode: 'edit', row: detail || row });
+      }
     } catch (e) {
       // Fall back to listing data -- better than blocking the edit.
-      console.warn('[swarm] mcp edit: getMcpServer failed', e);
-      setEditing({ mode: 'edit', row });
+      console.warn('[swarm] mcp edit: prefill failed', e);
+      setEditing({ mode: 'edit', row: isDockerMcpRow(row) ? { ...row, server_type: 'docker' } : row });
     } finally {
       setBusy(false);
     }
@@ -2841,20 +3216,32 @@ export function McpServersPanel({ instanceId, policyKind, disabled }) {
         <p className="muted small">no MCP servers attached.</p>
       ) : (
         <ul className="mcp-row-list">
-          {rows.map(r => (
-            <McpServerRow
-              key={r.name}
-              row={r}
-              instanceId={instanceId}
-              policyKind={policyKind}
-              busy={busy || disabled}
-              onEdit={r.server_type === 'cli' ? null : () => openEdit(r)}
-              onConnect={() => connect(r.name)}
-              onDisconnect={() => disconnect(r.name)}
-              onRemove={() => remove(r.name)}
-              onCatalogUpdated={() => refresh()}
-            />
-          ))}
+          {rows.map(r => {
+            const catalogPreset = dockerCatalog.servers.find(server => server.id === r.docker_catalog_id);
+            const canEditCatalog = isCatalogMcpRow(r)
+              && Boolean(catalogPreset)
+              && (catalogPreset.credentials || []).length > 0;
+            const canEditRawDocker = isDockerMcpRow(r)
+              && !isCatalogMcpRow(r)
+              && dockerCatalog.allow_raw_json;
+            const canEdit = isCatalogMcpRow(r)
+              ? canEditCatalog
+              : (!isDockerMcpRow(r) || canEditRawDocker);
+            return (
+              <McpServerRow
+                key={r.name}
+                row={r}
+                instanceId={instanceId}
+                policyKind={policyKind}
+                busy={busy || disabled}
+                onEdit={canEdit ? () => openEdit(r) : null}
+                onConnect={() => connect(r.name)}
+                onDisconnect={() => disconnect(r.name)}
+                onRemove={() => remove(r.name)}
+                onCatalogUpdated={() => refresh()}
+              />
+            );
+          })}
         </ul>
       )}
       {editing ? (
@@ -2864,6 +3251,8 @@ export function McpServersPanel({ instanceId, policyKind, disabled }) {
           onCancel={() => setEditing(null)}
           onSubmit={submitEdit}
           onSubmitJson={submitCliJson}
+          onSubmitCatalog={submitDockerCatalog}
+          dockerCatalog={dockerCatalog}
           busy={busy}
         />
       ) : null}
@@ -2884,6 +3273,7 @@ function McpServerRow({
 }) {
   const { client } = useApi();
   const isOauth = row.auth_kind === 'oauth';
+  const transport = isDockerMcpRow(row) ? 'docker' : 'remote';
   // OAuth-not-connected is the only state that surfaces a "connect"
   // CTA; bearer / none / oauth-connected all just show the auth pill.
   const needsConnect = isOauth && !row.connected;
@@ -2965,24 +3355,27 @@ function McpServerRow({
 
   const statusBadge = (() => {
     if (checking) return <span className="mcp-row-status small muted">checking…</span>;
-    if (checkErr) return <span className="mcp-row-status small mcp-row-warning">check failed</span>;
+    if (checkErr) return <span className="mcp-row-status small mcp-row-warning">last check failed</span>;
     if (catalog) return (
       <span className="mcp-row-status small muted">
-        connected · {catalog.tools.length} tools
+        last check ok · {catalog.tools.length} tools
       </span>
     );
-    return <span className="mcp-row-status small muted">not connected</span>;
+    return <span className="mcp-row-status small muted">not checked</span>;
   })();
 
   return (
     <li className="mcp-row">
       <div className="mcp-row-head">
         <code className="mcp-row-name">{row.name}</code>
-        <span className={`mcp-auth-pill mcp-auth-${row.auth_kind}`}>
-          {row.auth_kind}
+        <span className={`mcp-transport-pill mcp-transport-${transport}`}>
+          {transport}
+        </span>
+        <span className={`mcp-auth-pill mcp-auth-${row.auth_kind || 'none'}`}>
+          auth: {row.auth_kind || 'none'}
         </span>
         {needsConnect ? (
-          <span className="mcp-row-warning small">oauth not authorised</span>
+          <span className="mcp-row-warning small">OAuth sign-in needed</span>
         ) : null}
         {statusBadge}
       </div>
@@ -3031,7 +3424,7 @@ function McpServerRow({
           hint={
             allToolNames.length === 0
               ? 'Upstream advertises no tools.'
-              : `Tools advertised by ${row.name}.  Air-gapped instances start with nothing — pick only what the task actually needs.`
+              : `Tools advertised by ${row.name}. Air-gapped agents start with nothing — pick only what the brief actually needs.`
           }
         />
       ) : null}
@@ -3039,24 +3432,28 @@ function McpServerRow({
   );
 }
 
+function isDockerMcpRow(row) {
+  return row?.server_type === 'docker' || row?.server_type === 'cli';
+}
+
+function isCatalogMcpRow(row) {
+  return Boolean(row?.docker_catalog_id);
+}
+
 export function parseMcpCliJsonConfig(text) {
+  if (!text.trim()) {
+    throw new Error('Paste an MCP config before saving.');
+  }
   let parsed;
   try {
     parsed = JSON.parse(text);
   } catch (e) {
     throw new Error(e?.message || 'The configuration is not valid JSON.');
   }
-  const servers = parsed
-    && typeof parsed === 'object'
-    && !Array.isArray(parsed)
-    && parsed.servers
-    && typeof parsed.servers === 'object'
-    && !Array.isArray(parsed.servers)
-    ? parsed.servers
-    : null;
+  const servers = mcpServerMapFromConfig(parsed);
   const names = servers ? Object.keys(servers) : [];
   if (names.length !== 1) {
-    throw new Error('Paste a VS Code-style object with exactly one entry in servers.');
+    throw new Error('Paste an MCP config with exactly one entry in `servers` or `mcpServers`.');
   }
   const server = servers[names[0]];
   if (!server || typeof server !== 'object' || Array.isArray(server)) {
@@ -3066,15 +3463,57 @@ export function parseMcpCliJsonConfig(text) {
     ? server.type
     : (server.url ? 'http' : 'stdio');
   if (serverType !== 'stdio') {
-    throw new Error('CLI JSON must describe a stdio server. Use the remote MCP form for HTTP/SSE servers.');
+    throw new Error('Docker JSON must describe a stdio server. Use the remote MCP form for HTTP/SSE servers.');
   }
   if (typeof server.command !== 'string' || server.command.trim() !== 'docker') {
-    throw new Error('CLI stdio MCP support requires command: "docker".');
+    throw new Error('Docker MCP support requires command: "docker".');
   }
   return parsed;
 }
 
-function McpServerEditModal({ initial, existingNames, onCancel, onSubmit, onSubmitJson, busy }) {
+function mcpServerMapFromConfig(parsed) {
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return null;
+  }
+  const hasServers = Object.prototype.hasOwnProperty.call(parsed, 'servers');
+  const hasMcpServers = Object.prototype.hasOwnProperty.call(parsed, 'mcpServers');
+  if (hasServers && hasMcpServers) {
+    throw new Error('Use either `servers` or `mcpServers`, not both.');
+  }
+  const key = hasServers ? 'servers' : (hasMcpServers ? 'mcpServers' : null);
+  if (!key) {
+    return null;
+  }
+  const servers = parsed[key];
+  if (!servers || typeof servers !== 'object' || Array.isArray(servers)) {
+    throw new Error(`\`${key}\` must be an object.`);
+  }
+  return servers;
+}
+
+function mcpServerNameFromConfig(config) {
+  return Object.keys(mcpServerMapFromConfig(config))[0];
+}
+
+function mcpServerNameFromText(text) {
+  if (!text.trim()) return null;
+  try {
+    return mcpServerNameFromConfig(parseMcpCliJsonConfig(text));
+  } catch {
+    return null;
+  }
+}
+
+function McpServerEditModal({
+  initial,
+  existingNames,
+  onCancel,
+  onSubmit,
+  onSubmitJson,
+  onSubmitCatalog,
+  dockerCatalog = null,
+  busy,
+}) {
   // Initial row when editing carries `name`, `url`, `auth_kind` (no
   // tokens — those stay server-side).  Credential inputs pre-fill
   // with the static MCP_KEEP_TOKEN sentinel when the existing auth
@@ -3094,7 +3533,15 @@ function McpServerEditModal({ initial, existingNames, onCancel, onSubmit, onSubm
   // shape matches: a false-positive mask reveals nothing.
   const hasExistingBearer = !isNew && initialAuthKind === 'bearer';
   const hasExistingOauthSecret = !isNew && initialAuthKind === 'oauth';
-  const [serverType, setServerType] = React.useState('remote');
+  const catalog = normalizeDockerCatalog(dockerCatalog);
+  const initialIsCatalog = isCatalogMcpRow(initial);
+  const initialIsDocker = isDockerMcpRow(initial) && !initialIsCatalog;
+  const initialCatalog = catalog.servers.find(s => s.id === initial?.docker_catalog_id)
+    || catalog.servers[0]
+    || null;
+  const [serverType, setServerType] = React.useState(
+    initialIsCatalog ? 'docker_catalog' : (initialIsDocker ? 'docker' : 'remote')
+  );
   const [name, setName] = React.useState(initial?.name || '');
   const [url, setUrl] = React.useState(initial?.url || '');
   const [authKind, setAuthKind] = React.useState(initialAuthKind);
@@ -3108,9 +3555,19 @@ function McpServerEditModal({ initial, existingNames, onCancel, onSubmit, onSubm
   const [authorizationUrl, setAuthorizationUrl] = React.useState('');
   const [tokenUrl, setTokenUrl] = React.useState('');
   const [registrationUrl, setRegistrationUrl] = React.useState('');
-  const [jsonText, setJsonText] = React.useState(DEFAULT_MCP_JSON_CONFIG);
-  const [jsonDirty, setJsonDirty] = React.useState(false);
+  const [jsonText, setJsonText] = React.useState(
+    initialIsDocker && initial?.raw_config ? JSON.stringify(initial.raw_config, null, 2) : ''
+  );
+  const [catalogId, setCatalogId] = React.useState(initial?.docker_catalog_id || initialCatalog?.id || '');
+  const [catalogCredentials, setCatalogCredentials] = React.useState(() => {
+    if (!initialIsCatalog || !initialCatalog) return {};
+    return Object.fromEntries((initialCatalog.credentials || []).map(field => [field.id, MCP_KEEP_TOKEN]));
+  });
   const [err, setErr] = React.useState(null);
+  const isDockerJsonMode = (isNew && serverType === 'docker') || (!isNew && initialIsDocker);
+  const isDockerCatalogMode = (isNew && serverType === 'docker_catalog') || (!isNew && initialIsCatalog);
+  const selectedCatalog = catalog.servers.find(s => s.id === catalogId)
+    || (isNew ? catalog.servers[0] : null);
 
   // Auth kind changed mid-edit → drop any "keep existing" sentinels.
   // Switching shape clears the stored creds anyway (server-side), so
@@ -3123,12 +3580,62 @@ function McpServerEditModal({ initial, existingNames, onCancel, onSubmit, onSubm
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authKind]);
 
+  React.useEffect(() => {
+    if (!isDockerCatalogMode || !selectedCatalog) return;
+    setCatalogCredentials(curr => {
+      const next = {};
+      for (const field of selectedCatalog.credentials || []) {
+        next[field.id] = curr[field.id] || (!isNew && initialIsCatalog ? MCP_KEEP_TOKEN : '');
+      }
+      return next;
+    });
+  }, [catalogId, isDockerCatalogMode, selectedCatalog, isNew, initialIsCatalog]);
+
   const submit = (e) => {
     e.preventDefault();
     setErr(null);
-    if (isNew && serverType === 'cli') {
+    if (isDockerCatalogMode) {
+      if (!selectedCatalog) {
+        setErr('Choose a Docker MCP preset before saving.');
+        return;
+      }
+      const serverName = mcpServerNameFromText(selectedCatalog.template || '');
+      if (!serverName) {
+        setErr('The selected Docker MCP preset has an invalid JSON template.');
+        return;
+      }
+      if (!isNew && serverName !== initial.name) {
+        setErr('Names are immutable — keep the same preset name or remove and re-add.');
+        return;
+      }
+      if (isNew && existingNames.includes(serverName)) {
+        setErr(`a server named "${serverName}" already exists`);
+        return;
+      }
+      for (const field of selectedCatalog.credentials || []) {
+        const value = catalogCredentials[field.id] || '';
+        const keepExisting = !isNew && value === MCP_KEEP_TOKEN;
+        if (field.required && !keepExisting && !String(value).trim()) {
+          setErr(`${field.label || field.id} is required`);
+          return;
+        }
+      }
+      onSubmitCatalog({ catalogId: selectedCatalog.id, credentials: catalogCredentials });
+      return;
+    }
+    if (isDockerJsonMode) {
       try {
-        onSubmitJson(parseMcpCliJsonConfig(jsonText));
+        const config = parseMcpCliJsonConfig(jsonText);
+        const serverName = Object.keys(mcpServerMapFromConfig(config))[0];
+        if (!isNew && serverName !== initial.name) {
+          setErr('Names are immutable — keep the same server name or remove and re-add.');
+          return;
+        }
+        if (isNew && existingNames.includes(serverName)) {
+          setErr(`a server named "${serverName}" already exists`);
+          return;
+        }
+        onSubmitJson(config);
       } catch (e) {
         setErr(e?.message || 'The configuration is not valid JSON.');
       }
@@ -3178,39 +3685,67 @@ function McpServerEditModal({ initial, existingNames, onCancel, onSubmit, onSubm
         </div>
         <form className="form modal-body" onSubmit={submit}>
           {isNew ? (
-            <label className="field">
-              <span>type</span>
-              <select
-                value={serverType}
-                onChange={e => setServerType(e.target.value)}
-                aria-label="MCP server type"
-              >
-                <option value="remote">remote HTTP/SSE</option>
-                <option value="cli">CLI</option>
-              </select>
-            </label>
+            <McpServerTypeField
+              value={serverType}
+              onChange={setServerType}
+              dockerCatalog={catalog}
+            />
           ) : null}
-          {isNew && serverType === 'cli' ? (
+          {isDockerCatalogMode ? (
+            <>
+              {isNew ? null : (
+                <p className="muted small">
+                  This Docker MCP server comes from an admin preset. The JSON is read-only;
+                  only credential fields are sent back to swarm.
+                </p>
+              )}
+              <label className="field">
+                <span>preset</span>
+                <select
+                  value={selectedCatalog?.id || ''}
+                  onChange={e => {
+                    setCatalogId(e.target.value);
+                    setCatalogCredentials({});
+                  }}
+                  disabled={busy || !isNew}
+                >
+                  {catalog.servers.map(server => (
+                    <option key={server.id} value={server.id}>
+                      {server.label || server.id}
+                    </option>
+                  ))}
+                </select>
+                {selectedCatalog?.description ? (
+                  <span className="hint muted small">{selectedCatalog.description}</span>
+                ) : null}
+              </label>
+              {selectedCatalog ? (
+                <>
+                  <McpCatalogCredentialFields
+                    server={selectedCatalog}
+                    values={catalogCredentials}
+                    onChange={(id, value) => setCatalogCredentials(curr => ({ ...curr, [id]: value }))}
+                    keepExisting={!isNew}
+                  />
+                  <McpDockerTemplatePreview template={selectedCatalog.template}/>
+                </>
+              ) : (
+                <p className="muted small">No Docker MCP presets are available on this swarm.</p>
+              )}
+            </>
+          ) : isDockerJsonMode ? (
             <>
               <p className="muted small">
-                Paste a VS Code-style MCP config with exactly one stdio
-                server. Swarm seals the JSON with your key and only gives
-                the agent a swarm proxy URL.
+                Paste Docker-backed MCP JSON with exactly one stdio server
+                under `servers` or `mcpServers`. Swarm seals the JSON with
+                your key and only gives the agent a swarm proxy URL.
               </p>
-              <textarea
-                className="mcp-json-textarea"
+              <McpDockerJsonField
                 value={jsonText}
-                onChange={e => {
-                  setJsonText(e.target.value);
-                  setJsonDirty(true);
-                }}
-                spellCheck={false}
+                onChange={setJsonText}
                 disabled={busy}
-                aria-label="VS Code-style MCP JSON config"
+                autoFocus={!isNew}
               />
-              {jsonDirty ? (
-                <p className="muted small mcp-json-dirty">unsaved MCP JSON changes</p>
-              ) : null}
             </>
           ) : (
             <>

@@ -30,7 +30,7 @@ export function TopBar({ view }) {
     <header className="topbar">
       <div className="topbar-brand">swarm</div>
       <nav className="topbar-nav">
-        <a className={onInstancesRoute ? 'active' : ''} href="#/">instances</a>
+        <a className={onInstancesRoute ? 'active' : ''} href="#/">agents</a>
         <a className={onArtefactsRoute ? 'active' : ''} href="#/artefacts">artefacts</a>
         <a className={onByokRoute ? 'active' : ''} href="#/keys">keys</a>
         {showAdminLink ? (

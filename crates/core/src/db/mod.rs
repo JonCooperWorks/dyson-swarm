@@ -19,6 +19,7 @@ use crate::error::StoreError;
 pub mod artefacts;
 pub mod audit;
 pub mod instances;
+pub mod mcp_catalog;
 pub mod policies;
 pub mod runtime_migrations;
 pub mod secrets;

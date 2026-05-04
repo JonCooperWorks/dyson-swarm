@@ -23,6 +23,11 @@ use crate::envelope::{CipherDirectory, EnvelopeError, SYSTEM_KEY_ID};
 use crate::error::StoreError;
 use crate::traits::{InstanceStore, SecretStore, SystemSecretStore, UserSecretStore};
 
+/// Legacy webhook verifier keys accidentally lived in `instance_secrets`
+/// for a while.  They are managed auth material, not runtime env, so the
+/// instance-secret service refuses to surface them.
+const LEGACY_WEBHOOK_SECRET_PREFIX: &str = "_webhook_";
+
 /// Errors a secrets call can surface to the API layer.  Wraps both
 /// store and envelope failures so HTTP handlers can map to the right
 /// status code in one match.
@@ -101,6 +106,9 @@ impl SecretsService {
         let rows = self.store.list(instance_id).await?;
         let mut out = Vec::with_capacity(rows.len());
         for (name, ct) in rows {
+            if name.starts_with(LEGACY_WEBHOOK_SECRET_PREFIX) {
+                continue;
+            }
             if let Ok(plain) = cipher.open(ct.as_bytes()) {
                 if let Ok(s) = String::from_utf8(plain) {
                     out.push((name, s))
@@ -125,7 +133,11 @@ impl SecretsService {
     /// decrypt.
     pub async fn list_names(&self, instance_id: &str) -> Result<Vec<String>, SecretsError> {
         let rows = self.store.list(instance_id).await?;
-        Ok(rows.into_iter().map(|(n, _)| n).collect())
+        Ok(rows
+            .into_iter()
+            .map(|(n, _)| n)
+            .filter(|n| !n.starts_with(LEGACY_WEBHOOK_SECRET_PREFIX))
+            .collect())
     }
 }
 
@@ -549,6 +561,32 @@ mod tests {
         svc.put(&owner, "inst-1", "K2", "v2").await.unwrap();
         let names = svc.list_names("inst-1").await.unwrap();
         assert_eq!(names, vec!["K1", "K2"]);
+    }
+
+    #[tokio::test]
+    async fn legacy_webhook_secrets_stay_out_of_instance_secret_views() {
+        let (_tmp, dir) = ciphers();
+        let owner = user_id(0xa1);
+        let svc = SecretsService::new(
+            Arc::new(MemSecretStore(Mutex::new(Vec::new()))),
+            instance_store().await,
+            dir.clone(),
+        );
+        svc.put(&owner, "inst-1", "PUBLIC_TOKEN", "visible")
+            .await
+            .unwrap();
+        svc.put(&owner, "inst-1", "_webhook_ping", "verifier-only")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            svc.list(&owner, "inst-1").await.unwrap(),
+            vec![("PUBLIC_TOKEN".into(), "visible".into())]
+        );
+        assert_eq!(
+            svc.list_names("inst-1").await.unwrap(),
+            vec!["PUBLIC_TOKEN".to_string()]
+        );
     }
 
     #[tokio::test]

@@ -14,11 +14,30 @@ The saved entry contains:
 - optional OAuth tokens
 - optional cached tools catalogue
 - optional enabled-tools allowlist
+- optional Docker catalog binding for admin-curated stdio servers
 
 Relevant code:
 
 - [mcp_servers.rs](../crates/core/src/mcp_servers.rs)
 - [proxy/mcp.rs](../crates/swarm/src/proxy/mcp.rs)
+
+## Docker Catalog
+
+Operators can curate Docker-backed stdio MCP servers in the admin UI. The rows
+live in the `mcp_docker_catalog` table; `[[mcp_runtime.docker_catalog]]` entries
+in `config.toml` seed config-managed rows at startup.
+
+- `allow_user_docker_json = true` keeps the trusted-node path where users can
+  paste one VS Code-style Docker MCP JSON object.
+- `allow_user_docker_json = false` (the default) removes that free-form surface; users choose
+  from `[[mcp_runtime.docker_catalog]]` presets instead.
+- each catalog preset is still the same MCP JSON shape, but credential
+  placeholders such as `{{credential.github_token}}` are rendered by swarm
+  after the user fills declared credential fields.
+
+The SPA shows the preset JSON as read-only and sends only the selected
+`catalog_id` plus credential values. Rendered runtime config and credentials are
+sealed into user secrets; the agent still receives only the swarm proxy URL.
 
 ## Proxy Surfaces
 

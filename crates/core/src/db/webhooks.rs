@@ -1,6 +1,6 @@
 //! sqlx-backed `WebhookStore` and `DeliveryStore` impls.
 //!
-//! Webhook signing keys live in `instance_secrets` (sealed under the
+//! Webhook signing keys live in `user_secrets` (sealed under the
 //! owner's age cipher) and are referenced by `secret_name`.  Delivery
 //! rows persist metadata for every fire plus the request body sealed
 //! under the same owner cipher (the store sees opaque ciphertext; the
@@ -389,7 +389,7 @@ mod tests {
             name: name.into(),
             description: "do the thing".into(),
             auth_scheme: WebhookAuthScheme::HmacSha256,
-            secret_name: Some(format!("_webhook_{name}")),
+            secret_name: Some(format!("webhook:{instance}:{name}")),
             enabled: true,
             created_at: 100,
             updated_at: 100,
@@ -736,6 +736,54 @@ mod tests {
         assert_eq!(got.description, "updated description");
         assert_eq!(got.auth_scheme, WebhookAuthScheme::Bearer);
         assert!(got.enabled);
-        assert_eq!(got.secret_name.as_deref(), Some("_webhook_ping"));
+        assert_eq!(got.secret_name.as_deref(), Some("webhook:i1:ping"));
+    }
+
+    #[tokio::test]
+    async fn migration_moves_legacy_webhook_secret_to_user_scope() {
+        let pool = open_in_memory().await.unwrap();
+        seed_instance(pool.clone(), "i1").await;
+        let store = SqlxWebhookStore::new(pool.clone());
+        let mut legacy_row = row("i1", "ping");
+        legacy_row.secret_name = Some("_webhook_ping".into());
+        store.put(&legacy_row).await.unwrap();
+        sqlx::query(
+            "INSERT INTO instance_secrets \
+             (instance_id, name, ciphertext, created_at, updated_at) \
+             VALUES ('i1', '_webhook_ping', 'sealed-webhook-secret', 10, 20)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        for statement in
+            include_str!("../../migrations/sqlite/0025_webhook_secrets_user_scope.sql").split(';')
+        {
+            let statement = statement.trim();
+            if !statement.is_empty() {
+                sqlx::query(statement).execute(&pool).await.unwrap();
+            }
+        }
+
+        let got = store.get("i1", "ping").await.unwrap().unwrap();
+        assert_eq!(got.secret_name.as_deref(), Some("webhook:i1:ping"));
+
+        let copied: String = sqlx::query_scalar(
+            "SELECT ciphertext FROM user_secrets \
+             WHERE user_id = 'legacy' AND name = 'webhook:i1:ping'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(copied, "sealed-webhook-secret");
+
+        let legacy_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM instance_secrets \
+             WHERE instance_id = 'i1' AND name = '_webhook_ping'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(legacy_count, 0);
     }
 }

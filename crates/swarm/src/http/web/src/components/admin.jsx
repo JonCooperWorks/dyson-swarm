@@ -271,37 +271,40 @@ function DockerCatalogEditorPage({ client, mode, catalogId }) {
 
 function DockerCatalogForm({ mode, initial, busy, onCancel, onSave }) {
   const isEdit = mode === 'edit';
-  const templateRef = React.useRef(null);
+  const pathListId = React.useId();
   const [id, setId] = React.useState(initial?.id || '');
   const [label, setLabel] = React.useState(initial?.label || '');
   const [description, setDescription] = React.useState(initial?.description || '');
   const [template, setTemplate] = React.useState(initial?.template || '');
-  const [placeholderName, setPlaceholderName] = React.useState('');
+  const [payloadPath, setPayloadPath] = React.useState('');
+  const [credentialName, setCredentialName] = React.useState('');
   const [err, setErr] = React.useState(null);
 
-  const placeholders = React.useMemo(() => extractCredentialPlaceholders(template), [template]);
-  const trimmedPlaceholderName = placeholderName.trim();
-  const canInsertPlaceholder = SAFE_PLACEHOLDER_NAME_RE.test(trimmedPlaceholderName);
+  const payloadPaths = React.useMemo(() => listPayloadValuePaths(template), [template]);
+  const bindings = React.useMemo(() => listCredentialBindings(template), [template]);
+  const trimmedPayloadPath = payloadPath.trim();
+  const trimmedCredentialName = credentialName.trim();
+  const canBindCredential = Boolean(trimmedPayloadPath) && SAFE_PLACEHOLDER_NAME_RE.test(trimmedCredentialName);
 
-  const insertPlaceholder = () => {
-    if (!canInsertPlaceholder) {
-      setErr('placeholder name must match [A-Za-z0-9_-]+');
+  const bindCredential = () => {
+    if (!trimmedPayloadPath) {
+      setErr('payload path is required');
       return;
     }
-    setErr(null);
-    const token = `{{credential.${trimmedPlaceholderName}}}`;
-    const textarea = templateRef.current;
-    const start = textarea?.selectionStart ?? template.length;
-    const end = textarea?.selectionEnd ?? template.length;
-    const next = `${template.slice(0, start)}${token}${template.slice(end)}`;
-    setTemplate(next);
-    setPlaceholderName('');
-    const schedule = window.requestAnimationFrame || ((fn) => setTimeout(fn, 0));
-    schedule(() => {
-      textarea?.focus();
-      const pos = start + token.length;
-      textarea?.setSelectionRange(pos, pos);
-    });
+    if (!SAFE_PLACEHOLDER_NAME_RE.test(trimmedCredentialName)) {
+      setErr('user field name must match [A-Za-z0-9_-]+');
+      return;
+    }
+    try {
+      const payload = JSON.parse(template);
+      const path = parsePayloadPath(trimmedPayloadPath);
+      setJsonPathValue(payload, path, `{{credential.${trimmedCredentialName}}}`);
+      setTemplate(JSON.stringify(payload, null, 2));
+      setCredentialName('');
+      setErr(null);
+    } catch (e) {
+      setErr(e?.message || 'could not bind credential field');
+    }
   };
 
   const submit = (e) => {
@@ -364,7 +367,6 @@ function DockerCatalogForm({ mode, initial, busy, onCancel, onSave }) {
             <label className="field admin-catalog-template-field">
               <span>JSON template</span>
               <textarea
-                ref={templateRef}
                 className="mcp-json-textarea admin-catalog-template"
                 value={template}
                 placeholder={DOCKER_CATALOG_TEMPLATE_PLACEHOLDER}
@@ -377,59 +379,98 @@ function DockerCatalogForm({ mode, initial, busy, onCancel, onSave }) {
             <div className="admin-catalog-token-workbench">
               <div className="mcp-card-head">
                 <div className="mcp-card-title">
-                  <code className="mcp-card-name">payload placeholders</code>
+                  <code className="mcp-card-name">user credential bindings</code>
                   <span className="mcp-auth-pill mcp-auth-docker">docker</span>
                 </div>
               </div>
               <div className="mcp-card-body">
                 <label className="field admin-catalog-placeholder-name">
-                  <span>placeholder name</span>
+                  <span>payload path</span>
                   <input
-                    value={placeholderName}
-                    onChange={e => setPlaceholderName(e.target.value)}
+                    list={pathListId}
+                    value={payloadPath}
+                    onChange={e => setPayloadPath(e.target.value)}
+                    placeholder="servers.github.env.GITHUB_TOKEN"
+                    disabled={busy}
+                    autoComplete="off"
+                    aria-label="payload path"
+                  />
+                  <datalist id={pathListId}>
+                    {payloadPaths.map(path => (
+                      <option key={path.path} value={path.path}>{path.preview}</option>
+                    ))}
+                  </datalist>
+                </label>
+                <label className="field admin-catalog-placeholder-name">
+                  <span>user field name</span>
+                  <input
+                    value={credentialName}
+                    onChange={e => setCredentialName(e.target.value)}
                     onKeyDown={e => {
                       if (e.key === 'Enter') {
                         e.preventDefault();
-                        insertPlaceholder();
+                        bindCredential();
                       }
                     }}
                     placeholder="github_token"
                     disabled={busy}
                     autoComplete="off"
-                    aria-label="placeholder name"
+                    aria-label="user field name"
                   />
                 </label>
                 <button
                   type="button"
-                  className="btn btn-primary admin-catalog-insert-token"
-                  onClick={insertPlaceholder}
-                  disabled={busy || !canInsertPlaceholder}
+                  className="btn btn-primary admin-catalog-bind-credential"
+                  onClick={bindCredential}
+                  disabled={busy || !canBindCredential}
                 >
-                  insert token
+                  bind credential
                 </button>
-                {placeholders.length === 0 ? (
+                {payloadPaths.length > 0 ? (
+                  <div className="admin-catalog-path-list" aria-label="payload paths">
+                    {payloadPaths.slice(0, 12).map(path => (
+                      <button
+                        key={path.path}
+                        type="button"
+                        className="admin-catalog-path-option"
+                        onClick={() => setPayloadPath(path.path)}
+                        disabled={busy}
+                      >
+                        <code>{path.path}</code>
+                        <span>{path.preview}</span>
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+                {bindings.length === 0 ? (
                   <div className="admin-catalog-placeholder-empty">
-                    <p className="muted small">no payload placeholders</p>
+                    <p className="muted small">no user credential bindings</p>
                   </div>
                 ) : (
-                  <div className="admin-catalog-credential-list" aria-label="payload placeholders">
-                    {placeholders.map(name => (
-                      <div className="admin-catalog-credential-row" key={name}>
+                  <div className="admin-catalog-credential-list" aria-label="user credential bindings">
+                    {bindings.map(binding => (
+                      <div className="admin-catalog-credential-row" key={`${binding.id}:${binding.path || ''}`}>
                         <div className="admin-catalog-credential-row-head">
                           <div className="admin-catalog-credential-title">
-                            <span className="muted small">credential field</span>
-                            <code className="mono-sm">{name}</code>
+                            <span className="muted small">user field</span>
+                            <code className="mono-sm">{binding.id}</code>
                           </div>
                           <button
                             type="button"
                             className="btn btn-ghost btn-sm"
-                            onClick={() => setPlaceholderName(name)}
+                            onClick={() => {
+                              setPayloadPath(binding.path || '');
+                              setCredentialName(binding.id);
+                            }}
                             disabled={busy}
                           >
                             reuse
                           </button>
                         </div>
-                        <code className="admin-catalog-token">{`{{credential.${name}}}`}</code>
+                        {binding.path ? (
+                          <code className="admin-catalog-token">{binding.path}</code>
+                        ) : null}
+                        <code className="admin-catalog-token">{binding.token}</code>
                       </div>
                     ))}
                   </div>
@@ -479,6 +520,138 @@ function extractCredentialPlaceholders(template) {
     }
   }
   return names;
+}
+
+function listCredentialBindings(template) {
+  try {
+    const payload = JSON.parse(template);
+    const seen = new Set();
+    const bindings = [];
+    walkJsonLeaves(payload, [], (value, path) => {
+      if (typeof value !== 'string') return;
+      for (const match of value.matchAll(CREDENTIAL_TOKEN_RE)) {
+        const id = match[1];
+        const displayPath = formatPayloadPath(path);
+        const key = `${displayPath}:${id}:${match[0]}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        bindings.push({ id, path: displayPath, token: match[0] });
+      }
+    });
+    return bindings;
+  } catch {
+    return extractCredentialPlaceholders(template).map(id => ({
+      id,
+      path: '',
+      token: `{{credential.${id}}}`,
+    }));
+  }
+}
+
+function listPayloadValuePaths(template) {
+  try {
+    const payload = JSON.parse(template);
+    const paths = [];
+    walkJsonLeaves(payload, [], (value, path) => {
+      if (path.length === 0) return;
+      paths.push({
+        path: formatPayloadPath(path),
+        preview: previewJsonValue(value),
+      });
+    });
+    return paths;
+  } catch {
+    return [];
+  }
+}
+
+function walkJsonLeaves(value, path, visit) {
+  if (Array.isArray(value)) {
+    if (value.length === 0) visit(value, path);
+    value.forEach((item, index) => walkJsonLeaves(item, [...path, index], visit));
+    return;
+  }
+  if (value && typeof value === 'object') {
+    const entries = Object.entries(value);
+    if (entries.length === 0) visit(value, path);
+    entries.forEach(([key, child]) => walkJsonLeaves(child, [...path, key], visit));
+    return;
+  }
+  visit(value, path);
+}
+
+function previewJsonValue(value) {
+  const raw = typeof value === 'string' ? value : JSON.stringify(value);
+  if (raw == null) return 'null';
+  return raw.length > 42 ? `${raw.slice(0, 39)}...` : raw;
+}
+
+function formatPayloadPath(path) {
+  return path.map((part, index) => {
+    if (typeof part === 'number') return `[${part}]`;
+    if (/^[A-Za-z0-9_-]+$/.test(part)) return index === 0 ? part : `.${part}`;
+    return `[${JSON.stringify(part)}]`;
+  }).join('');
+}
+
+function parsePayloadPath(path) {
+  const segments = [];
+  let token = '';
+  for (let i = 0; i < path.length; i += 1) {
+    const char = path[i];
+    if (char === '.') {
+      if (token) {
+        segments.push(token);
+        token = '';
+      }
+      continue;
+    }
+    if (char !== '[') {
+      token += char;
+      continue;
+    }
+    if (token) {
+      segments.push(token);
+      token = '';
+    }
+    const end = path.indexOf(']', i);
+    if (end === -1) throw new Error('payload path has an unclosed bracket');
+    const raw = path.slice(i + 1, end).trim();
+    if (!raw) throw new Error('payload path has an empty bracket segment');
+    if ((raw.startsWith('"') && raw.endsWith('"')) || (raw.startsWith("'") && raw.endsWith("'"))) {
+      const json = raw.startsWith("'")
+        ? `"${raw.slice(1, -1).replaceAll('"', '\\"')}"`
+        : raw;
+      segments.push(JSON.parse(json));
+    } else if (/^\d+$/.test(raw)) {
+      segments.push(Number(raw));
+    } else {
+      segments.push(raw);
+    }
+    i = end;
+  }
+  if (token) segments.push(token);
+  if (segments.length === 0) throw new Error('payload path is required');
+  return segments;
+}
+
+function setJsonPathValue(root, path, value) {
+  let cursor = root;
+  for (let i = 0; i < path.length - 1; i += 1) {
+    const key = path[i];
+    if (cursor == null || typeof cursor !== 'object') {
+      throw new Error(`payload path ${formatPayloadPath(path.slice(0, i + 1))} is not an object`);
+    }
+    if (cursor[key] == null) {
+      cursor[key] = typeof path[i + 1] === 'number' ? [] : {};
+    }
+    cursor = cursor[key];
+  }
+  const last = path[path.length - 1];
+  if (cursor == null || typeof cursor !== 'object') {
+    throw new Error(`payload path ${formatPayloadPath(path)} cannot be set`);
+  }
+  cursor[last] = value;
 }
 
 function credentialSpecsFromTemplate(template) {

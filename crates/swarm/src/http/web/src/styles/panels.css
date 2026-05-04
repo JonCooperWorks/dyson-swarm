@@ -165,9 +165,54 @@
   gap: 14px;
 }
 
-.admin-catalog-insert-token {
+.admin-catalog-bind-credential {
   width: 100%;
   min-height: 42px;
+}
+
+.admin-catalog-path-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 220px;
+  overflow: auto;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--bg-2) 38%, transparent);
+}
+
+.admin-catalog-path-option {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  width: 100%;
+  padding: 8px 9px;
+  border: 1px solid transparent;
+  border-radius: calc(var(--radius) - 1px);
+  background: transparent;
+  color: var(--fg);
+  text-align: left;
+  cursor: pointer;
+}
+
+.admin-catalog-path-option:hover {
+  border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+.admin-catalog-path-option code {
+  max-width: 100%;
+  color: var(--fg);
+  overflow-wrap: anywhere;
+}
+
+.admin-catalog-path-option span {
+  max-width: 100%;
+  color: var(--fg-muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
 }
 
 .admin-catalog-placeholder-empty {

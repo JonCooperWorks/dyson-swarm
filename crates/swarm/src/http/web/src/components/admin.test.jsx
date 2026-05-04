@@ -85,19 +85,21 @@ describe('AdminView Docker MCP catalog', () => {
         value: baseTemplate,
       },
     });
-    const insertionPoint = baseTemplate.indexOf('""') + 1;
-    template.setSelectionRange(insertionPoint, insertionPoint);
     fireEvent.change(screen.getByLabelText('id'), { target: { value: 'github' } });
     fireEvent.change(screen.getByLabelText('label'), { target: { value: 'GitHub' } });
     fireEvent.change(screen.getByLabelText('description'), {
       target: { value: 'GitHub MCP tools' },
     });
-    fireEvent.change(screen.getByLabelText('placeholder name'), {
+    fireEvent.click(screen.getByRole('button', { name: /servers\.github\.env\.GITHUB_TOKEN/ }));
+    expect(screen.getByLabelText('payload path')).toHaveValue('servers.github.env.GITHUB_TOKEN');
+    fireEvent.change(screen.getByLabelText('user field name'), {
       target: { value: 'github_token' },
     });
-    fireEvent.click(screen.getByRole('button', { name: 'insert token' }));
+    fireEvent.click(screen.getByRole('button', { name: 'bind credential' }));
     await waitFor(() => expect(template.value).toContain('{{credential.github_token}}'));
+    expect(template.value).toContain('"GITHUB_TOKEN": "{{credential.github_token}}"');
     expect(screen.getByText('github_token')).toBeInTheDocument();
+    expect(screen.getAllByText('servers.github.env.GITHUB_TOKEN').length).toBeGreaterThan(0);
     fireEvent.click(screen.getByRole('button', { name: 'save' }));
 
     await waitFor(() => expect(client.adminPutMcpDockerCatalogServer).toHaveBeenCalledTimes(1));

@@ -33,8 +33,8 @@ socket_path = "/run/dyson-mcp-runtime/runtime.sock"
 # should leave this false and expose only catalog presets.
 allow_user_docker_json = false
 
-# Example public-node preset. Users see the JSON as a read-only preview
-# and can only fill the declared credential fields; swarm renders and
+# Example public-node Docker template. Users see the JSON as a read-only preview
+# and can only fill the declared placeholder fields; swarm renders and
 # validates the final Docker stdio MCP config server-side.
 # [[mcp_runtime.docker_catalog]]
 # id = "github"
@@ -48,14 +48,14 @@ allow_user_docker_json = false
 #       "command": "docker",
 #       "args": ["run", "--rm", "-i", "-e", "GITHUB_TOKEN", "ghcr.io/example/github-mcp:latest"],
 #       "env": {
-#         "GITHUB_TOKEN": "{{credential.github_token}}"
+#         "GITHUB_TOKEN": "{{placeholder.github_token}}"
 #       }
 #     }
 #   }
 # }
 # '''
 #
-# [[mcp_runtime.docker_catalog.credentials]]
+# [[mcp_runtime.docker_catalog.placeholders]]
 # id = "github_token"
 # label = "GitHub token"
 # description = "Personal access token used only by this MCP container"

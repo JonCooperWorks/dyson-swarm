@@ -256,7 +256,7 @@ pub struct McpRuntimeConfig {
     #[serde(default = "default_allow_user_docker_json")]
     pub allow_user_docker_json: bool,
     /// Operator-curated Docker MCP templates.  Users see these as a
-    /// read-only JSON preview plus credential fields; swarm renders
+    /// read-only JSON preview plus placeholder fields; swarm renders
     /// and validates the final MCP JSON server-side.
     #[serde(default)]
     pub docker_catalog: Vec<McpDockerCatalogServer>,

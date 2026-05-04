@@ -195,15 +195,13 @@ mod tests {
     use crate::backup::local::LocalDiskBackupSink;
     use crate::db::instances::SqlxInstanceStore;
     use crate::db::open_in_memory;
-    use crate::db::secrets::SqlxSecretStore;
     use crate::db::tokens::SqlxTokenStore;
     use crate::instance::InstanceService;
-    use crate::secrets::SecretsService;
     use crate::snapshot::SnapshotService;
     use crate::traits::{
         BackupSink, CreateSandboxArgs, CubeClient, HealthProber, InstanceRow, InstanceStatus,
-        InstanceStore, ProbeResult, SandboxInfo, SecretStore, SnapshotInfo, SnapshotStore,
-        TokenStore, UserRow, UserStatus,
+        InstanceStore, ProbeResult, SandboxInfo, SnapshotInfo, SnapshotStore, TokenStore, UserRow,
+        UserStatus,
     };
 
     use std::sync::Arc;
@@ -258,18 +256,12 @@ mod tests {
 
         let pool = open_in_memory().await.unwrap();
 
-        let raw_secret_store: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
         let keys = tempfile::tempdir().unwrap();
         let cipher_dir: Arc<dyn crate::envelope::CipherDirectory> =
             Arc::new(crate::envelope::AgeCipherDirectory::new(keys.path()).unwrap());
         let system_cipher = cipher_dir.system().unwrap();
         let instances_store: Arc<dyn InstanceStore> =
             Arc::new(SqlxInstanceStore::new(pool.clone(), system_cipher.clone()));
-        let secrets_svc = Arc::new(SecretsService::new(
-            raw_secret_store.clone(),
-            instances_store.clone(),
-            cipher_dir.clone(),
-        ));
         let user_secrets_store: Arc<dyn crate::traits::UserSecretStore> =
             Arc::new(crate::db::secrets::SqlxUserSecretStore::new(pool.clone()));
         let system_secrets_store: Arc<dyn crate::traits::SystemSecretStore> =
@@ -291,7 +283,6 @@ mod tests {
         let instance_svc = Arc::new(InstanceService::new(
             cube.clone(),
             instances_store.clone(),
-            raw_secret_store.clone(),
             tokens_store.clone(),
             "http://test/llm",
         ));
@@ -382,7 +373,6 @@ mod tests {
         let chat_token = tokens_store.mint(INSTANCE, "openai").await.unwrap();
 
         let state = AppState {
-            secrets: secrets_svc,
             user_secrets: user_secrets_svc,
             system_secrets: system_secrets_svc,
             ciphers: cipher_dir,

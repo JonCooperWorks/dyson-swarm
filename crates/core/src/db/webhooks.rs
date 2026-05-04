@@ -753,6 +753,19 @@ mod tests {
         legacy_row.secret_name = Some("_webhook_ping".into());
         store.put(&legacy_row).await.unwrap();
         sqlx::query(
+            "CREATE TABLE instance_secrets (
+                instance_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                ciphertext TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (instance_id, name)
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
             "INSERT INTO instance_secrets \
              (instance_id, name, ciphertext, created_at, updated_at) \
              VALUES ('i1', '_webhook_ping', 'sealed-webhook-secret', 10, 20)",

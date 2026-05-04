@@ -77,7 +77,6 @@ export function instanceSectionFromView(view) {
     case 'instance-model': return 'model';
     case 'instance-network': return 'network';
     case 'instance-tools': return 'tools';
-    case 'instance-secrets': return 'secrets';
     case 'instance-mcp': return 'mcp';
     case 'instance-snapshots': return 'snapshots';
     case 'instance-runtime': return 'runtime';
@@ -105,7 +104,6 @@ export function sectionHref(id, section) {
     case 'model': return `#/i/${enc}/model`;
     case 'network': return `#/i/${enc}/network`;
     case 'tools': return `#/i/${enc}/tools`;
-    case 'secrets': return `#/i/${enc}/secrets`;
     case 'mcp': return `#/i/${enc}/mcp`;
     case 'snapshots': return `#/i/${enc}/snapshots`;
     case 'runtime': return `#/i/${enc}/runtime`;
@@ -2102,7 +2100,6 @@ const DETAIL_SECTIONS = [
   { key: 'model', label: 'model' },
   { key: 'network', label: 'network' },
   { key: 'tools', label: 'tools' },
-  { key: 'secrets', label: 'secrets' },
   { key: 'mcp', label: 'MCP' },
   { key: 'snapshots', label: 'snapshots' },
   { key: 'runtime', label: 'runtime' },
@@ -2340,7 +2337,7 @@ function DetailOverflowMenu({ row, onError }) {
 
   // In-place rebuild.  Reset the dyson on its existing swarm id:
   // hire a fresh cube under the latest template, keep
-  // name/task/models/tools/network policy/secrets/MCP/bearer/DNS,
+  // name/task/models/tools/network policy/MCP/bearer/DNS,
   // and replay the sealed swarm mirror for memory, chats, knowledge
   // base, and learned skills.  In-flight work is still interrupted.
   const reset = async () => {
@@ -2349,7 +2346,7 @@ function DetailOverflowMenu({ row, onError }) {
     const warning =
       `RESET ${label} on the latest template?\n\n` +
       `The agent keeps its name, brief, models, ` +
-      `tools, network policy, secrets, MCP servers, URL, and bearer ` +
+      `tools, network policy, MCP servers, URL, and bearer ` +
       `token.  Memory, chats, knowledge base, and learned skills are ` +
       `replayed from the sealed swarm mirror.  Any in-flight work will ` +
       `be interrupted.\n\n` +
@@ -2411,8 +2408,6 @@ function DetailSectionBody({ view, instance, activeSection }) {
       return <NetworkPolicyPanel instance={instance} disabled={instance.status === 'destroyed'}/>;
     case 'tools':
       return <ToolsSection instance={instance}/>;
-    case 'secrets':
-      return <SecretsPanel instanceId={instance.id}/>;
     case 'mcp':
       return (
         <McpServersPanel
@@ -2924,8 +2919,7 @@ function SnapshotsPanel({ instanceId, disabled }) {
   // Permanent delete with explicit confirm. We optimistically remove
   // the row from the table BEFORE the network call so the UI feels
   // instant; on error we restore from the previous list and surface
-  // the message. Mirrors the same posture as deleteSecret in the
-  // SecretsPanel below.
+  // the message while the snapshot delete settles.
   const remove = async (row) => {
     const promoted = !!row.remote_uri;
     const msg = promoted
@@ -3004,136 +2998,6 @@ function SnapshotsPanel({ instanceId, disabled }) {
         </table>
       )}
     </section>
-  );
-}
-
-// ─── Secrets panel ───────────────────────────────────────────────
-
-function SecretsPanel({ instanceId }) {
-  const { client } = useApi();
-  const [names, setNames] = React.useState(null);
-  const [adding, setAdding] = React.useState(false);
-  const [err, setErr] = React.useState(null);
-  const [busy, setBusy] = React.useState(false);
-
-  const refresh = React.useCallback(async () => {
-    try {
-      const list = await client.listSecretNames(instanceId);
-      setNames(Array.isArray(list) ? list.map(r => r.name).sort() : []);
-    } catch (e) {
-      setErr(e?.message || 'list secrets failed');
-    }
-  }, [client, instanceId]);
-
-  React.useEffect(() => { refresh(); }, [refresh]);
-
-  const remove = async (name) => {
-    if (!confirm(`delete secret ${name}?`)) return;
-    setBusy(true); setErr(null);
-    try {
-      await client.deleteSecret(instanceId, name);
-      await refresh();
-    } catch (e) {
-      setErr(e?.detail || e?.message || 'delete failed');
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <section className="panel">
-      <div className="panel-header">
-        <div className="panel-title">secrets</div>
-        <div className="panel-actions">
-          <button className="btn btn-sm" onClick={() => setAdding(true)} disabled={busy}>
-            add
-          </button>
-        </div>
-      </div>
-      {err ? <div className="error">{err}</div> : null}
-      <p className="muted small">
-        Values are write-only — set here, read by the agent at runtime.  The
-        web UI lists names so existing secrets can be replaced or removed.
-      </p>
-      {names === null ? (
-        <p className="muted small">loading…</p>
-      ) : names.length === 0 ? (
-        <p className="muted small">no secrets set.</p>
-      ) : (
-        <ul className="secret-list">
-          {names.map(name => (
-            <li key={name}>
-              <code className="mono-sm">{name}</code>
-              <button className="btn btn-ghost btn-sm" onClick={() => remove(name)} disabled={busy}>
-                delete
-              </button>
-            </li>
-          ))}
-        </ul>
-      )}
-      {adding ? (
-        <AddSecretModal
-          instanceId={instanceId}
-          onClose={() => setAdding(false)}
-          onAdded={() => { setAdding(false); refresh(); }}
-        />
-      ) : null}
-    </section>
-  );
-}
-
-function AddSecretModal({ instanceId, onClose, onAdded }) {
-  const { client } = useApi();
-  const [name, setName] = React.useState('');
-  const [value, setValue] = React.useState('');
-  const [submitting, setSubmitting] = React.useState(false);
-  const [error, setError] = React.useState(null);
-
-  const submit = async (e) => {
-    e.preventDefault();
-    if (!name.trim() || !value) return;
-    setSubmitting(true); setError(null);
-    try {
-      await client.putSecret(instanceId, name.trim(), value);
-      onAdded && onAdded();
-    } catch (err) {
-      setError(err?.detail || err?.message || 'put failed');
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  return (
-    <ModalShell onClose={onClose} title="add secret">
-      <form onSubmit={submit} className="form">
-        <label className="field">
-          <span>name</span>
-          <input
-            value={name}
-            onChange={e => setName(e.target.value)}
-            placeholder="ANTHROPIC_API_KEY"
-            autoFocus
-            required
-          />
-        </label>
-        <label className="field">
-          <span>value</span>
-          <input
-            type="password"
-            value={value}
-            onChange={e => setValue(e.target.value)}
-            required
-          />
-        </label>
-        {error ? <div className="error">{error}</div> : null}
-        <div className="modal-actions">
-          <button type="submit" className="btn btn-primary" disabled={submitting}>
-            {submitting ? 'saving…' : 'save'}
-          </button>
-          <button type="button" className="btn btn-ghost" onClick={onClose}>cancel</button>
-        </div>
-      </form>
-    </ModalShell>
   );
 }
 
@@ -3265,7 +3129,7 @@ const MCP_JSON_CONFIG_EXAMPLE = `{
 
 // ─── MCP servers panel (instance detail) ──────────────────────────
 //
-// Lives next to SecretsPanel.  Lists the MCP servers attached to one
+// Lists the MCP servers attached to one
 // instance, lets the user add / edit / delete / disconnect, and
 // kicks off OAuth flows in a new tab.  Remote HTTP/SSE servers keep
 // the original field-based flow; Docker stdio servers are added via

@@ -74,8 +74,8 @@ this order:
 Sandboxes are disposable. To make that practical, swarm persists the parts
 that need to survive rebuilds and restores:
 
-- encrypted per-instance secrets
 - encrypted per-user secrets
+- MCP credential entries in encrypted per-user secrets
 - snapshots and backup metadata
 - mirrored state files (`workspace`, `chats`)
 - artefact cache

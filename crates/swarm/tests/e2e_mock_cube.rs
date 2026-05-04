@@ -32,16 +32,16 @@ use dyson_swarm::{
     config::{ProviderConfig, Providers},
     cube_client::HttpCubeClient,
     db,
-    db::{instances::SqlxInstanceStore, secrets::SqlxSecretStore, tokens::SqlxTokenStore},
+    db::{instances::SqlxInstanceStore, tokens::SqlxTokenStore},
     envelope::{AgeCipherDirectory, CipherDirectory},
     http,
     instance::InstanceService,
     proxy::{self, ProxyService, policy_check::InstancePolicy},
-    secrets::{SecretsService, SystemSecretsService, UserSecretsService},
+    secrets::{SystemSecretsService, UserSecretsService},
     snapshot::SnapshotService,
     traits::{
         AuditStore, BackupSink, CubeClient, HealthProber, InstanceRow, InstanceStore, PolicyStore,
-        ProbeResult, SecretStore, SnapshotStore, SystemSecretStore, TokenStore, UserSecretStore,
+        ProbeResult, SnapshotStore, SystemSecretStore, TokenStore, UserSecretStore,
     },
 };
 
@@ -183,7 +183,6 @@ async fn full_walkthrough() {
     let system_cipher = cipher_dir.system().unwrap();
     let instances_store: Arc<dyn InstanceStore> =
         Arc::new(SqlxInstanceStore::new(pool.clone(), system_cipher.clone()));
-    let secrets_store: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
     let tokens_store: Arc<dyn TokenStore> =
         Arc::new(SqlxTokenStore::new(pool.clone(), system_cipher));
     let user_secrets_store: Arc<dyn UserSecretStore> = Arc::new(
@@ -203,14 +202,8 @@ async fn full_walkthrough() {
     let instance_svc = Arc::new(InstanceService::new(
         cube.clone(),
         instances_store.clone(),
-        secrets_store.clone(),
         tokens_store.clone(),
         "http://swarm.test/llm",
-    ));
-    let secrets_svc = Arc::new(SecretsService::new(
-        secrets_store.clone(),
-        instances_store.clone(),
-        cipher_dir.clone(),
     ));
     let backup: Arc<dyn BackupSink> = Arc::new(LocalDiskBackupSink::new(cube.clone()));
     let snapshots_store: Arc<dyn SnapshotStore> = Arc::new(
@@ -309,7 +302,6 @@ async fn full_walkthrough() {
     ));
     std::mem::forget(cache_dir);
     let app_state = http::AppState {
-        secrets: secrets_svc,
         user_secrets: user_secrets_svc,
         system_secrets: system_secrets_svc,
         ciphers: cipher_dir.clone(),
@@ -364,18 +356,6 @@ async fn full_walkthrough() {
     let inst_id = created["id"].as_str().unwrap().to_string();
     let _proxy_token = created["proxy_token"].as_str().unwrap().to_string();
     assert_eq!(cube_state.created.lock().unwrap().len(), 1);
-
-    // Optional: secret put/delete round-trip.
-    let r = admin
-        .put(format!(
-            "{swarm_url}/v1/instances/{inst_id}/secrets/SECRET_K"
-        ))
-        .bearer_auth("admin-token")
-        .json(&json!({"value": "v"}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(r.status(), 204);
 
     // 4. Snapshot.
     let r = admin

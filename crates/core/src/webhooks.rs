@@ -67,11 +67,6 @@ pub const DEFAULT_DELIVERY_LIMIT: u32 = 50;
 pub const MAX_DELIVERY_LIMIT: u32 = 200;
 pub const DEFAULT_SIGNATURE_HEADER: &str = "x-swarm-signature";
 
-/// Legacy convention for webhook signing keys when they lived in
-/// `instance_secrets`.  Anything with this prefix is managed
-/// infrastructure state and must never be exposed to an agent runtime.
-pub const LEGACY_WEBHOOK_SECRET_PREFIX: &str = "_webhook_";
-
 /// Convention for the `secret_name` column: signing keys are stored in
 /// `user_secrets` under a per-instance, per-webhook key.  They verify
 /// inbound webhooks only; they are not agent-readable runtime secrets.
@@ -918,7 +913,7 @@ mod tests {
     use crate::network_policy::NetworkPolicy;
     use crate::traits::{
         CreateSandboxArgs, CubeClient, InstanceRow, InstanceStatus, InstanceStore, SandboxInfo,
-        SecretStore, SnapshotInfo, TokenStore, WebhookAuthScheme,
+        SnapshotInfo, TokenStore, WebhookAuthScheme,
     };
 
     struct StubCube;
@@ -982,7 +977,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn put_stores_verifier_key_outside_instance_secrets() {
+    async fn put_stores_verifier_key_in_user_secrets() {
         let pool = crate::db::open_in_memory().await.unwrap();
         let owner = "00000000000000a100000000000000a1";
         sqlx::query(
@@ -1001,8 +996,6 @@ mod tests {
         let instances_store: Arc<dyn InstanceStore> = Arc::new(
             crate::db::instances::SqlxInstanceStore::new(pool.clone(), system_cipher.clone()),
         );
-        let secret_store: Arc<dyn SecretStore> =
-            Arc::new(crate::db::secrets::SqlxSecretStore::new(pool.clone()));
         let token_store: Arc<dyn TokenStore> = Arc::new(crate::db::tokens::SqlxTokenStore::new(
             pool.clone(),
             system_cipher,
@@ -1035,7 +1028,6 @@ mod tests {
         let instance_svc = Arc::new(InstanceService::new(
             Arc::new(StubCube),
             instances_store,
-            secret_store.clone(),
             token_store,
             "http://swarm.test/llm",
         ));
@@ -1069,10 +1061,6 @@ mod tests {
             .unwrap();
 
         assert_eq!(row.secret_name.as_deref(), Some("webhook:i1:ping"));
-        assert!(
-            secret_store.list("i1").await.unwrap().is_empty(),
-            "webhook verifier keys must not be stored in agent runtime secrets"
-        );
         let stored = user_secrets
             .get(owner, "webhook:i1:ping")
             .await
@@ -1101,8 +1089,6 @@ mod tests {
         let instances_store: Arc<dyn InstanceStore> = Arc::new(
             crate::db::instances::SqlxInstanceStore::new(pool.clone(), system_cipher.clone()),
         );
-        let secret_store: Arc<dyn SecretStore> =
-            Arc::new(crate::db::secrets::SqlxSecretStore::new(pool.clone()));
         let token_store: Arc<dyn TokenStore> = Arc::new(crate::db::tokens::SqlxTokenStore::new(
             pool.clone(),
             system_cipher,
@@ -1135,7 +1121,6 @@ mod tests {
         let instance_svc = Arc::new(InstanceService::new(
             Arc::new(StubCube),
             instances_store,
-            secret_store,
             token_store,
             "http://swarm.test/llm",
         ));

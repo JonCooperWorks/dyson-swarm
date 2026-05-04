@@ -33,7 +33,11 @@ Bodies are encrypted before disk where the service expects secrecy.
 
 ## Secret Scopes
 
-Swarm uses age envelope encryption with two broad scopes:
+Swarm uses age envelope encryption for user-owned and operator-owned
+credential material. Raw credentials are not injected into the sandbox
+environment as per-instance secrets; external tool/service credentials should
+be attached through MCP so swarm can proxy and refresh them without exposing
+the upstream secret to the agent.
 
 ### Per-user secrets
 
@@ -51,6 +55,16 @@ Encrypted under the host/system age key:
 - provider API keys
 - OpenRouter provisioning key
 - other host-operator credentials
+
+### Legacy per-instance secrets
+
+Older databases may have had an `instance_secrets` table. New migrations drop
+that table, and no supported code path reads from or writes to it. Credential
+guidance is now:
+
+- use MCP for external tools and service credentials
+- use `user_secrets` for user-owned platform credentials
+- use `system_secrets` for host/operator credentials
 
 ## Why the DB Does Not Store Plaintext Tokens
 

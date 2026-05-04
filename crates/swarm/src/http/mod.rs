@@ -2,7 +2,7 @@
 //!
 //! - `/healthz` is unauthenticated (load balancers must reach it without a
 //!   bearer).
-//! - `/v1/*` (instances, snapshots, secrets, admin) is wrapped in the
+//! - `/v1/*` (instances, snapshots, admin) is wrapped in the
 //!   admin-bearer middleware.
 //! - `/llm/*` (the LLM proxy, step 14) is mounted with its own
 //!   per-instance-bearer middleware in [`crate::proxy::http`].
@@ -24,7 +24,6 @@ pub mod internal_ingest;
 pub mod internal_state;
 pub mod models;
 pub mod proxy_admin;
-pub mod secrets;
 pub mod share_public;
 pub mod shares;
 pub mod snapshots;
@@ -34,11 +33,12 @@ pub mod webhooks;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use axum::http::StatusCode;
 use axum::{Router, middleware};
 
 use crate::auth::{AuthState, UserAuthState, require_admin_role, user_middleware};
+use crate::error::StoreError;
 use crate::instance::InstanceService;
-use crate::secrets::SecretsService;
 use crate::snapshot::SnapshotService;
 use crate::traits::{HealthProber, TokenStore};
 
@@ -46,7 +46,6 @@ use crate::traits::{HealthProber, TokenStore};
 /// is an `Arc` or scalar `String`.
 #[derive(Clone)]
 pub struct AppState {
-    pub secrets: Arc<SecretsService>,
     /// Per-user opaque blobs, encrypted with the user's own age key.
     /// Stages 3 + 6 use this for OpenRouter keys and (in future) any
     /// other per-user secret material.
@@ -124,6 +123,14 @@ pub struct AppState {
     pub mcp_runtime_socket: Option<PathBuf>,
 }
 
+pub(crate) fn store_err_to_status(e: StoreError) -> StatusCode {
+    match e {
+        StoreError::NotFound => StatusCode::NOT_FOUND,
+        StoreError::Constraint(_) => StatusCode::CONFLICT,
+        StoreError::Malformed(_) | StoreError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
 /// Build the public `Router`.
 ///
 /// `auth` decides whether `/v1/*` requires an admin bearer (legacy admin
@@ -186,7 +193,6 @@ pub fn router(
     let tenant = Router::new()
         .merge(instances::router(state.clone()))
         .merge(snapshots::router(state.clone()))
-        .merge(secrets::router(state.clone()))
         .merge(byok::router(state.clone()))
         .merge(models::router(state.clone()))
         .merge(webhooks::router(state.clone()))
@@ -252,11 +258,10 @@ mod tests {
     use crate::backup::local::LocalDiskBackupSink;
     use crate::db::instances::SqlxInstanceStore;
     use crate::db::open_in_memory;
-    use crate::db::secrets::SqlxSecretStore;
     use crate::db::tokens::SqlxTokenStore;
     use crate::traits::{
         BackupSink, CreateSandboxArgs, CubeClient, HealthProber, InstanceRow, InstanceStore,
-        ProbeResult, SandboxInfo, SecretStore, SnapshotInfo, SnapshotStore, TokenStore,
+        ProbeResult, SandboxInfo, SnapshotInfo, SnapshotStore, TokenStore,
     };
 
     struct StubProber;
@@ -295,18 +300,12 @@ mod tests {
 
     async fn build_state() -> (AppState, Arc<dyn crate::traits::UserStore>) {
         let pool = open_in_memory().await.unwrap();
-        let raw: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
         let keys_tmp = tempfile::tempdir().unwrap();
         let cipher_dir: Arc<dyn crate::envelope::CipherDirectory> =
             Arc::new(crate::envelope::AgeCipherDirectory::new(keys_tmp.path()).unwrap());
         let system_cipher = cipher_dir.system().unwrap();
         let instances_store: Arc<dyn InstanceStore> =
             Arc::new(SqlxInstanceStore::new(pool.clone(), system_cipher.clone()));
-        let svc = Arc::new(SecretsService::new(
-            raw.clone(),
-            instances_store.clone(),
-            cipher_dir.clone(),
-        ));
         let user_secrets_store: Arc<dyn crate::traits::UserSecretStore> =
             Arc::new(crate::db::secrets::SqlxUserSecretStore::new(pool.clone()));
         let system_secrets_store: Arc<dyn crate::traits::SystemSecretStore> =
@@ -328,7 +327,6 @@ mod tests {
         let instance_svc = Arc::new(InstanceService::new(
             cube.clone(),
             instances_store.clone(),
-            raw.clone(),
             tokens_store.clone(),
             "http://test/llm",
         ));
@@ -376,7 +374,6 @@ mod tests {
         // the test harness exits soon after either way.
         std::mem::forget(cache_dir);
         let state = AppState {
-            secrets: svc,
             user_secrets,
             system_secrets,
             ciphers: cipher_dir,

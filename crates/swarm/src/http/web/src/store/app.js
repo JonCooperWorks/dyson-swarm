@@ -199,7 +199,6 @@ export function removeShare(instanceId, jti) {
 //   #/i/<id>/model              → model picker
 //   #/i/<id>/network            → network policy editor
 //   #/i/<id>/tools              → built-in tools picker
-//   #/i/<id>/secrets            → secrets panel
 //   #/i/<id>/mcp                → MCP servers panel
 //   #/i/<id>/snapshots          → snapshots panel
 //   #/i/<id>/runtime            → runtime KV block
@@ -218,7 +217,6 @@ const SECTION_VIEW_NAMES = {
   model: 'instance-model',
   network: 'instance-network',
   tools: 'instance-tools',
-  secrets: 'instance-secrets',
   mcp: 'instance-mcp',
   snapshots: 'instance-snapshots',
   runtime: 'instance-runtime',

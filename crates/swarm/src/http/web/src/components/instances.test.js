@@ -68,7 +68,6 @@ describe('instance section rail routing', () => {
     expect(instanceSectionFromView({ name: 'instance-model', id: 'a' })).toBe('model');
     expect(instanceSectionFromView({ name: 'instance-network', id: 'a' })).toBe('network');
     expect(instanceSectionFromView({ name: 'instance-tools', id: 'a' })).toBe('tools');
-    expect(instanceSectionFromView({ name: 'instance-secrets', id: 'a' })).toBe('secrets');
     expect(instanceSectionFromView({ name: 'instance-mcp', id: 'a' })).toBe('mcp');
     expect(instanceSectionFromView({ name: 'instance-snapshots', id: 'a' })).toBe('snapshots');
     expect(instanceSectionFromView({ name: 'instance-runtime', id: 'a' })).toBe('runtime');

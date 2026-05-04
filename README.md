@@ -46,7 +46,7 @@ sequenceDiagram
     participant Upstream as LLM or MCP upstream
 
     User->>Swarm: Create or restore an instance
-    Swarm->>Store: Persist metadata, sealed secrets, cache indexes
+    Swarm->>Store: Persist metadata, MCP/user/system secrets, cache indexes
     Swarm->>Cube: Start or reconfigure disposable sandbox
     Cube->>Agent: Run dyson with swarm-issued runtime tokens
     Agent->>Swarm: Call LLM, MCP, ingest, and state-sync surfaces

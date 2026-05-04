@@ -28,7 +28,6 @@ function makeStubClient(row, overrides = {}) {
     listShares: vi.fn().mockResolvedValue([]),
     listProviderModels: vi.fn().mockResolvedValue({ models: [] }),
     listSnapshotsForInstance: vi.fn().mockResolvedValue([]),
-    listSecretNames: vi.fn().mockResolvedValue([]),
     listMcpServers: vi.fn().mockResolvedValue([]),
     updateInstance: vi.fn().mockImplementation(async (_id, payload) => ({ ...row, ...payload })),
     changeInstanceNetwork: vi.fn().mockImplementation(async (_id, policy) => ({

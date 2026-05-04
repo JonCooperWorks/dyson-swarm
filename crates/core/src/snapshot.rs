@@ -541,14 +541,11 @@ mod tests {
     use crate::backup::local::LocalDiskBackupSink;
     use crate::db::instances::SqlxInstanceStore;
     use crate::db::open_in_memory;
-    use crate::db::secrets::SqlxSecretStore;
     use crate::db::snapshots::SqliteSnapshotStore;
     use crate::db::tokens::SqlxTokenStore;
     use crate::error::CubeError;
     use crate::instance::{CreateRequest, ENV_MODEL};
-    use crate::traits::{
-        CreateSandboxArgs, InstanceStore, SandboxInfo, SecretStore, SnapshotInfo, TokenStore,
-    };
+    use crate::traits::{CreateSandboxArgs, InstanceStore, SandboxInfo, SnapshotInfo, TokenStore};
 
     struct MockCube {
         next: Mutex<u32>,
@@ -606,7 +603,6 @@ mod tests {
         SnapshotService,
         Arc<InstanceService>,
         Arc<MockCube>,
-        Arc<dyn SecretStore>,
         Arc<dyn InstanceStore>,
         Arc<dyn SnapshotStore>,
     ) {
@@ -616,7 +612,6 @@ mod tests {
             pool.clone(),
             crate::db::test_system_cipher(),
         ));
-        let secrets: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
         let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(
             pool.clone(),
             crate::db::test_system_cipher(),
@@ -625,7 +620,6 @@ mod tests {
         let isvc = Arc::new(InstanceService::new(
             cube.clone(),
             instances.clone(),
-            secrets.clone(),
             tokens,
             "http://t/llm",
         ));
@@ -637,7 +631,7 @@ mod tests {
             sink,
             isvc.clone(),
         );
-        (svc, isvc, cube, secrets, instances, snaps)
+        (svc, isvc, cube, instances, snaps)
     }
 
     fn env_with_model() -> BTreeMap<String, String> {
@@ -648,7 +642,7 @@ mod tests {
 
     #[tokio::test]
     async fn snapshot_writes_manual_row_with_cube_id() {
-        let (svc, isvc, _cube, _secrets, _instances, snaps) = build().await;
+        let (svc, isvc, _cube, _instances, snaps) = build().await;
         let created = isvc
             .create(
                 "legacy",
@@ -675,7 +669,7 @@ mod tests {
 
     #[tokio::test]
     async fn backup_writes_backup_row_local_sink_no_remote_uri() {
-        let (svc, isvc, _cube, _secrets, _instances, snaps) = build().await;
+        let (svc, isvc, _cube, _instances, snaps) = build().await;
         let created = isvc
             .create(
                 "legacy",
@@ -737,7 +731,6 @@ mod tests {
             pool.clone(),
             crate::db::test_system_cipher(),
         ));
-        let secrets: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
         let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(
             pool.clone(),
             crate::db::test_system_cipher(),
@@ -746,7 +739,6 @@ mod tests {
         let isvc = Arc::new(InstanceService::new(
             cube.clone(),
             instances.clone(),
-            secrets,
             tokens,
             "http://t/llm",
         ));
@@ -791,7 +783,7 @@ mod tests {
         // Pin the round-trip from a service-level test so a future
         // refactor that drops the SnapshotStore::count_for_instance
         // call doesn't silently re-open the runaway-snapshot DoS.
-        let (svc, isvc, _cube, _secrets, _instances, _snaps) = build().await;
+        let (svc, isvc, _cube, _instances, _snaps) = build().await;
         let created = isvc
             .create(
                 "legacy",
@@ -876,7 +868,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_tombstones_row_and_calls_cube() {
-        let (svc, isvc, cube, _secrets, _instances, snaps) = build().await;
+        let (svc, isvc, cube, _instances, snaps) = build().await;
         let created = isvc
             .create(
                 "legacy",
@@ -911,7 +903,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_is_idempotent_on_already_deleted() {
-        let (svc, isvc, cube, _secrets, _instances, _snaps) = build().await;
+        let (svc, isvc, cube, _instances, _snaps) = build().await;
         let created = isvc
             .create(
                 "legacy",
@@ -944,7 +936,7 @@ mod tests {
         // Pre-host_ip rows still have to be deletable; we tombstone
         // the DB row but don't invoke the cube sink (which would 400
         // on empty host_ip and orphan the row forever).
-        let (svc, isvc, cube, _secrets, _instances, snaps) = build().await;
+        let (svc, isvc, cube, _instances, snaps) = build().await;
         let created = isvc
             .create(
                 "legacy",
@@ -1024,7 +1016,6 @@ mod tests {
             pool.clone(),
             crate::db::test_system_cipher(),
         ));
-        let secrets: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
         let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(
             pool.clone(),
             crate::db::test_system_cipher(),
@@ -1033,7 +1024,6 @@ mod tests {
         let isvc = Arc::new(InstanceService::new(
             cube.clone(),
             instances.clone(),
-            secrets,
             tokens,
             "http://t/llm",
         ));
@@ -1067,8 +1057,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn restore_creates_new_instance_with_carried_secrets() {
-        let (svc, isvc, _cube, secrets, _instances, _snaps) = build().await;
+    async fn restore_creates_new_instance_without_secret_carry() {
+        let (svc, isvc, _cube, _instances, _snaps) = build().await;
         let src = isvc
             .create(
                 "legacy",
@@ -1084,7 +1074,6 @@ mod tests {
             )
             .await
             .unwrap();
-        secrets.put(&src.id, "K", "carry").await.unwrap();
         // Snapshot path won't exist on disk in the test, but it also has no
         // remote_uri, so the restore proceeds without calling pull.
         let snap = svc.snapshot("legacy", &src.id).await.unwrap();
@@ -1094,8 +1083,6 @@ mod tests {
             .await
             .unwrap();
         assert_ne!(new_inst.id, src.id);
-        let copied = secrets.list(&new_inst.id).await.unwrap();
-        assert_eq!(copied, vec![("K".into(), "carry".into())]);
     }
 
     #[tokio::test]
@@ -1130,7 +1117,6 @@ mod tests {
             pool.clone(),
             crate::db::test_system_cipher(),
         ));
-        let secrets: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
         let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(
             pool.clone(),
             crate::db::test_system_cipher(),
@@ -1139,7 +1125,6 @@ mod tests {
         let isvc = Arc::new(InstanceService::new(
             cube.clone(),
             instances.clone(),
-            secrets.clone(),
             tokens,
             "http://t/llm",
         ));
@@ -1161,11 +1146,6 @@ mod tests {
             )
             .await
             .unwrap();
-        secrets
-            .put(&victim.id, "VICTIM_SECRET", "nope")
-            .await
-            .unwrap();
-
         let forged = SnapshotRow {
             id: "snap-forged-cross-owner".into(),
             owner_id: "legacy".into(),

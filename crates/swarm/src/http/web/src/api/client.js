@@ -69,7 +69,7 @@ export class SwarmClient {
   }
 
   /// In-place rebuild.  Resets the dyson on its existing swarm id:
-  /// fresh cube under the latest template, preserving config/secrets/
+  /// fresh cube under the latest template, preserving config/MCP/
   /// bearer/DNS and replaying the sealed swarm state mirror for memory,
   /// chats, kb, and skills.
   resetInstance(id) {
@@ -178,34 +178,6 @@ export class SwarmClient {
   /// directly.
   listProviderModels() {
     return this._json('/v1/models', { headers: { Accept: 'application/json' } });
-  }
-
-  // ─── Per-instance secrets ───────────────────────────────────────
-
-  // Returns names only (the backend deliberately strips values).
-  listSecretNames(instanceId) {
-    return this._json(
-      `/v1/instances/${encodeURIComponent(instanceId)}/secrets`,
-      { headers: { Accept: 'application/json' } },
-    );
-  }
-
-  putSecret(instanceId, name, value) {
-    return this._json(
-      `/v1/instances/${encodeURIComponent(instanceId)}/secrets/${encodeURIComponent(name)}`,
-      {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ value }),
-      },
-    );
-  }
-
-  deleteSecret(instanceId, name) {
-    return this._json(
-      `/v1/instances/${encodeURIComponent(instanceId)}/secrets/${encodeURIComponent(name)}`,
-      { method: 'DELETE' },
-    );
   }
 
   // ─── Per-instance webhooks ("tasks" in UI copy) ────────────────────

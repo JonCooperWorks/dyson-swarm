@@ -1221,11 +1221,10 @@
   margin-top: 12px;
 }
 .wizard-actions {
-  position: sticky;
-  bottom: 0;
-  z-index: 15;
-  padding: 10px 0 0;
-  background: linear-gradient(to top, var(--bg) 78%, transparent);
+  margin-top: auto;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+  background: var(--bg);
 }
 .setup-validity-list {
   display: grid;
@@ -2034,22 +2033,6 @@
     white-space: normal;
   }
 }
-
-/* ── Secret list ─────────────────────────────────────────────── */
-
-.secret-list {
-  list-style: none;
-  margin: 8px 0 0;
-  padding: 0;
-}
-.secret-list li {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 6px 0;
-  border-bottom: 1px solid var(--border);
-}
-.secret-list li:last-child { border-bottom: none; }
 
 /* ── BYOK page (provider keys) ───────────────────────────────────
  *

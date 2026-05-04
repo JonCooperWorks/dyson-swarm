@@ -13,16 +13,15 @@ use dyson_swarm::{
     },
     backup::{local::LocalDiskBackupSink, s3::S3BackupSink},
     config, cube_client, db,
-    db::{instances::SqlxInstanceStore, secrets::SqlxSecretStore, tokens::SqlxTokenStore},
+    db::{instances::SqlxInstanceStore, tokens::SqlxTokenStore},
     http,
     instance::InstanceService,
     logging,
     probe::{self, HttpHealthProber},
     proxy::{self, ProxyService, policy_check::InstancePolicy},
-    secrets::SecretsService,
     snapshot::SnapshotService,
     traits::{
-        AuditStore, BackupSink, CubeClient, HealthProber, InstanceStore, PolicyStore, SecretStore,
+        AuditStore, BackupSink, CubeClient, HealthProber, InstanceStore, PolicyStore,
         SnapshotStore, TokenStore, UserStore,
     },
     ttl,
@@ -124,7 +123,6 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let secrets_store: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
     let user_secrets_store: Arc<dyn dyson_swarm::traits::UserSecretStore> = Arc::new(
         dyson_swarm::db::secrets::SqlxUserSecretStore::new(pool.clone()),
     );
@@ -238,16 +236,10 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     let mut instance_svc = InstanceService::new(
         cube.clone(),
         instances_store.clone(),
-        secrets_store.clone(),
         tokens_store.clone(),
         proxy_base,
     )
     .with_llm_cidr(llm_cidr);
-    let secrets_svc = Arc::new(SecretsService::new(
-        secrets_store,
-        instances_store.clone(),
-        cipher_dir.clone(),
-    ));
     let user_secrets_svc = Arc::new(dyson_swarm::secrets::UserSecretsService::new(
         user_secrets_store,
         cipher_dir.clone(),
@@ -673,7 +665,6 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         cipher_dir.clone(),
     ));
     let app_state = http::AppState {
-        secrets: secrets_svc,
         user_secrets: user_secrets_svc,
         system_secrets: system_secrets_svc,
         ciphers: cipher_dir.clone(),

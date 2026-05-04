@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::auth::CallerIdentity;
 use crate::error::SwarmError;
-use crate::http::{AppState, secrets::store_err_to_status};
+use crate::http::{AppState, store_err_to_status};
 use crate::instance::{CreateRequest, CreatedInstance};
 use crate::network_policy::NetworkPolicy;
 use crate::traits::{InstanceRow, InstanceStatus, ListFilter, ProbeResult};

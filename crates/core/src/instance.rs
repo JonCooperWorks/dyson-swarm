@@ -1,8 +1,8 @@
 //! Instance lifecycle: create, destroy, restore.
 //!
-//! Wires `CubeClient` + `InstanceStore` + `SecretStore` + `TokenStore`. The
+//! Wires `CubeClient` + `InstanceStore` + `TokenStore`. The
 //! env map handed to the sandbox is composed via [`crate::secrets::compose_env`]
-//! using the brief's priority (template → managed → caller → existing rows).
+//! using the priority (template → managed → caller).
 //!
 //! One **proxy token per instance** is minted at create time; the
 //! `provider` column is set to `"*"` to indicate the same token authorises
@@ -91,7 +91,7 @@ use crate::now_secs;
 use crate::secrets::{UserSecretsService, compose_env};
 use crate::traits::{
     CreateSandboxArgs, CubeClient, HealthProber, InstanceRow, InstanceStatus, InstanceStore,
-    ListFilter, ProbeResult, SecretStore, TokenStore,
+    ListFilter, ProbeResult, TokenStore,
 };
 
 /// Sentinel `provider` value used for the per-instance shared proxy token.
@@ -166,7 +166,6 @@ pub const ENV_STATE_SYNC_TOKEN: &str = "SWARM_STATE_SYNC_TOKEN";
 /// and the env exposure here can't drift.
 const INGEST_PATH: &str = "/v1/internal/ingest/artefact";
 const STATE_SYNC_PATH: &str = "/v1/internal/state/file";
-const LEGACY_WEBHOOK_SECRET_PREFIX: &str = "_webhook_";
 
 /// Comma-separated ordered fallback list of model ids.  First entry
 /// matches `SWARM_MODEL`; trailing entries let agents that support
@@ -306,7 +305,6 @@ async fn restore_state_file_with_retry(
 pub struct InstanceService {
     cube: Arc<dyn CubeClient>,
     instances: Arc<dyn InstanceStore>,
-    secrets: Arc<dyn SecretStore>,
     tokens: Arc<dyn TokenStore>,
     /// Public base URL of the swarm's `/llm/` proxy mount, e.g.
     /// `http://swarm:8080/llm`.
@@ -495,42 +493,12 @@ fn validate_caller_env(env: &BTreeMap<String, String>) -> Result<(), SwarmError>
     )))
 }
 
-fn is_managed_instance_secret_name(name: &str) -> bool {
-    name.starts_with(LEGACY_WEBHOOK_SECRET_PREFIX)
-}
-
 fn compose_sandbox_env(
     managed: &BTreeMap<String, String>,
     caller: &BTreeMap<String, String>,
-    existing: &[(String, String)],
 ) -> Result<BTreeMap<String, String>, SwarmError> {
     validate_caller_env(caller)?;
-    let filtered_existing: Vec<(String, String)> = existing
-        .iter()
-        .filter_map(|(name, value)| {
-            if is_managed_instance_secret_name(name) {
-                tracing::warn!(
-                    env = %name,
-                    "sandbox env: ignoring managed instance_secret"
-                );
-                None
-            } else if is_reserved_env_name(name) {
-                tracing::warn!(
-                    env = %name,
-                    "sandbox env: ignoring reserved instance_secret override"
-                );
-                None
-            } else {
-                Some((name.clone(), value.clone()))
-            }
-        })
-        .collect();
-    Ok(compose_env(
-        &BTreeMap::new(),
-        managed,
-        caller,
-        &filtered_existing,
-    ))
+    Ok(compose_env(&BTreeMap::new(), managed, caller))
 }
 
 /// Build the `SWARM_INGEST_URL` value from the operator's `proxy_base`
@@ -751,14 +719,12 @@ impl InstanceService {
     pub fn new(
         cube: Arc<dyn CubeClient>,
         instances: Arc<dyn InstanceStore>,
-        secrets: Arc<dyn SecretStore>,
         tokens: Arc<dyn TokenStore>,
         proxy_base: impl Into<String>,
     ) -> Self {
         Self {
             cube,
             instances,
-            secrets,
             tokens,
             proxy_base: proxy_base.into(),
             reconfigurer: None,
@@ -1271,9 +1237,8 @@ impl InstanceService {
     ///
     /// Side effects on the row that DO survive the rotation:
     /// `id`, `name`, `task`, `bearer_token`, `models`, `tools`,
-    /// `pinned`, `expires_at`, `created_at`, owner.  Per-instance
-    /// secrets keyed by id likewise survive (they're never copied —
-    /// they live in `instance_secrets` keyed by swarm id, not cube id).
+    /// `pinned`, `expires_at`, `created_at`, owner, and MCP server records
+    /// keyed through user secret storage.
     ///
     /// What changes: `cube_sandbox_id` (fresh), `template_id` (target),
     /// optionally `network_policy` + `network_policy_cidrs`,
@@ -1476,10 +1441,6 @@ impl InstanceService {
             Some(t) => t,
             None => self.tokens.mint_state_sync(&source.id).await?,
         };
-        // Existing per-instance secrets pass straight through to the
-        // new cube's env envelope — same shape `restore` uses.  Note
-        // the SecretStore returns ciphertexts; we don't decrypt here.
-        let existing = self.secrets.list(&source.id).await?;
         let replay_state_files = self.state_files.clone();
         let mut managed = managed_env(
             &self.proxy_base,
@@ -1500,7 +1461,7 @@ impl InstanceService {
             managed.remove(ENV_STATE_SYNC_URL);
             managed.remove(ENV_STATE_SYNC_TOKEN);
         }
-        let env = compose_sandbox_env(&managed, &BTreeMap::new(), &existing)?;
+        let env = compose_sandbox_env(&managed, &BTreeMap::new())?;
 
         // Phase 3: spin up a fresh cube under the new template using
         // the snapshot we just took.
@@ -1733,7 +1694,6 @@ impl InstanceService {
             Some(t) => t,
             None => self.tokens.mint_state_sync(&source.id).await?,
         };
-        let existing = self.secrets.list(&source.id).await?;
         let managed = managed_env(
             &self.proxy_base,
             &proxy_token,
@@ -1745,7 +1705,7 @@ impl InstanceService {
             &source.task,
             &source.network_policy,
         );
-        let env = compose_sandbox_env(&managed, &BTreeMap::new(), &existing)?;
+        let env = compose_sandbox_env(&managed, &BTreeMap::new())?;
 
         let info = self
             .cube
@@ -1927,7 +1887,6 @@ impl InstanceService {
             Some(t) => t,
             None => self.tokens.mint_state_sync(&source.id).await?,
         };
-        let existing = self.secrets.list(&source.id).await?;
         let replay_state_files = self.state_files.clone();
         let mut managed = managed_env(
             &self.proxy_base,
@@ -1946,7 +1905,7 @@ impl InstanceService {
             managed.remove(ENV_STATE_SYNC_URL);
             managed.remove(ENV_STATE_SYNC_TOKEN);
         }
-        let env = compose_sandbox_env(&managed, &BTreeMap::new(), &existing)?;
+        let env = compose_sandbox_env(&managed, &BTreeMap::new())?;
 
         let info = self
             .cube
@@ -2113,7 +2072,6 @@ impl InstanceService {
             Some(t) => t,
             None => self.tokens.mint_state_sync(&source.id).await?,
         };
-        let existing = self.secrets.list(&source.id).await?;
         let mut managed = managed_env(
             &self.proxy_base,
             &proxy_token,
@@ -2131,7 +2089,7 @@ impl InstanceService {
         // have landed.
         managed.remove(ENV_STATE_SYNC_URL);
         managed.remove(ENV_STATE_SYNC_TOKEN);
-        let env = compose_sandbox_env(&managed, &BTreeMap::new(), &existing)?;
+        let env = compose_sandbox_env(&managed, &BTreeMap::new())?;
 
         let info = self
             .cube
@@ -2382,24 +2340,6 @@ impl InstanceService {
             mcp_servers: Vec::new(),
         };
         let created = self.create(owner_id, req).await?;
-
-        // Carry per-instance secrets.  Same owner, so the ciphertext
-        // can be copied through the store API as-is.
-        let existing = self.secrets.list(&source.id).await?;
-        for (name, value) in existing {
-            if is_managed_instance_secret_name(&name) {
-                continue;
-            }
-            if let Err(err) = self.secrets.put(&created.id, &name, &value).await {
-                tracing::warn!(
-                    source = %source.id,
-                    clone = %created.id,
-                    secret = %name,
-                    error = %err,
-                    "clone-empty: instance secret copy failed"
-                );
-            }
-        }
 
         // Carry MCP server records (URL, auth, oauth_tokens preserved).
         // Two steps: copy the rows to user_secrets under the new id,
@@ -2703,10 +2643,9 @@ impl InstanceService {
             &req.network_policy,
         );
 
-        // Templates aren't materialised inside swarm — they live in Cube.
-        // The "template" half of the merge is empty here; operators set per-
-        // instance values via PUT /secrets and they win as `existing`.
-        let env = compose_sandbox_env(&managed, &req.env, &[])?;
+        // Templates aren't materialised inside swarm — they live in Cube,
+        // so the "template" half of the merge is empty here.
+        let env = compose_sandbox_env(&managed, &req.env)?;
 
         let info = match self
             .cube
@@ -3772,9 +3711,9 @@ impl InstanceService {
     }
 
     /// Restore a new instance from a snapshot's bytes on the Cube host.
-    /// Carries `source` instance secrets across by writing them into the new
-    /// instance's `instance_secrets` rows. The caller may override or add via
-    /// `req.env`.
+    /// The caller may supply non-reserved sandbox env through `req.env`;
+    /// external credentials should be configured through MCP/user/system
+    /// secret storage instead of restore-time env.
     pub async fn restore(
         &self,
         owner_id: &str,
@@ -3786,20 +3725,12 @@ impl InstanceService {
         // Same default-no-expiry policy as `create`; opt-in via ttl_seconds.
         let expires_at = req.ttl_seconds.map(|ttl| now + ttl);
 
-        let existing = if let Some(src) = &req.source_instance_id {
+        if let Some(src) = &req.source_instance_id {
             self.instances
                 .get_for_owner(owner_id, src)
                 .await?
                 .ok_or(SwarmError::NotFound)?;
-            self.secrets
-                .list(src)
-                .await?
-                .into_iter()
-                .filter(|(name, _)| !is_managed_instance_secret_name(name))
-                .collect()
-        } else {
-            Vec::new()
-        };
+        }
 
         // Resolve policy first — same as `create`.  Bad input fails
         // before anything else lands.
@@ -3843,13 +3774,6 @@ impl InstanceService {
         let ingest_token = self.tokens.mint_ingest(&id).await?;
         let state_sync_token = self.tokens.mint_state_sync(&id).await?;
 
-        // Persist carried-over secrets early so they appear in the new
-        // instance's `existing` rows on subsequent restarts. They also feed
-        // the env map below directly (cheaper than re-reading).
-        for (name, value) in &existing {
-            self.secrets.put(&id, name, value).await?;
-        }
-
         // Identity envelope. Re-injected on restore so a fresh sandbox
         // (no SOUL.md) can seed itself; an inherited image with prior
         // self-knowledge will simply ignore them.
@@ -3865,7 +3789,7 @@ impl InstanceService {
             &req.network_policy,
         );
 
-        let env = compose_sandbox_env(&managed, &req.env, &existing)?;
+        let env = compose_sandbox_env(&managed, &req.env)?;
 
         let info = match self
             .cube
@@ -4003,7 +3927,6 @@ mod tests {
 
     use crate::db::instances::SqlxInstanceStore;
     use crate::db::open_in_memory;
-    use crate::db::secrets::SqlxSecretStore;
     use crate::db::tokens::SqlxTokenStore;
     use crate::error::CubeError;
     use crate::traits::{CubeClient, SandboxInfo, SnapshotInfo};
@@ -4072,7 +3995,7 @@ mod tests {
     }
 
     #[test]
-    fn compose_sandbox_env_ignores_reserved_existing_overrides() {
+    fn compose_sandbox_env_rejects_reserved_caller_keys_and_keeps_managed_values() {
         let managed = BTreeMap::from([
             (ENV_PROXY_TOKEN.to_string(), "managed-token".to_string()),
             (ENV_BEARER_TOKEN.to_string(), "managed-bearer".to_string()),
@@ -4081,17 +4004,12 @@ mod tests {
             (ENV_MODEL.to_string(), "openrouter/model".to_string()),
             ("APP_SETTING".to_string(), "caller".to_string()),
         ]);
-        let existing = vec![
-            (ENV_PROXY_TOKEN.to_string(), "stale-user-secret".to_string()),
-            ("API_TOKEN".to_string(), "existing-secret".to_string()),
-        ];
-        let env = compose_sandbox_env(&managed, &caller, &existing).expect("valid env");
+        let env = compose_sandbox_env(&managed, &caller).expect("valid env");
 
         assert_eq!(env[ENV_PROXY_TOKEN], "managed-token");
         assert_eq!(env[ENV_BEARER_TOKEN], "managed-bearer");
         assert_eq!(env[ENV_MODEL], "openrouter/model");
         assert_eq!(env["APP_SETTING"], "caller");
-        assert_eq!(env["API_TOKEN"], "existing-secret");
     }
 
     #[async_trait]
@@ -4165,7 +4083,6 @@ mod tests {
         InstanceService,
         Arc<MockCube>,
         Arc<dyn TokenStore>,
-        Arc<dyn SecretStore>,
         Arc<dyn InstanceStore>,
     ) {
         let pool = open_in_memory().await.unwrap();
@@ -4174,7 +4091,6 @@ mod tests {
             pool.clone(),
             crate::db::test_system_cipher(),
         ));
-        let secrets: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
         let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(
             pool,
             crate::db::test_system_cipher(),
@@ -4182,11 +4098,10 @@ mod tests {
         let svc = InstanceService::new(
             cube.clone(),
             instances.clone(),
-            secrets.clone(),
             tokens.clone(),
             "http://swarm.test:8080/llm",
         );
-        (svc, cube, tokens, secrets, instances)
+        (svc, cube, tokens, instances)
     }
 
     /// Tests share this helper so the SWARM_MODEL requirement isn't
@@ -4200,7 +4115,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_with_name_and_task_stamps_row_and_env() {
-        let (svc, cube, _tokens, _secrets, instances) = build().await;
+        let (svc, cube, _tokens, instances) = build().await;
         let created = svc
             .create(
                 "legacy",
@@ -4235,7 +4150,7 @@ mod tests {
         // sandbox.  This test is the contract: rename mutates the row,
         // but the cube was only invoked at create time, so its captured
         // env snapshot still has the original (empty) values.
-        let (svc, cube, _tokens, _secrets, _instances) = build().await;
+        let (svc, cube, _tokens, _instances) = build().await;
         let created = svc
             .create(
                 "legacy",
@@ -4268,7 +4183,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_returns_url_and_injects_managed_env() {
-        let (svc, cube, tokens, _secrets, instances) = build().await;
+        let (svc, cube, tokens, instances) = build().await;
         let mut caller = env_with_model();
         caller.insert("EXTRA".into(), "yes".into());
         let created = svc
@@ -4514,7 +4429,7 @@ mod tests {
 
     #[tokio::test]
     async fn caller_env_cannot_override_managed_control_keys() {
-        let (svc, cube, _tokens, _secrets, _instances) = build().await;
+        let (svc, cube, _tokens, _instances) = build().await;
         let mut caller = env_with_model();
         caller.insert(ENV_PROXY_URL.into(), "http://override".into());
         let err = svc
@@ -4541,7 +4456,7 @@ mod tests {
 
     #[tokio::test]
     async fn caller_env_still_allows_non_reserved_keys() {
-        let (svc, cube, _tokens, _secrets, _instances) = build().await;
+        let (svc, cube, _tokens, _instances) = build().await;
         let mut caller = env_with_model();
         caller.insert("APP_SETTING".into(), "caller-value".into());
         svc.create(
@@ -4564,7 +4479,7 @@ mod tests {
 
     #[tokio::test]
     async fn destroy_revokes_proxy_tokens_and_marks_destroyed() {
-        let (svc, cube, tokens, _secrets, instances) = build().await;
+        let (svc, cube, tokens, instances) = build().await;
         let created = svc
             .create(
                 "legacy",
@@ -4618,7 +4533,7 @@ mod tests {
 
     #[tokio::test]
     async fn destroy_unknown_returns_not_found() {
-        let (svc, _cube, _tokens, _secrets, _instances) = build().await;
+        let (svc, _cube, _tokens, _instances) = build().await;
         let err = svc
             .destroy("legacy", "nope", false)
             .await
@@ -4634,7 +4549,7 @@ mod tests {
     /// Destroyed so the API stops 502'ing on it.
     #[tokio::test]
     async fn destroy_force_proceeds_when_cube_errors() {
-        let (svc, cube, tokens, _secrets, instances) = build().await;
+        let (svc, cube, tokens, instances) = build().await;
         let created = svc
             .create(
                 "legacy",
@@ -4688,8 +4603,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn restore_carries_existing_secrets_and_uses_snapshot_path() {
-        let (svc, cube, _tokens, secrets, _instances) = build().await;
+    async fn restore_uses_snapshot_path_without_carrying_env_secrets() {
+        let (svc, cube, _tokens, _instances) = build().await;
         let src = svc
             .create(
                 "legacy",
@@ -4705,7 +4620,6 @@ mod tests {
             )
             .await
             .unwrap();
-        secrets.put(&src.id, "K", "v-existing").await.unwrap();
 
         let restored = svc
             .restore(
@@ -4732,11 +4646,10 @@ mod tests {
             captured.from_snapshot.as_deref(),
             Some(std::path::Path::new("/var/snaps/snap-1"))
         );
-        assert_eq!(captured.env["K"], "v-existing");
-
-        // Existing secrets are persisted under the new instance id too.
-        let copied = secrets.list(&restored.id).await.unwrap();
-        assert_eq!(copied, vec![("K".into(), "v-existing".into())]);
+        assert!(
+            !captured.env.contains_key("K"),
+            "restore must not read or carry per-instance secrets into sandbox env"
+        );
     }
 
     /// Recorder reconfigurer.  Captures every body push so tests can
@@ -4851,7 +4764,6 @@ mod tests {
             pool.clone(),
             crate::db::test_system_cipher(),
         ));
-        let secrets: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
         let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(
             pool,
             crate::db::test_system_cipher(),
@@ -4859,7 +4771,6 @@ mod tests {
         let svc = InstanceService::new(
             cube.clone(),
             instances,
-            secrets,
             tokens,
             "https://dyson.example.com/llm",
         );
@@ -4923,7 +4834,6 @@ mod tests {
             pool.clone(),
             crate::db::test_system_cipher(),
         ));
-        let secrets: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
         let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(
             pool,
             crate::db::test_system_cipher(),
@@ -4932,7 +4842,6 @@ mod tests {
         let svc = InstanceService::new(
             cube.clone(),
             instances.clone(),
-            secrets,
             tokens.clone(),
             "https://dyson.example.com/llm",
         )
@@ -5074,7 +4983,6 @@ mod tests {
             pool.clone(),
             crate::db::test_system_cipher(),
         ));
-        let secrets_store: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
         let recorder = Arc::new(RecordingReconfigurer::default());
         let tmp = tempfile::tempdir().unwrap();
         let dir: Arc<dyn crate::envelope::CipherDirectory> =
@@ -5083,15 +4991,9 @@ mod tests {
             Arc::new(crate::db::secrets::SqlxUserSecretStore::new(pool.clone()));
         let user_secrets = Arc::new(UserSecretsService::new(user_store, dir));
         let svc = Arc::new(
-            InstanceService::new(
-                cube,
-                instances,
-                secrets_store,
-                tokens,
-                "https://dyson.example.com/llm",
-            )
-            .with_reconfigurer(recorder.clone())
-            .with_mcp_secrets(user_secrets.clone()),
+            InstanceService::new(cube, instances, tokens, "https://dyson.example.com/llm")
+                .with_reconfigurer(recorder.clone())
+                .with_mcp_secrets(user_secrets.clone()),
         );
 
         // The age cipher rejects non-hex user ids ("legacy" is a sentinel
@@ -5725,7 +5627,6 @@ mod tests {
             pool.clone(),
             crate::db::test_system_cipher(),
         ));
-        let secrets_store: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
         let recorder = Arc::new(RecordingReconfigurer::default());
         let tmp = Box::leak(Box::new(tempfile::tempdir().unwrap()));
         let dir: Arc<dyn crate::envelope::CipherDirectory> =
@@ -5737,7 +5638,6 @@ mod tests {
             InstanceService::new(
                 cube.clone(),
                 instances.clone(),
-                secrets_store,
                 tokens.clone(),
                 "https://dyson.example.com/llm",
             )
@@ -5958,7 +5858,6 @@ mod tests {
             pool.clone(),
             crate::db::test_system_cipher(),
         ));
-        let secrets: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
         let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(
             pool.clone(),
             crate::db::test_system_cipher(),
@@ -5980,7 +5879,6 @@ mod tests {
             InstanceService::new(
                 cube.clone(),
                 instances.clone(),
-                secrets,
                 tokens,
                 "https://swarm.test/llm",
             )
@@ -6055,7 +5953,6 @@ mod tests {
             pool.clone(),
             crate::db::test_system_cipher(),
         ));
-        let secrets: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
         let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(
             pool.clone(),
             crate::db::test_system_cipher(),
@@ -6074,7 +5971,6 @@ mod tests {
             InstanceService::new(
                 cube.clone(),
                 instances.clone(),
-                secrets,
                 tokens,
                 "https://swarm.test/llm",
             )
@@ -7034,8 +6930,8 @@ mod tests {
 
     /// Build the everything-wired stack a clone test needs: the
     /// InstanceService has both a reconfigurer recorder AND mcp_secrets,
-    /// and shares its InstanceStore + SecretStore + SnapshotStore +
-    /// UserSecretsService with the SnapshotService so a single test can
+    /// and shares its InstanceStore + SnapshotStore + UserSecretsService
+    /// with the SnapshotService so a single test can
     /// exercise the full clone pipeline (snapshot → restore → MCP carry).
     /// The recorder is returned too so tests can assert what configure
     /// bodies the clone pushed to the running dyson.
@@ -7044,7 +6940,6 @@ mod tests {
         Arc<SnapshotService>,
         Arc<MockCube>,
         Arc<dyn InstanceStore>,
-        Arc<dyn SecretStore>,
         Arc<UserSecretsService>,
         Arc<RecordingReconfigurer>,
         String,
@@ -7065,7 +6960,6 @@ mod tests {
             pool.clone(),
             crate::db::test_system_cipher(),
         ));
-        let secrets_store: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
         let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(
             pool.clone(),
             crate::db::test_system_cipher(),
@@ -7082,7 +6976,6 @@ mod tests {
             InstanceService::new(
                 cube.clone(),
                 instances.clone(),
-                secrets_store.clone(),
                 tokens,
                 "https://swarm.test/llm",
             )
@@ -7097,25 +6990,16 @@ mod tests {
             backup,
             isvc.clone(),
         ));
-        (
-            isvc,
-            ssvc,
-            cube,
-            instances,
-            secrets_store,
-            user_secrets,
-            recorder,
-            owner,
-        )
+        (isvc, ssvc, cube, instances, user_secrets, recorder, owner)
     }
 
     #[tokio::test]
-    async fn clone_carries_config_files_secrets_and_mcp_onto_fresh_id() {
+    async fn clone_carries_config_files_and_mcp_onto_fresh_id() {
         // End-to-end: a Live source with name/task/models/tools/policy,
-        // an instance secret, and one MCP server gets cloned to a fresh
-        // id under a new template.  Every carried-over field round-trips,
-        // ids/bearers diverge, and the source is untouched.
-        let (isvc, ssvc, cube, instances, secrets_store, user_secrets, _recorder, owner) =
+        // and one MCP server gets cloned to a fresh id under a new
+        // template.  Every carried-over field round-trips, ids/bearers
+        // diverge, and the source is untouched.
+        let (isvc, ssvc, cube, instances, user_secrets, _recorder, owner) =
             build_with_snapshot_and_mcp().await;
 
         let src = isvc
@@ -7144,12 +7028,6 @@ mod tests {
             )
             .await
             .unwrap();
-
-        // Stash an instance secret so we can prove it round-trips.
-        // The store API takes opaque ciphertext as &str — for this test
-        // we don't need real envelope sealing; the carry-over loop just
-        // copies whatever bytes are at rest.
-        secrets_store.put(&src.id, "FOO", "bar").await.unwrap();
 
         // Stamp an oauth_tokens blob into the MCP entry so we can
         // prove the active OAuth session survives the clone.
@@ -7198,14 +7076,7 @@ mod tests {
         assert_eq!(new_row.network_policy, NetworkPolicy::Open);
         assert_eq!(new_row.status, InstanceStatus::Live);
 
-        // 3. Instance secret round-trips: the clone's row has FOO=bar.
-        let copied = secrets_store.list(&cloned.id).await.unwrap();
-        assert!(
-            copied.iter().any(|(n, v)| n == "FOO" && v == "bar"),
-            "instance secret FOO must be carried to the clone (got {copied:?})"
-        );
-
-        // 4. MCP entry was re-keyed onto the new instance, with
+        // 3. MCP entry was re-keyed onto the new instance, with
         //    oauth_tokens preserved.
         let names = crate::mcp_servers::list_names(&user_secrets, &owner, &cloned.id)
             .await
@@ -7220,14 +7091,14 @@ mod tests {
         assert_eq!(oauth.access_token, "atk");
         assert_eq!(oauth.refresh_token.as_deref(), Some("rtk"));
 
-        // 5. A snapshot was actually taken.
+        // 4. A snapshot was actually taken.
         assert_eq!(
             cube.snapshotted.lock().unwrap().len(),
             snapshots_before + 1,
             "clone must take exactly one snapshot of the source"
         );
 
-        // 6. The cube create call for the clone passed both the new
+        // 5. The cube create call for the clone passed both the new
         //    template id AND a from_snapshot path — that's the
         //    "new template, old workspace" composition.
         let captured = cube.last_create();
@@ -7237,7 +7108,7 @@ mod tests {
             "clone must hire the new cube with from_snapshot set"
         );
 
-        // 7. Source row is left running and untouched.
+        // 6. Source row is left running and untouched.
         let src_row = instances.get(&src.id).await.unwrap().unwrap();
         assert_eq!(src_row.status, InstanceStatus::Live);
         assert_eq!(src_row.template_id, "tpl-v1");
@@ -7245,7 +7116,7 @@ mod tests {
 
     #[tokio::test]
     async fn clone_rejects_destroyed_source() {
-        let (isvc, ssvc, _cube, instances, _secrets, _user_secrets, _recorder, owner) =
+        let (isvc, ssvc, _cube, instances, _user_secrets, _recorder, owner) =
             build_with_snapshot_and_mcp().await;
         let src = isvc
             .create(
@@ -7275,7 +7146,7 @@ mod tests {
 
     #[tokio::test]
     async fn clone_empty_template_id_rejected() {
-        let (isvc, ssvc, _cube, _instances, _secrets, _user_secrets, _recorder, owner) =
+        let (isvc, ssvc, _cube, _instances, _user_secrets, _recorder, owner) =
             build_with_snapshot_and_mcp().await;
         let src = isvc
             .create(
@@ -7300,10 +7171,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn clone_empty_carries_config_secrets_and_mcp_no_snapshot() {
-        // Snapshot-less clone: fresh empty cube, but config + per-instance
-        // secrets + MCP records (with oauth_tokens) all come across.
-        let (isvc, _ssvc, cube, instances, secrets_store, user_secrets, recorder, owner) =
+    async fn clone_empty_carries_config_and_mcp_no_snapshot() {
+        // Snapshot-less clone: fresh empty cube, but config + MCP records
+        // (with oauth_tokens) come across.
+        let (isvc, _ssvc, cube, instances, user_secrets, recorder, owner) =
             build_with_snapshot_and_mcp().await;
 
         let src = isvc
@@ -7328,7 +7199,6 @@ mod tests {
             )
             .await
             .unwrap();
-        secrets_store.put(&src.id, "FOO", "bar").await.unwrap();
         let mcp_entry = crate::mcp_servers::McpServerEntry {
             url: "https://api.linear.app/mcp".into(),
             auth: crate::mcp_servers::McpAuthSpec::Bearer {
@@ -7385,11 +7255,7 @@ mod tests {
             "clone-empty must hire a fresh cube without from_snapshot"
         );
 
-        // 4. Per-instance secret round-trips.
-        let copied = secrets_store.list(&cloned.id).await.unwrap();
-        assert!(copied.iter().any(|(n, v)| n == "FOO" && v == "bar"));
-
-        // 5. MCP entry was re-keyed with oauth_tokens preserved.
+        // 4. MCP entry was re-keyed with oauth_tokens preserved.
         let names = crate::mcp_servers::list_names(&user_secrets, &owner, &cloned.id)
             .await
             .unwrap();
@@ -7464,7 +7330,6 @@ mod tests {
             pool.clone(),
             crate::db::test_system_cipher(),
         ));
-        let secrets_store: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
         let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(
             pool.clone(),
             crate::db::test_system_cipher(),
@@ -7474,7 +7339,6 @@ mod tests {
             InstanceService::new(
                 cube.clone(),
                 instances.clone(),
-                secrets_store,
                 tokens,
                 "https://swarm.test/llm",
             )
@@ -7621,7 +7485,6 @@ mod tests {
             pool.clone(),
             crate::db::test_system_cipher(),
         ));
-        let secrets_store: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
         let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(
             pool.clone(),
             crate::db::test_system_cipher(),
@@ -7641,7 +7504,6 @@ mod tests {
             InstanceService::new(
                 cube.clone(),
                 instances.clone(),
-                secrets_store,
                 tokens,
                 "https://swarm.test/llm",
             )
@@ -7875,7 +7737,7 @@ mod tests {
 
     #[tokio::test]
     async fn clone_unknown_source_returns_not_found() {
-        let (isvc, ssvc, _cube, _instances, _secrets, _user_secrets, _recorder, owner) =
+        let (isvc, ssvc, _cube, _instances, _user_secrets, _recorder, owner) =
             build_with_snapshot_and_mcp().await;
         let err = isvc
             .clone_instance(&owner, "no-such-instance", &ssvc, "tpl-v2", None)

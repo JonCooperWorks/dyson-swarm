@@ -70,13 +70,12 @@ mod tests {
 
     use crate::db::instances::SqlxInstanceStore;
     use crate::db::open_in_memory;
-    use crate::db::secrets::SqlxSecretStore;
     use crate::db::tokens::SqlxTokenStore;
     use crate::error::CubeError;
     use crate::instance::{CreateRequest, ENV_MODEL};
     use crate::traits::{
-        CreateSandboxArgs, CubeClient, InstanceStatus, InstanceStore, SandboxInfo, SecretStore,
-        SnapshotInfo, TokenStore,
+        CreateSandboxArgs, CubeClient, InstanceStatus, InstanceStore, SandboxInfo, SnapshotInfo,
+        TokenStore,
     };
 
     #[derive(Default)]
@@ -123,7 +122,6 @@ mod tests {
             pool.clone(),
             crate::db::test_system_cipher(),
         ));
-        let secrets: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
         let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(
             pool.clone(),
             crate::db::test_system_cipher(),
@@ -131,7 +129,6 @@ mod tests {
         let svc = Arc::new(InstanceService::new(
             cube.clone(),
             instances.clone(),
-            secrets,
             tokens,
             "http://t/llm",
         ));

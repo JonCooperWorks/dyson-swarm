@@ -53,7 +53,7 @@ impl Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Per-instance secret material.
+    /// System-scope secret material.
     Secrets {
         #[command(subcommand)]
         action: SecretsAction,
@@ -138,26 +138,6 @@ pub enum Command {
 
 #[derive(Debug, Subcommand)]
 pub enum SecretsAction {
-    /// Set or overwrite a secret on an instance.
-    ///
-    /// Pass `--stdin` to read the secret value from stdin instead of
-    /// argv.  Stdin mode avoids leaking the value to /proc/<pid>/cmdline
-    /// and auditd's execve records — mandatory for production
-    /// bootstrap, optional for ad-hoc CLI use.
-    Set {
-        instance: String,
-        name: String,
-        /// Secret value.  Omit when `--stdin` is set.
-        #[arg(default_value = "")]
-        value: String,
-        /// Read the secret value from stdin (until EOF; trailing newline
-        /// trimmed).  Pass secret via stdin to avoid argv leakage to
-        /// /proc/<pid>/cmdline and auditd logs.
-        #[arg(long, default_value_t = false)]
-        stdin: bool,
-    },
-    /// Remove a secret from an instance.
-    Clear { instance: String, name: String },
     /// Set or overwrite a system-scope secret (provider api keys, etc.).
     /// Bypasses the HTTP API and writes straight to the DB + cipher dir,
     /// so it's runnable on the swarm host without an admin bearer.
@@ -253,12 +233,8 @@ fn parse_kv(s: &str) -> Result<(String, String), String> {
 ///   - stdin read failure (rare; usually a closed pipe).
 fn resolve_stdin_secret(action: &mut SecretsAction) -> Result<(), String> {
     match action {
-        SecretsAction::Set {
-            value, stdin, name, ..
-        }
-        | SecretsAction::SystemSet { value, stdin, name } => resolve_one(value, *stdin, name),
-        SecretsAction::Clear { .. }
-        | SecretsAction::SystemClear { .. }
+        SecretsAction::SystemSet { value, stdin, name } => resolve_one(value, *stdin, name),
+        SecretsAction::SystemClear { .. }
         | SecretsAction::SystemList
         | SecretsAction::SystemGet { .. } => Ok(()),
     }

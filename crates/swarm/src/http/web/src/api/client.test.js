@@ -65,14 +65,6 @@ describe('SwarmClient', () => {
     expect(url).toBe('/v1/instances/abc%2F..%2Fadmin');
   });
 
-  test('encodes secret name path component', async () => {
-    const fetchImpl = vi.fn().mockResolvedValue(noContentResponse());
-    const client = new SwarmClient({ fetch: fetchImpl, getToken: () => null });
-    await client.putSecret('inst1', 'API KEY', 'val');
-    const [url] = fetchImpl.mock.calls[0];
-    expect(url).toBe('/v1/instances/inst1/secrets/API%20KEY');
-  });
-
   test('remote MCP add/update uses the per-server API path', async () => {
     const fetchImpl = vi.fn().mockResolvedValue(jsonResponse({ ok: true }));
     const client = new SwarmClient({ fetch: fetchImpl, getToken: () => null });

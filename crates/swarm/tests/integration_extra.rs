@@ -39,18 +39,17 @@ use dyson_swarm::{
     config::{ProviderConfig, Providers},
     cube_client::HttpCubeClient,
     db,
-    db::{instances::SqlxInstanceStore, secrets::SqlxSecretStore, tokens::SqlxTokenStore},
+    db::{instances::SqlxInstanceStore, tokens::SqlxTokenStore},
     envelope::{AgeCipherDirectory, CipherDirectory},
     http,
     instance::InstanceService,
     openrouter::{MintedKey, OpenRouterError, Provisioning, UserOrKeyResolver},
     proxy::{self, ProxyService, policy_check::InstancePolicy},
-    secrets::{SecretsService, SystemSecretsService, UserSecretsService},
+    secrets::{SystemSecretsService, UserSecretsService},
     snapshot::SnapshotService,
     traits::{
         AuditStore, BackupSink, CubeClient, HealthProber, InstanceRow, InstanceStore, PolicyStore,
-        ProbeResult, SecretStore, SnapshotStore, SystemSecretStore, TokenStore, UserSecretStore,
-        UserStore,
+        ProbeResult, SnapshotStore, SystemSecretStore, TokenStore, UserSecretStore, UserStore,
     },
 };
 
@@ -225,7 +224,6 @@ async fn build_stack(subject_for_no_bearer: &str) -> Stack {
     let system_cipher = cipher_dir.system().unwrap();
     let instances_store: Arc<dyn InstanceStore> =
         Arc::new(SqlxInstanceStore::new(pool.clone(), system_cipher.clone()));
-    let secrets_store: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
     let tokens_store: Arc<dyn TokenStore> =
         Arc::new(SqlxTokenStore::new(pool.clone(), system_cipher));
     let user_secrets_store: Arc<dyn UserSecretStore> = Arc::new(
@@ -245,14 +243,8 @@ async fn build_stack(subject_for_no_bearer: &str) -> Stack {
     let instance_svc = Arc::new(InstanceService::new(
         cube.clone(),
         instances_store.clone(),
-        secrets_store.clone(),
         tokens_store.clone(),
         "http://swarm.test/llm",
-    ));
-    let secrets_svc = Arc::new(SecretsService::new(
-        secrets_store.clone(),
-        instances_store.clone(),
-        cipher_dir.clone(),
     ));
     let backup: Arc<dyn BackupSink> = Arc::new(LocalDiskBackupSink::new(cube.clone()));
     let snapshots_store: Arc<dyn SnapshotStore> = Arc::new(
@@ -382,7 +374,6 @@ async fn build_stack(subject_for_no_bearer: &str) -> Stack {
     ));
     std::mem::forget(cache_dir);
     let app_state = http::AppState {
-        secrets: secrets_svc,
         user_secrets: user_secrets_svc,
         system_secrets: system_secrets_svc,
         ciphers: cipher_dir.clone(),
@@ -482,16 +473,6 @@ async fn tenancy_isolation_blocks_cross_user_access() {
     let r = admin
         .get(format!("{}/v1/instances/{inst_id}", stack.base))
         .bearer_auth(&bob_token)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(r.status(), 404);
-
-    // Bob trying to write a secret to alice's instance: 404.
-    let r = admin
-        .put(format!("{}/v1/instances/{inst_id}/secrets/X", stack.base))
-        .bearer_auth(&bob_token)
-        .json(&json!({"value": "leaked"}))
         .send()
         .await
         .unwrap();

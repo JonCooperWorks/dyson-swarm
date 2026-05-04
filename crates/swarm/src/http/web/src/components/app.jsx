@@ -45,7 +45,6 @@ function renderView(view) {
     case 'instance-model':
     case 'instance-network':
     case 'instance-tools':
-    case 'instance-secrets':
     case 'instance-mcp':
     case 'instance-snapshots':
     case 'instance-runtime':

@@ -17,7 +17,7 @@ use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
-use crate::http::{AppState, secrets::store_err_to_status};
+use crate::http::{AppState, store_err_to_status};
 use crate::openrouter::USER_OR_KEY_SECRET_NAME;
 use crate::traits::{UserRow, UserStatus};
 

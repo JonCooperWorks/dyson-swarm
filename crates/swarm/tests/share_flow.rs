@@ -28,16 +28,16 @@ use dyson_swarm::{
     backup::local::LocalDiskBackupSink,
     config::Providers,
     db,
-    db::{instances::SqlxInstanceStore, secrets::SqlxSecretStore, tokens::SqlxTokenStore},
+    db::{instances::SqlxInstanceStore, tokens::SqlxTokenStore},
     envelope::{AgeCipherDirectory, CipherDirectory},
     http,
     instance::InstanceService,
-    secrets::{SecretsService, SystemSecretsService, UserSecretsService},
+    secrets::{SystemSecretsService, UserSecretsService},
     snapshot::SnapshotService,
     traits::{
         BackupSink, CreateSandboxArgs, CubeClient, HealthProber, InstanceRow, InstanceStatus,
-        InstanceStore, ProbeResult, SandboxInfo, SecretStore, SnapshotInfo, SnapshotStore,
-        SystemSecretStore, TokenStore, UserSecretStore, UserStore,
+        InstanceStore, ProbeResult, SandboxInfo, SnapshotInfo, SnapshotStore, SystemSecretStore,
+        TokenStore, UserSecretStore, UserStore,
     },
 };
 use serde_json::json;
@@ -156,7 +156,6 @@ async fn build() -> Fixture {
     let system_cipher = cipher_dir.system().unwrap();
     let instances_store: Arc<dyn InstanceStore> =
         Arc::new(SqlxInstanceStore::new(pool.clone(), system_cipher.clone()));
-    let secrets_store: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
     let tokens_store: Arc<dyn TokenStore> =
         Arc::new(SqlxTokenStore::new(pool.clone(), system_cipher));
     let user_secrets_store: Arc<dyn UserSecretStore> = Arc::new(
@@ -173,11 +172,6 @@ async fn build() -> Fixture {
         system_secrets_store,
         cipher_dir.clone(),
     ));
-    let secrets_svc = Arc::new(SecretsService::new(
-        secrets_store.clone(),
-        instances_store.clone(),
-        cipher_dir.clone(),
-    ));
     let backup: Arc<dyn BackupSink> = Arc::new(LocalDiskBackupSink::new(cube.clone()));
     let snapshots_store: Arc<dyn SnapshotStore> = Arc::new(
         dyson_swarm::db::snapshots::SqliteSnapshotStore::new(pool.clone()),
@@ -189,7 +183,6 @@ async fn build() -> Fixture {
     let instance_svc = Arc::new(InstanceService::new(
         cube.clone(),
         instances_store.clone(),
-        secrets_store.clone(),
         tokens_store.clone(),
         "http://swarm.test/llm",
     ));
@@ -268,7 +261,6 @@ async fn build() -> Fixture {
     std::mem::forget(cache_dir);
 
     let app_state = http::AppState {
-        secrets: secrets_svc,
         user_secrets: user_secrets_svc,
         system_secrets: system_secrets_svc,
         ciphers: cipher_dir.clone(),

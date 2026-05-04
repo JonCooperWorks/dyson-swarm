@@ -11,7 +11,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::post;
 
-use crate::http::{AppState, secrets::store_err_to_status};
+use crate::http::{AppState, store_err_to_status};
 
 pub fn router(state: AppState) -> Router {
     Router::new()
@@ -56,15 +56,13 @@ mod tests {
     use crate::backup::local::LocalDiskBackupSink;
     use crate::db::instances::SqlxInstanceStore;
     use crate::db::open_in_memory;
-    use crate::db::secrets::SqlxSecretStore;
     use crate::db::tokens::SqlxTokenStore;
     use crate::http::AppState;
     use crate::instance::InstanceService;
-    use crate::secrets::SecretsService;
     use crate::snapshot::SnapshotService;
     use crate::traits::{
         BackupSink, CreateSandboxArgs, CubeClient, HealthProber, InstanceRow, InstanceStatus,
-        InstanceStore, ProbeResult, SandboxInfo, SecretStore, SnapshotInfo, TokenStore,
+        InstanceStore, ProbeResult, SandboxInfo, SnapshotInfo, TokenStore,
     };
 
     struct StubCube;
@@ -103,18 +101,12 @@ mod tests {
 
     async fn build() -> (AppState, Arc<dyn TokenStore>, String) {
         let pool = open_in_memory().await.unwrap();
-        let raw: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
         let keys_tmp = tempfile::tempdir().unwrap();
         let cipher_dir: Arc<dyn crate::envelope::CipherDirectory> =
             Arc::new(crate::envelope::AgeCipherDirectory::new(keys_tmp.path()).unwrap());
         let system_cipher = cipher_dir.system().unwrap();
         let instances_store: Arc<dyn InstanceStore> =
             Arc::new(SqlxInstanceStore::new(pool.clone(), system_cipher.clone()));
-        let svc = Arc::new(SecretsService::new(
-            raw.clone(),
-            instances_store.clone(),
-            cipher_dir.clone(),
-        ));
         let user_secrets_store: Arc<dyn crate::traits::UserSecretStore> =
             Arc::new(crate::db::secrets::SqlxUserSecretStore::new(pool.clone()));
         let system_secrets_store: Arc<dyn crate::traits::SystemSecretStore> =
@@ -133,7 +125,6 @@ mod tests {
         let instance_svc = Arc::new(InstanceService::new(
             cube.clone(),
             instances_store.clone(),
-            raw.clone(),
             tokens_store.clone(),
             "http://test/llm",
         ));
@@ -209,7 +200,6 @@ mod tests {
         ));
         std::mem::forget(cache_dir);
         let state = AppState {
-            secrets: svc,
             user_secrets,
             system_secrets,
             ciphers: cipher_dir,

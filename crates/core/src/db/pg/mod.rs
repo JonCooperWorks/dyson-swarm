@@ -8,8 +8,9 @@
 //! This module ships *empty* in this codebase. Phase 7 lays down the seam
 //! so adding Pg later is a contained, additive change:
 //!
-//! 1. Implement `PgInstanceStore`, `PgSecretStore`, `PgTokenStore`,
-//!    `PgUserStore`, `PgSnapshotStore`, `PgPolicyStore`, `PgAuditStore`
+//! 1. Implement `PgInstanceStore`, `PgUserSecretStore`,
+//!    `PgSystemSecretStore`, `PgTokenStore`, `PgUserStore`,
+//!    `PgSnapshotStore`, `PgPolicyStore`, `PgAuditStore`
 //!    — one per existing trait, mirroring the sqlite/*.rs files.
 //! 2. Add a `db::open_pg(url)` that mirrors `db::open(path)` but builds a
 //!    `PgPool` and runs `migrations/postgres/`.

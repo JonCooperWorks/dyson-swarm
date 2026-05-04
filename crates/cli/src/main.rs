@@ -12,12 +12,12 @@ use dyson_swarm_core::{
     api_client::ApiClient,
     backup::{local::LocalDiskBackupSink, s3::S3BackupSink},
     config, cube_client, db,
-    db::{instances::SqlxInstanceStore, secrets::SqlxSecretStore, tokens::SqlxTokenStore},
+    db::{instances::SqlxInstanceStore, tokens::SqlxTokenStore},
     instance::{InstanceService, SYSTEM_OWNER},
     snapshot::SnapshotService,
     traits::{
-        BackupSink, CubeClient, InstanceStatus, InstanceStore, ListFilter, SecretStore,
-        SnapshotStore, TokenStore,
+        BackupSink, CubeClient, InstanceStatus, InstanceStore, ListFilter, SnapshotStore,
+        TokenStore,
     },
 };
 
@@ -300,7 +300,6 @@ async fn build_ops_services(cfg: &config::Config) -> Result<OpsServices, String>
     }
     let instances: Arc<dyn InstanceStore> =
         Arc::new(SqlxInstanceStore::new(pool.clone(), system_cipher.clone()));
-    let secrets: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
     let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(pool.clone(), system_cipher));
     let snapshots_store: Arc<dyn SnapshotStore> =
         Arc::new(db::snapshots::SqliteSnapshotStore::new(pool.clone()));
@@ -336,7 +335,7 @@ async fn build_ops_services(cfg: &config::Config) -> Result<OpsServices, String>
         .map(|host| format!("{host}/32"));
 
     let mut instance_svc =
-        InstanceService::new(cube.clone(), instances.clone(), secrets, tokens, proxy_base)
+        InstanceService::new(cube.clone(), instances.clone(), tokens, proxy_base)
             .with_llm_cidr(llm_cidr)
             .with_mcp_secrets(user_secrets_svc);
     if let Ok(r) = dyson_swarm_core::dyson_reconfig::DysonReconfigurerHttp::new(
@@ -580,7 +579,7 @@ fn build_api_client(cfg: &config::Config, dangerous_no_auth: bool) -> Option<Api
 
 async fn run_secrets(
     cfg: &config::Config,
-    dangerous_no_auth: bool,
+    _dangerous_no_auth: bool,
     action: SecretsAction,
 ) -> ExitCode {
     // System-scope variants bypass HTTP and operate on the DB + key
@@ -589,46 +588,7 @@ async fn run_secrets(
     // yet, and there's no admin user to mint a bearer for in a fresh
     // deployment) and the operator running this CLI on the swarm
     // host already has filesystem access to both pieces.
-    if let SecretsAction::SystemSet { .. }
-    | SecretsAction::SystemClear { .. }
-    | SecretsAction::SystemList
-    | SecretsAction::SystemGet { .. } = action
-    {
-        return run_system_secret(cfg, action).await;
-    }
-
-    let Some(client) = build_api_client(cfg, dangerous_no_auth) else {
-        return ExitCode::FAILURE;
-    };
-    let result = match action {
-        SecretsAction::Set {
-            instance,
-            name,
-            value,
-            stdin: _,
-        } => {
-            let path = format!("/v1/instances/{instance}/secrets/{name}");
-            client
-                .send_json(Method::PUT, &path, &serde_json::json!({"value": value}))
-                .await
-        }
-        SecretsAction::Clear { instance, name } => {
-            let path = format!("/v1/instances/{instance}/secrets/{name}");
-            client.send_no_body(Method::DELETE, &path).await
-        }
-        // The Set/Clear/List/Get system variants returned above.
-        SecretsAction::SystemSet { .. }
-        | SecretsAction::SystemClear { .. }
-        | SecretsAction::SystemList
-        | SecretsAction::SystemGet { .. } => unreachable!(),
-    };
-    match result {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(err) => {
-            eprintln!("error: {err:#}");
-            ExitCode::FAILURE
-        }
-    }
+    run_system_secret(cfg, action).await
 }
 
 /// System-secret CLI handler.  Opens the sqlite DB + envelope key dir
@@ -731,7 +691,6 @@ async fn run_system_secret(cfg: &config::Config, action: SecretsAction) -> ExitC
                 }
             }
         }
-        _ => unreachable!(),
     }
 }
 

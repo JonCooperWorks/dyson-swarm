@@ -368,7 +368,7 @@ pub trait InstanceStore: Send + Sync {
     /// `template_id` (and optionally network policy) onto a fresh
     /// cube without changing the row's swarm-side id.  Used by the
     /// rotate-template and change-network flows so DNS, bearer
-    /// tokens, secrets and webhook URLs all survive the operation.
+    /// tokens, MCP configuration and webhook URLs all survive the operation.
     /// Resets `last_probe_at` / `last_probe_status` (the new sandbox
     /// has no probe history yet) and clears `rotated_to` (the row
     /// IS the surviving identity now).  `last_active_at` is bumped
@@ -390,25 +390,10 @@ pub trait InstanceStore: Send + Sync {
     async fn set_tools(&self, id: &str, tools: &[String]) -> Result<(), StoreError>;
 }
 
-/// Per-instance secrets — opaque ciphertexts stored against an instance row.
-///
-/// All methods deal in **ciphertext**: the store is dumb sqlite; encryption
-/// happens one layer up in `SecretsService`, which routes through the
-/// instance owner's [`crate::envelope::EnvelopeCipher`].  The `&str` shape
-/// is fine because age's armored output is ASCII, mapped to a TEXT column.
-#[async_trait]
-pub trait SecretStore: Send + Sync {
-    async fn put(&self, instance_id: &str, name: &str, ciphertext: &str) -> Result<(), StoreError>;
-    async fn delete(&self, instance_id: &str, name: &str) -> Result<(), StoreError>;
-    /// Returns `(name, ciphertext)` pairs ordered by name.  The service
-    /// layer decrypts.
-    async fn list(&self, instance_id: &str) -> Result<Vec<(String, String)>, StoreError>;
-}
-
 /// Per-user opaque ciphertexts.  Same dumb-store contract as
-/// [`SecretStore`]; the service layer seals/opens with the user's
-/// own [`crate::envelope::EnvelopeCipher`], so cross-user reads of
-/// the raw column yield only undecryptable bytes.
+/// system secrets; the service layer seals/opens with the user's own
+/// [`crate::envelope::EnvelopeCipher`], so cross-user reads of the raw
+/// column yield only undecryptable bytes.
 #[async_trait]
 pub trait UserSecretStore: Send + Sync {
     async fn put(&self, user_id: &str, name: &str, ciphertext: &str) -> Result<(), StoreError>;

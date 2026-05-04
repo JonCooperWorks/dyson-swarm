@@ -332,15 +332,13 @@ mod tests {
     use crate::config::{ProviderConfig, Providers};
     use crate::db::instances::SqlxInstanceStore;
     use crate::db::open_in_memory;
-    use crate::db::secrets::SqlxSecretStore;
     use crate::db::tokens::SqlxTokenStore;
     use crate::http::AppState;
     use crate::instance::InstanceService;
-    use crate::secrets::SecretsService;
     use crate::snapshot::SnapshotService;
     use crate::traits::{
         BackupSink, CreateSandboxArgs, CubeClient, HealthProber, InstanceRow, ProbeResult,
-        SandboxInfo, SecretStore, SnapshotInfo, TokenStore, UserSecretStore,
+        SandboxInfo, SnapshotInfo, TokenStore, UserSecretStore,
     };
 
     /// Local cube + prober stubs — none of the BYOK tests touch these
@@ -409,7 +407,6 @@ mod tests {
         upstream_for_validate: &str,
     ) -> (AppState, crate::auth::UserAuthState, String, String) {
         let pool = open_in_memory().await.unwrap();
-        let raw: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
         let keys_tmp = tempfile::tempdir().unwrap();
         let cipher_dir: Arc<dyn crate::envelope::CipherDirectory> =
             Arc::new(crate::envelope::AgeCipherDirectory::new(keys_tmp.path()).unwrap());
@@ -418,11 +415,6 @@ mod tests {
         let system_cipher = cipher_dir.system().unwrap();
         let instances_store: Arc<dyn crate::traits::InstanceStore> =
             Arc::new(SqlxInstanceStore::new(pool.clone(), system_cipher.clone()));
-        let svc = Arc::new(SecretsService::new(
-            raw.clone(),
-            instances_store.clone(),
-            cipher_dir.clone(),
-        ));
         let user_secret_store: Arc<dyn UserSecretStore> =
             Arc::new(crate::db::secrets::SqlxUserSecretStore::new(pool.clone()));
         let system_secret_store: Arc<dyn crate::traits::SystemSecretStore> =
@@ -445,7 +437,6 @@ mod tests {
         let instance_svc = Arc::new(InstanceService::new(
             cube.clone(),
             instances_store.clone(),
-            raw.clone(),
             tokens_store.clone(),
             "http://test/llm",
         ));
@@ -502,7 +493,6 @@ mod tests {
         ));
         std::mem::forget(cache_dir);
         let state = AppState {
-            secrets: svc,
             user_secrets,
             system_secrets,
             ciphers: cipher_dir,

@@ -471,6 +471,30 @@ describe('McpServersPanel', () => {
     expect(client.putMcpServer).not.toHaveBeenCalled();
   });
 
+  test('Docker MCP rows display container auth instead of proxy none', async () => {
+    const client = {
+      listMcpServers: vi.fn().mockResolvedValue([{
+        name: 'github',
+        url: 'docker://ghcr.io/example/github-mcp',
+        server_type: 'docker',
+        auth_kind: 'none',
+        connected: true,
+      }]),
+      listMcpDockerCatalog: vi.fn().mockResolvedValue({
+        allow_raw_json: false,
+        servers: [],
+      }),
+      getMcpJsonConfig: vi.fn(),
+      putMcpJsonConfig: vi.fn(),
+      putMcpServer: vi.fn(),
+    };
+    renderPanel(client);
+
+    await screen.findByText('github');
+    expect(screen.getByText('auth: container')).toBeInTheDocument();
+    expect(screen.queryByText('auth: none')).toBeNull();
+  });
+
   test('Docker catalog entries show placeholder fields and provision without raw JSON', async () => {
     const catalog = {
       allow_raw_json: false,

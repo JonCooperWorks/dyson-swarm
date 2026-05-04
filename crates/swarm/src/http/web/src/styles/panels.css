@@ -2017,6 +2017,11 @@
   color: var(--ok);
   background: color-mix(in srgb, var(--ok) 10%, transparent);
 }
+.mcp-auth-container {
+  border-color: color-mix(in srgb, var(--ok) 55%, transparent);
+  color: var(--ok);
+  background: color-mix(in srgb, var(--ok) 10%, transparent);
+}
 
 .mcp-remove {
   background: transparent;

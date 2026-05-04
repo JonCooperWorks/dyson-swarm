@@ -3259,6 +3259,7 @@ function McpServerRow({
   const { client } = useApi();
   const isOauth = row.auth_kind === 'oauth';
   const transport = isDockerMcpRow(row) ? 'docker' : 'remote';
+  const authLabel = dockerAwareAuthLabel(row);
   // OAuth-not-connected is the only state that surfaces a "connect"
   // CTA; bearer / none / oauth-connected all just show the auth pill.
   const needsConnect = isOauth && !row.connected;
@@ -3356,8 +3357,8 @@ function McpServerRow({
         <span className={`mcp-transport-pill mcp-transport-${transport}`}>
           {transport}
         </span>
-        <span className={`mcp-auth-pill mcp-auth-${row.auth_kind || 'none'}`}>
-          auth: {row.auth_kind || 'none'}
+        <span className={`mcp-auth-pill mcp-auth-${authLabel}`}>
+          auth: {authLabel}
         </span>
         {needsConnect ? (
           <span className="mcp-row-warning small">OAuth sign-in needed</span>
@@ -3419,6 +3420,11 @@ function McpServerRow({
 
 function isDockerMcpRow(row) {
   return row?.server_type === 'docker' || row?.server_type === 'cli';
+}
+
+function dockerAwareAuthLabel(row) {
+  const authKind = row?.auth_kind || 'none';
+  return isDockerMcpRow(row) && authKind === 'none' ? 'container' : authKind;
 }
 
 function isCatalogMcpRow(row) {

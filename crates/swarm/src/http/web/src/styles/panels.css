@@ -1600,8 +1600,8 @@
   text-decoration: line-through;
   text-decoration-color: var(--fg-faint);
 }
-/* Tools that need network egress (web_fetch, web_search,
-   image_generate, dependency_scan…) under an airgap policy.
+/* Tools that need network egress (web_fetch, image_generate,
+   dependency_scan…) under an airgap policy.
    Greyed but still toggleable so the operator who's about to
    un-airgap can flip them on; the title attribute spells out
    why they won't work right now. */

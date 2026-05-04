@@ -976,6 +976,36 @@ describe('splitMcpSetupRows', () => {
 });
 
 describe('NewInstanceForm MCP setup', () => {
+  test('does not expose web_search in the built-in tools picker', async () => {
+    const client = {
+      createInstance: vi.fn(),
+      probeInstance: vi.fn(),
+      listMcpDockerCatalog: vi.fn().mockResolvedValue({ allow_raw_json: true, servers: [] }),
+    };
+
+    render(React.createElement(
+      ApiProvider,
+      {
+        client,
+        auth: {
+          config: {
+            default_models: ['openai/gpt-5.1'],
+            default_template_id: 'tpl-default',
+            cube_profiles: [],
+          },
+        },
+      },
+      React.createElement(NewInstanceForm),
+    ));
+
+    fireEvent.click(screen.getByRole('button', { name: 'next' }));
+    fireEvent.click(screen.getByRole('button', { name: 'next' }));
+    fireEvent.click(screen.getByRole('button', { name: 'next' }));
+
+    expect(screen.getByLabelText('web_fetch')).toBeInTheDocument();
+    expect(screen.queryByLabelText('web_search')).toBeNull();
+  });
+
   test('lets a new agent attach a Docker MCP server before redirecting', async () => {
     const dockerConfig = {
       servers: {
@@ -1116,7 +1146,6 @@ describe('NETWORK_REQUIRED_TOOL_NAMES', () => {
     // silent slide.  Order matches TOOL_CATALOGUE.
     expect(NETWORK_REQUIRED_TOOL_NAMES).toEqual([
       'web_fetch',
-      'web_search',
       'image_generate',
       'dependency_scan',
       // Subagents whose prompts/tools assume reachable upstream:

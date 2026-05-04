@@ -377,7 +377,6 @@ const TOOL_CATALOGUE = [
   { name: 'list_files',                 group: 'filesystem' },
   { name: 'search_files',               group: 'filesystem' },
   { name: 'web_fetch',                  group: 'web', requiresNetwork: true },
-  { name: 'web_search',                 group: 'web', requiresNetwork: true },
   { name: 'image_generate',             group: 'web', requiresNetwork: true },
   { name: 'kb_search',                  group: 'knowledge' },
   { name: 'kb_status',                  group: 'knowledge' },

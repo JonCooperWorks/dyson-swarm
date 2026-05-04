@@ -555,7 +555,17 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     ) {
         Ok(s) => Arc::new(
             s.with_instance_svc(instance_svc.clone())
-                .with_runtime_socket(cfg.mcp_runtime.as_ref().map(|r| r.socket_path.clone())),
+                .with_runtime_socket(cfg.mcp_runtime.as_ref().map(|r| r.socket_path.clone()))
+                .with_docker_catalog(
+                    cfg.mcp_runtime
+                        .as_ref()
+                        .map(|r| r.docker_catalog.clone())
+                        .unwrap_or_default(),
+                    cfg.mcp_runtime
+                        .as_ref()
+                        .map(|r| r.allow_user_docker_json)
+                        .unwrap_or(false),
+                ),
         ),
         Err(err) => {
             tracing::error!(error = %err, "mcp service init failed");

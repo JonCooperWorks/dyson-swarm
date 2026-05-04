@@ -56,6 +56,14 @@ pub struct McpService {
     /// When absent, remote HTTP/SSE MCP still works; container stdio
     /// entries return a clear 503.
     pub runtime_socket_path: Option<PathBuf>,
+    /// Operator-curated Docker stdio presets.  Users see a slim
+    /// credential surface and read-only JSON preview instead of a
+    /// free-form Docker command surface.
+    pub docker_catalog: Vec<mcp_servers::McpDockerCatalogServer>,
+    /// Whether raw Docker MCP JSON is accepted from user-session
+    /// routes.  Trusted nodes can keep this on; public nodes can
+    /// require catalog presets only.
+    pub allow_user_docker_json: bool,
 }
 
 impl McpService {
@@ -76,6 +84,8 @@ impl McpService {
             public_origin,
             instance_svc: None,
             runtime_socket_path: None,
+            docker_catalog: Vec::new(),
+            allow_user_docker_json: true,
         })
     }
 
@@ -89,6 +99,16 @@ impl McpService {
 
     pub fn with_runtime_socket(mut self, socket_path: Option<PathBuf>) -> Self {
         self.runtime_socket_path = socket_path;
+        self
+    }
+
+    pub fn with_docker_catalog(
+        mut self,
+        catalog: Vec<mcp_servers::McpDockerCatalogServer>,
+        allow_user_docker_json: bool,
+    ) -> Self {
+        self.docker_catalog = catalog;
+        self.allow_user_docker_json = allow_user_docker_json;
         self
     }
 
@@ -112,7 +132,12 @@ pub fn router(svc: Arc<McpService>) -> Router {
 /// Router so `CallerIdentity` is already on the request extensions.
 pub fn user_router(svc: Arc<McpService>) -> Router {
     Router::new()
+        .route("/v1/mcp/docker-catalog", get(list_docker_catalog))
         .route("/v1/instances/:id/mcp/servers", get(list_servers))
+        .route(
+            "/v1/instances/:id/mcp/docker-catalog/:catalog_id",
+            axum::routing::put(put_docker_catalog_server),
+        )
         .route(
             "/v1/instances/:id/mcp/config",
             get(get_vscode_config)
@@ -931,12 +956,74 @@ fn html_escape(s: &str) -> String {
 // ───────────────────────────────────────────────────────────────────
 
 #[derive(Serialize)]
+struct DockerCatalogResponse {
+    allow_raw_json: bool,
+    servers: Vec<DockerCatalogServerSummary>,
+}
+
+#[derive(Serialize)]
+struct DockerCatalogServerSummary {
+    id: String,
+    label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    template: String,
+    credentials: Vec<DockerCatalogCredentialSummary>,
+}
+
+#[derive(Serialize)]
+struct DockerCatalogCredentialSummary {
+    id: String,
+    label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    required: bool,
+    secret: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    placeholder: Option<String>,
+}
+
+async fn list_docker_catalog(
+    State(svc): State<Arc<McpService>>,
+) -> Result<Json<DockerCatalogResponse>, Response<Body>> {
+    Ok(Json(DockerCatalogResponse {
+        allow_raw_json: svc.allow_user_docker_json,
+        servers: svc
+            .docker_catalog
+            .iter()
+            .map(|server| DockerCatalogServerSummary {
+                id: server.id.clone(),
+                label: server.label.clone(),
+                description: server.description.clone(),
+                template: server.template.clone(),
+                credentials: server
+                    .credentials
+                    .iter()
+                    .map(|credential| DockerCatalogCredentialSummary {
+                        id: credential.id.clone(),
+                        label: credential.label.clone(),
+                        description: credential.description.clone(),
+                        required: credential.required,
+                        secret: credential.secret,
+                        placeholder: credential.placeholder.clone(),
+                    })
+                    .collect(),
+            })
+            .collect(),
+    }))
+}
+
+#[derive(Serialize)]
 struct ServerSummary {
     name: String,
     url: String,
     /// `remote` for HTTP/SSE servers created through the field UI,
     /// `docker` for Docker stdio servers created from MCP JSON.
     server_type: &'static str,
+    /// Catalog id when the Docker server was created from an
+    /// operator-curated preset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    docker_catalog_id: Option<String>,
     auth_kind: &'static str,
     /// True when an OAuth flow has completed — surfaced so the UI can
     /// render a "connect" vs. "reconnect" button.
@@ -950,6 +1037,42 @@ struct ServerSummary {
     /// prefill); `Some(vec)` ⇒ explicit allowlist.
     #[serde(skip_serializing_if = "Option::is_none")]
     enabled_tools: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+struct PutDockerCatalogBody {
+    #[serde(default)]
+    credentials: BTreeMap<String, String>,
+}
+
+async fn put_docker_catalog_server(
+    State(svc): State<Arc<McpService>>,
+    Path((instance_id, catalog_id)): Path<(String, String)>,
+    axum::Extension(caller): axum::Extension<CallerIdentity>,
+    Json(body): Json<PutDockerCatalogBody>,
+) -> Result<Json<serde_json::Value>, Response<Body>> {
+    if svc.runtime_socket_path.is_none() {
+        return Err(error_resp(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "docker mcp runtime not configured",
+        ));
+    }
+    let catalog = svc
+        .docker_catalog
+        .iter()
+        .find(|server| server.id == catalog_id)
+        .ok_or_else(|| error_resp(StatusCode::NOT_FOUND, "no such docker mcp catalog entry"))?;
+    let isvc = svc.instance_svc.as_ref().ok_or_else(|| {
+        error_resp(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "mcp management not configured",
+        )
+    })?;
+    let name = isvc
+        .put_docker_catalog_mcp_server(&caller.user_id, &instance_id, catalog, body.credentials)
+        .await
+        .map_err(swarm_err_to_resp)?;
+    Ok(Json(serde_json::json!({ "ok": true, "name": name })))
 }
 
 async fn list_servers(
@@ -1000,6 +1123,7 @@ async fn list_servers(
                 } else {
                     "remote"
                 },
+                docker_catalog_id: e.docker_catalog.as_ref().map(|binding| binding.id.clone()),
                 auth_kind,
                 connected,
                 tools_catalog: e.tools_catalog,
@@ -1065,6 +1189,10 @@ async fn get_server(
         } else {
             "remote"
         },
+        docker_catalog_id: entry
+            .docker_catalog
+            .as_ref()
+            .map(|binding| binding.id.clone()),
         auth_kind,
         connected,
         tools_catalog: entry.tools_catalog,
@@ -1155,6 +1283,12 @@ async fn put_vscode_config(
     axum::Extension(caller): axum::Extension<CallerIdentity>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, Response<Body>> {
+    if !svc.allow_user_docker_json {
+        return Err(error_resp(
+            StatusCode::FORBIDDEN,
+            "raw docker mcp JSON is disabled by the operator; choose a catalog entry",
+        ));
+    }
     let isvc = svc.instance_svc.as_ref().ok_or_else(|| {
         error_resp(
             StatusCode::SERVICE_UNAVAILABLE,

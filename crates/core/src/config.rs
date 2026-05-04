@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::mcp_servers::McpDockerCatalogServer;
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     pub bind: String,
@@ -248,6 +250,20 @@ pub struct CubeConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct McpRuntimeConfig {
     pub socket_path: PathBuf,
+    /// Allow users to paste arbitrary Docker stdio MCP JSON.  Keep
+    /// enabled for trusted nodes; turn off on public nodes and use
+    /// `docker_catalog` entries instead.
+    #[serde(default = "default_allow_user_docker_json")]
+    pub allow_user_docker_json: bool,
+    /// Operator-curated Docker MCP presets.  Users see these as a
+    /// read-only JSON preview plus credential fields; swarm renders
+    /// and validates the final MCP JSON server-side.
+    #[serde(default)]
+    pub docker_catalog: Vec<McpDockerCatalogServer>,
+}
+
+fn default_allow_user_docker_json() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Deserialize)]

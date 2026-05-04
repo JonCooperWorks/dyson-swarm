@@ -3008,6 +3008,7 @@ impl InstanceService {
                 auth: auth.clone(),
                 headers: std::collections::HashMap::new(),
                 runtime: None,
+                docker_catalog: None,
                 raw_vscode_config: None,
                 oauth_tokens: None,
                 tools_catalog: None,
@@ -3031,6 +3032,7 @@ impl InstanceService {
         entry.auth = auth;
         entry.headers.clear();
         entry.runtime = None;
+        entry.docker_catalog = None;
         entry.raw_vscode_config = None;
         // The SPA always submits the current selection on save; mirror
         // it onto the entry (None ⇒ "use default", Some(vec) ⇒ explicit).
@@ -3108,6 +3110,102 @@ impl InstanceService {
             tracing::warn!(error = %err, instance = %id, "mcp vscode put: sync_mcp_to_dyson failed (entry persisted)");
         }
         Ok(())
+    }
+
+    /// Add or replace one Docker MCP server from the operator-curated
+    /// catalog.  The user only submits credential values; swarm renders
+    /// the configured JSON template, validates it through the same
+    /// Docker parser as raw JSON, seals the rendered runtime config,
+    /// and records the catalog binding so future template updates can
+    /// keep existing credentials.
+    pub async fn put_docker_catalog_mcp_server(
+        &self,
+        owner_id: &str,
+        id: &str,
+        catalog: &mcp_servers::McpDockerCatalogServer,
+        credentials: BTreeMap<String, String>,
+    ) -> Result<String, SwarmError> {
+        let _row = self
+            .instances
+            .get_for_owner(owner_id, id)
+            .await?
+            .ok_or(SwarmError::NotFound)?;
+        let secrets = self
+            .mcp_secrets
+            .as_ref()
+            .ok_or_else(|| SwarmError::PolicyDenied("mcp secrets store not configured".into()))?;
+
+        let names = mcp_servers::list_names(secrets, owner_id, id)
+            .await
+            .map_err(|e| SwarmError::Internal(format!("mcp list: {e}")))?;
+        let mut existing_catalog_entry = None;
+        for name in &names {
+            let entry = mcp_servers::get(secrets, owner_id, id, name)
+                .await
+                .map_err(|e| SwarmError::Internal(format!("mcp get: {e}")))?;
+            if let Some(entry) = entry {
+                if matches!(
+                    entry.docker_catalog.as_ref(),
+                    Some(binding) if binding.id == catalog.id
+                ) {
+                    existing_catalog_entry = Some((name.clone(), entry));
+                    break;
+                }
+            }
+        }
+
+        let (name, mut entry) = mcp_servers::entry_from_docker_catalog_template(
+            catalog,
+            &credentials,
+            existing_catalog_entry.as_ref().map(|(_, entry)| entry),
+        )
+        .map_err(SwarmError::BadRequest)?;
+        if let Some((_, previous)) = &existing_catalog_entry {
+            entry.tools_catalog = previous.tools_catalog.clone();
+            entry.enabled_tools = previous.enabled_tools.clone();
+        }
+
+        mcp_servers::put(secrets, owner_id, id, &name, &entry)
+            .await
+            .map_err(|e| SwarmError::Internal(format!("mcp put: {e}")))?;
+
+        if let Some((old_name, _)) = &existing_catalog_entry {
+            if old_name != &name {
+                if let Err(err) = secrets
+                    .delete(owner_id, &mcp_servers::entry_key(id, old_name))
+                    .await
+                {
+                    tracing::warn!(
+                        error = %err,
+                        instance = %id,
+                        server = %old_name,
+                        "mcp catalog put: old row delete failed"
+                    );
+                }
+            }
+        }
+
+        let mut next_names: Vec<String> = names
+            .into_iter()
+            .filter(|n| match &existing_catalog_entry {
+                Some((old_name, _)) => n != old_name || n == &name,
+                None => true,
+            })
+            .collect();
+        if !next_names.iter().any(|n| n == &name) {
+            next_names.push(name.clone());
+        }
+        let idx = serde_json::to_vec(&next_names)
+            .map_err(|e| SwarmError::Internal(format!("mcp index serialise: {e}")))?;
+        secrets
+            .put(owner_id, &mcp_servers::index_key(id), &idx)
+            .await
+            .map_err(|e| SwarmError::Internal(format!("mcp index put: {e}")))?;
+
+        if let Err(err) = self.sync_mcp_to_dyson(owner_id, id).await {
+            tracing::warn!(error = %err, instance = %id, "mcp catalog put: sync_mcp_to_dyson failed (entry persisted)");
+        }
+        Ok(name)
     }
 
     /// Fetch exact MCP JSON previously saved through the Docker add path.
@@ -4940,6 +5038,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn put_docker_catalog_mcp_server_renders_template_and_pushes_proxy_block() {
+        let (svc, _cube, _tokens, _instances, recorder, user_secrets, owner) =
+            build_with_mcp_secrets().await;
+        let created = hire_minimal(&svc, &owner).await;
+        wait_for_pushes(&recorder, 1).await;
+        recorder.pushed.lock().unwrap().clear();
+
+        let catalog = crate::mcp_servers::McpDockerCatalogServer {
+            id: "github".into(),
+            label: "GitHub".into(),
+            description: None,
+            template: serde_json::json!({
+                "servers": {
+                    "github": {
+                        "type": "stdio",
+                        "command": "docker",
+                        "args": ["run", "--rm", "-i", "-e", "GITHUB_TOKEN", "ghcr.io/example/github-mcp"],
+                        "env": { "GITHUB_TOKEN": "{{credential.github_token}}" }
+                    }
+                }
+            })
+            .to_string(),
+            credentials: vec![crate::mcp_servers::McpDockerCredentialSpec {
+                id: "github_token".into(),
+                label: "GitHub token".into(),
+                description: None,
+                required: true,
+                secret: true,
+                placeholder: None,
+            }],
+        };
+
+        let name = svc
+            .put_docker_catalog_mcp_server(
+                &owner,
+                &created.id,
+                &catalog,
+                BTreeMap::from([("github_token".into(), "ghp_secret".into())]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(name, "github");
+
+        wait_for_pushes(&recorder, 1).await;
+        let pushed = recorder.pushed.lock().unwrap();
+        let (_, _, body) = pushed.last().unwrap();
+        let block = body
+            .mcp_servers
+            .as_ref()
+            .expect("catalog put must push mcp_servers");
+        assert!(block.contains_key("github"));
+
+        let entry = crate::mcp_servers::get(&user_secrets, &owner, &created.id, "github")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(entry.raw_vscode_config, None);
+        assert_eq!(entry.docker_catalog.as_ref().unwrap().id, "github");
+        match entry.runtime {
+            Some(crate::mcp_servers::McpRuntimeSpec::DockerStdio { env, .. }) => {
+                assert_eq!(env["GITHUB_TOKEN"], "ghp_secret");
+            }
+            other => panic!("expected docker stdio runtime, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn put_mcp_server_preserves_oauth_tokens_when_shape_unchanged() {
         // A user editing only the URL (or scopes irrelevant fields)
         // shouldn't have to re-run the OAuth flow.  put_mcp_server's
@@ -6627,6 +6792,7 @@ mod tests {
             },
             headers: std::collections::HashMap::new(),
             runtime: None,
+            docker_catalog: None,
             raw_vscode_config: None,
             oauth_tokens: Some(crate::mcp_servers::McpOAuthTokens {
                 access_token: "atk".into(),
@@ -6802,6 +6968,7 @@ mod tests {
             },
             headers: std::collections::HashMap::new(),
             runtime: None,
+            docker_catalog: None,
             raw_vscode_config: None,
             oauth_tokens: Some(crate::mcp_servers::McpOAuthTokens {
                 access_token: "atk".into(),

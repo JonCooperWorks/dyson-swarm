@@ -596,6 +596,23 @@ export class SwarmClient {
     );
   }
 
+  listMcpDockerCatalog() {
+    return this._json('/v1/mcp/docker-catalog', {
+      headers: { Accept: 'application/json' },
+    });
+  }
+
+  putMcpDockerCatalogServer(instanceId, catalogId, credentials = {}) {
+    return this._json(
+      `/v1/instances/${encodeURIComponent(instanceId)}/mcp/docker-catalog/${encodeURIComponent(catalogId)}`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ credentials }),
+      },
+    );
+  }
+
   getMcpJsonConfig(instanceId, serverName = null) {
     const qs = serverName ? `?server=${encodeURIComponent(serverName)}` : '';
     return this._json(

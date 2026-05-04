@@ -1774,6 +1774,17 @@
   cursor: not-allowed;
 }
 
+.mcp-json-preview {
+  min-height: 180px;
+  resize: vertical;
+  background: var(--bg-2);
+}
+
+.mcp-json-preview:focus {
+  border-color: var(--border);
+  box-shadow: none;
+}
+
 .mcp-row-list {
   list-style: none;
   padding: 0;

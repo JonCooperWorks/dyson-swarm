@@ -315,8 +315,12 @@ describe('McpServersPanel', () => {
   const h = React.createElement;
 
   function renderPanel(client, props = {}) {
+    const fullClient = {
+      listMcpDockerCatalog: vi.fn().mockResolvedValue({ allow_raw_json: true, servers: [] }),
+      ...client,
+    };
     return render(
-      h(ApiProvider, { client, auth: { config: { cube_profiles: [] } } },
+      h(ApiProvider, { client: fullClient, auth: { config: { cube_profiles: [] } } },
         h(McpServersPanel, {
           instanceId: 'inst-1',
           policyKind: 'nolocalnet',
@@ -388,7 +392,7 @@ describe('McpServersPanel', () => {
 
     await screen.findByText('no MCP servers attached.');
     fireEvent.click(screen.getByRole('button', { name: 'add' }));
-    expect(screen.getByRole('option', { name: 'Docker' })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'Docker JSON' })).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText('MCP server type'), { target: { value: 'docker' } });
 
     const editor = screen.getByLabelText('MCP JSON config');
@@ -450,6 +454,68 @@ describe('McpServersPanel', () => {
 
     await waitFor(() => expect(client.putMcpJsonConfig).toHaveBeenCalledWith('inst-1', updatedConfig));
     expect(client.putMcpServer).not.toHaveBeenCalled();
+  });
+
+  test('Docker catalog presets show read-only JSON and save only credentials', async () => {
+    const catalog = {
+      allow_raw_json: false,
+      servers: [{
+        id: 'github',
+        label: 'GitHub',
+        description: 'GitHub MCP tools',
+        template: JSON.stringify({
+          servers: {
+            github: {
+              type: 'stdio',
+              command: 'docker',
+              args: ['run', '--rm', '-i', '-e', 'GITHUB_TOKEN', 'ghcr.io/example/github-mcp'],
+              env: { GITHUB_TOKEN: '{{credential.github_token}}' },
+            },
+          },
+        }),
+        credentials: [{
+          id: 'github_token',
+          label: 'GitHub token',
+          required: true,
+          secret: true,
+        }],
+      }],
+    };
+    let rows = [];
+    const client = {
+      listMcpServers: vi.fn(async () => rows),
+      listMcpDockerCatalog: vi.fn().mockResolvedValue(catalog),
+      putMcpDockerCatalogServer: vi.fn(async () => {
+        rows = [{
+          name: 'github',
+          url: 'docker://ghcr.io/example/github-mcp',
+          server_type: 'docker',
+          docker_catalog_id: 'github',
+          auth_kind: 'none',
+          connected: true,
+        }];
+        return { ok: true, name: 'github' };
+      }),
+      putMcpJsonConfig: vi.fn(),
+      putMcpServer: vi.fn(),
+    };
+    renderPanel(client);
+
+    await screen.findByText('no MCP servers attached.');
+    fireEvent.click(screen.getByRole('button', { name: 'add' }));
+    fireEvent.change(screen.getByLabelText('MCP server type'), { target: { value: 'docker_catalog' } });
+
+    expect(screen.getByDisplayValue(/ghcr\.io\/example\/github-mcp/)).toHaveAttribute('readonly');
+    fireEvent.change(screen.getByLabelText('GitHub token'), { target: { value: 'ghp_secret' } });
+    fireEvent.click(screen.getByRole('button', { name: 'save' }));
+
+    await waitFor(() => expect(client.putMcpDockerCatalogServer).toHaveBeenCalledWith(
+      'inst-1',
+      'github',
+      { github_token: 'ghp_secret' },
+    ));
+    expect(client.putMcpJsonConfig).not.toHaveBeenCalled();
+    await screen.findByText('github');
   });
 
   test('Docker add path does not submit the grey example when the editor is empty', async () => {
@@ -669,6 +735,7 @@ describe('splitMcpSetupRows', () => {
         auth: { kind: 'none' },
       }],
       dockerConfigs: [dockerConfig],
+      dockerCatalogServers: [],
     });
   });
 
@@ -697,6 +764,47 @@ describe('splitMcpSetupRows', () => {
         jsonText: JSON.stringify(dockerConfig),
       },
     ])).toThrow(/configured more than once/);
+  });
+
+  test('collects Docker catalog credentials without sending rendered JSON', () => {
+    const catalog = {
+      servers: [{
+        id: 'github',
+        label: 'GitHub',
+        template: JSON.stringify({
+          servers: {
+            github: {
+              type: 'stdio',
+              command: 'docker',
+              args: ['run', '--rm', '-i', 'ghcr.io/example/github-mcp'],
+              env: { GITHUB_TOKEN: '{{credential.github_token}}' },
+            },
+          },
+        }),
+        credentials: [{
+          id: 'github_token',
+          label: 'GitHub token',
+          required: true,
+          secret: true,
+        }],
+      }],
+    };
+
+    expect(splitMcpSetupRows([
+      {
+        id: 'catalog',
+        serverType: 'docker_catalog',
+        catalogId: 'github',
+        credentials: { github_token: 'ghp_secret' },
+      },
+    ], catalog)).toEqual({
+      remote: [],
+      dockerConfigs: [],
+      dockerCatalogServers: [{
+        catalogId: 'github',
+        credentials: { github_token: 'ghp_secret' },
+      }],
+    });
   });
 });
 

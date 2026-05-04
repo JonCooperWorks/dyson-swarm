@@ -25,6 +25,10 @@ use sha2::{Digest, Sha256};
 
 use crate::secrets::{SecretsError, UserSecretsService};
 
+/// Static placeholder the SPA can submit for secret-bearing catalog
+/// credentials when the user leaves an existing value untouched.
+pub const MCP_KEEP_TOKEN: &str = "••••••••";
+
 /// On-the-wire shape the SPA submits when hiring a Dyson with MCP
 /// servers.  Mirrors the JSON the React form builds.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -87,6 +91,12 @@ pub struct McpServerEntry {
     /// dedicated MCP runtime helper instead of posting to `url`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<McpRuntimeSpec>,
+    /// Marker for entries created from the operator's Docker MCP
+    /// catalog.  Credential values are sealed with the entry so the
+    /// user can later re-render an updated admin template without
+    /// retyping secrets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub docker_catalog: Option<McpDockerCatalogBinding>,
     /// Exact VS Code-style JSON the user pasted.  Stored encrypted with
     /// the rest of the entry so the UI can round-trip it without
     /// re-rendering or exposing it to the dyson.
@@ -110,6 +120,51 @@ pub struct McpServerEntry {
     /// requests for names outside the set are rejected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled_tools: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct McpDockerCatalogBinding {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub credentials: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct McpDockerCatalogServer {
+    /// Stable operator-facing id used by the API route.
+    pub id: String,
+    /// Human label shown in the SPA picker.
+    pub label: String,
+    /// Short description shown under the label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Read-only MCP JSON template.  Credential placeholders use
+    /// `{{credential.<id>}}` or `{{credentials.<id>}}` inside string
+    /// values.  The rendered JSON must contain exactly one Docker
+    /// stdio server under `servers` or `mcpServers`.
+    pub template: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub credentials: Vec<McpDockerCredentialSpec>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct McpDockerCredentialSpec {
+    /// Placeholder id referenced by the template.
+    pub id: String,
+    /// Input label shown to the user.
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default = "default_true")]
+    pub required: bool,
+    #[serde(default = "default_true")]
+    pub secret: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placeholder: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -192,6 +247,7 @@ impl McpServerEntry {
                 auth,
                 headers: HashMap::new(),
                 runtime: None,
+                docker_catalog: None,
                 raw_vscode_config: None,
                 oauth_tokens: None,
                 tools_catalog: None,
@@ -252,6 +308,7 @@ pub fn entry_from_vscode_config(
                 auth,
                 headers,
                 runtime: None,
+                docker_catalog: None,
                 raw_vscode_config: None,
                 oauth_tokens: None,
                 tools_catalog: None,
@@ -280,6 +337,7 @@ pub fn entry_from_vscode_config(
                     args,
                     env,
                 }),
+                docker_catalog: None,
                 raw_vscode_config: None,
                 oauth_tokens: None,
                 tools_catalog: None,
@@ -290,6 +348,157 @@ pub fn entry_from_vscode_config(
     };
     entry.raw_vscode_config = Some(raw);
     Ok((name, entry))
+}
+
+/// Render one admin catalog template with user-provided credentials,
+/// validate it through the same VS Code-style parser as raw Docker
+/// JSON, and return the sealed entry to persist.
+pub fn entry_from_docker_catalog_template(
+    catalog: &McpDockerCatalogServer,
+    supplied_credentials: &BTreeMap<String, String>,
+    existing: Option<&McpServerEntry>,
+) -> Result<(String, McpServerEntry), String> {
+    if !is_safe_server_name(&catalog.id) {
+        return Err("catalog id must match [A-Za-z0-9_-]+".into());
+    }
+    let previous = existing
+        .and_then(|entry| entry.docker_catalog.as_ref())
+        .filter(|binding| binding.id == catalog.id);
+    let credentials = resolve_catalog_credentials(catalog, supplied_credentials, previous)?;
+    let mut raw: serde_json::Value = serde_json::from_str(&catalog.template)
+        .map_err(|e| format!("catalog `{}` template is not valid JSON: {e}", catalog.id))?;
+    render_catalog_template_value(&mut raw, &credentials.render_values)?;
+    let (name, mut entry) = entry_from_vscode_config(raw)?;
+    entry.raw_vscode_config = None;
+    entry.docker_catalog = Some(McpDockerCatalogBinding {
+        id: catalog.id.clone(),
+        credentials: credentials.stored_values,
+    });
+    Ok((name, entry))
+}
+
+struct ResolvedCatalogCredentials {
+    render_values: BTreeMap<String, String>,
+    stored_values: BTreeMap<String, String>,
+}
+
+fn resolve_catalog_credentials(
+    catalog: &McpDockerCatalogServer,
+    supplied: &BTreeMap<String, String>,
+    previous: Option<&McpDockerCatalogBinding>,
+) -> Result<ResolvedCatalogCredentials, String> {
+    let mut ids = BTreeMap::new();
+    for field in &catalog.credentials {
+        if !is_safe_server_name(&field.id) {
+            return Err(format!(
+                "catalog `{}` credential id `{}` must match [A-Za-z0-9_-]+",
+                catalog.id, field.id
+            ));
+        }
+        if ids.insert(field.id.clone(), ()).is_some() {
+            return Err(format!(
+                "catalog `{}` defines credential `{}` more than once",
+                catalog.id, field.id
+            ));
+        }
+    }
+    for key in supplied.keys() {
+        if !ids.contains_key(key) {
+            return Err(format!(
+                "catalog `{}` does not define credential `{key}`",
+                catalog.id
+            ));
+        }
+    }
+
+    let mut render_values = BTreeMap::new();
+    let mut stored_values = BTreeMap::new();
+    for field in &catalog.credentials {
+        let previous_value = previous.and_then(|b| b.credentials.get(&field.id)).cloned();
+        let supplied_value = supplied.get(&field.id).cloned();
+        let value = match supplied_value {
+            Some(v) if v == MCP_KEEP_TOKEN || v.trim().is_empty() => previous_value,
+            Some(v) => Some(v),
+            None => previous_value,
+        };
+        let value = match value {
+            Some(v) => v,
+            None if field.required => {
+                return Err(format!("credential `{}` is required", field.id));
+            }
+            None => String::new(),
+        };
+        if field.required && value.trim().is_empty() {
+            return Err(format!("credential `{}` is required", field.id));
+        }
+        render_values.insert(field.id.clone(), value.clone());
+        if !value.is_empty() {
+            stored_values.insert(field.id.clone(), value);
+        }
+    }
+
+    Ok(ResolvedCatalogCredentials {
+        render_values,
+        stored_values,
+    })
+}
+
+fn render_catalog_template_value(
+    value: &mut serde_json::Value,
+    credentials: &BTreeMap<String, String>,
+) -> Result<(), String> {
+    match value {
+        serde_json::Value::String(s) => {
+            *s = render_catalog_template_string(s, credentials)?;
+            Ok(())
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                render_catalog_template_value(value, credentials)?;
+            }
+            Ok(())
+        }
+        serde_json::Value::Object(map) => {
+            for value in map.values_mut() {
+                render_catalog_template_value(value, credentials)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn render_catalog_template_string(
+    input: &str,
+    credentials: &BTreeMap<String, String>,
+) -> Result<String, String> {
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+    loop {
+        let Some(start) = rest.find("{{") else {
+            out.push_str(rest);
+            return Ok(out);
+        };
+        out.push_str(&rest[..start]);
+        rest = &rest[start + 2..];
+        let Some(end) = rest.find("}}") else {
+            return Err("unclosed `{{...}}` placeholder in catalog template".into());
+        };
+        let placeholder = rest[..end].trim();
+        rest = &rest[end + 2..];
+        let Some(id) = placeholder
+            .strip_prefix("credential.")
+            .or_else(|| placeholder.strip_prefix("credentials."))
+        else {
+            return Err(format!(
+                "unsupported catalog placeholder `{{{{{placeholder}}}}}`"
+            ));
+        };
+        let Some(value) = credentials.get(id) else {
+            return Err(format!("unknown catalog credential `{id}`"));
+        };
+        out.push_str(value);
+    }
 }
 
 fn server_map_from_config<'a>(
@@ -1579,6 +1788,109 @@ mod tests {
         .map(String::from)
         .collect();
         assert!(validate_docker_stdio_args(&safe).is_ok());
+    }
+
+    #[test]
+    fn docker_catalog_template_renders_credentials_and_hides_raw_json() {
+        let catalog = McpDockerCatalogServer {
+            id: "github".into(),
+            label: "GitHub".into(),
+            description: Some("GitHub MCP server".into()),
+            template: serde_json::json!({
+                "servers": {
+                    "github": {
+                        "type": "stdio",
+                        "command": "docker",
+                        "args": ["run", "--rm", "-i", "-e", "GITHUB_TOKEN", "ghcr.io/example/github-mcp"],
+                        "env": { "GITHUB_TOKEN": "{{credential.github_token}}" }
+                    }
+                }
+            })
+            .to_string(),
+            credentials: vec![McpDockerCredentialSpec {
+                id: "github_token".into(),
+                label: "GitHub token".into(),
+                description: None,
+                required: true,
+                secret: true,
+                placeholder: None,
+            }],
+        };
+        let credentials = BTreeMap::from([("github_token".into(), "ghp_secret".into())]);
+
+        let (name, entry) =
+            entry_from_docker_catalog_template(&catalog, &credentials, None).unwrap();
+
+        assert_eq!(name, "github");
+        assert_eq!(entry.raw_vscode_config, None);
+        assert_eq!(entry.docker_catalog.as_ref().unwrap().id, "github");
+        assert_eq!(
+            entry.docker_catalog.unwrap().credentials["github_token"],
+            "ghp_secret"
+        );
+        match entry.runtime {
+            Some(McpRuntimeSpec::DockerStdio { env, .. }) => {
+                assert_eq!(env["GITHUB_TOKEN"], "ghp_secret");
+            }
+            other => panic!("expected docker stdio runtime, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn docker_catalog_template_keeps_existing_credentials() {
+        let catalog = McpDockerCatalogServer {
+            id: "github".into(),
+            label: "GitHub".into(),
+            description: None,
+            template: serde_json::json!({
+                "servers": {
+                    "github": {
+                        "type": "stdio",
+                        "command": "docker",
+                        "args": ["run", "--rm", "-i", "-e", "GITHUB_TOKEN", "ghcr.io/example/github-mcp:v2"],
+                        "env": { "GITHUB_TOKEN": "{{credentials.github_token}}" }
+                    }
+                }
+            })
+            .to_string(),
+            credentials: vec![McpDockerCredentialSpec {
+                id: "github_token".into(),
+                label: "GitHub token".into(),
+                description: None,
+                required: true,
+                secret: true,
+                placeholder: None,
+            }],
+        };
+        let existing = McpServerEntry {
+            url: "docker://ghcr.io/example/github-mcp:v1".into(),
+            auth: McpAuthSpec::None,
+            headers: HashMap::new(),
+            runtime: None,
+            docker_catalog: Some(McpDockerCatalogBinding {
+                id: "github".into(),
+                credentials: BTreeMap::from([("github_token".into(), "old_secret".into())]),
+            }),
+            raw_vscode_config: None,
+            oauth_tokens: None,
+            tools_catalog: None,
+            enabled_tools: None,
+        };
+        let supplied = BTreeMap::from([("github_token".into(), MCP_KEEP_TOKEN.into())]);
+
+        let (_name, entry) =
+            entry_from_docker_catalog_template(&catalog, &supplied, Some(&existing)).unwrap();
+
+        match entry.runtime {
+            Some(McpRuntimeSpec::DockerStdio { args, env, .. }) => {
+                assert!(
+                    args.iter()
+                        .any(|arg| arg == "ghcr.io/example/github-mcp:v2")
+                );
+                assert_eq!(env["GITHUB_TOKEN"], "old_secret");
+            }
+            other => panic!("expected docker stdio runtime, got {other:?}"),
+        }
     }
 
     #[test]

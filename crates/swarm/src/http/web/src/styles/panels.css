@@ -195,7 +195,14 @@
   gap: 6px;
   margin-top: 4px;
 }
-.rail-empty { padding: 16px 12px; }
+.rail-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 16px 12px;
+}
+.rail-empty .btn { margin-top: 0; }
 
 /* ── Detail pane ─────────────────────────────────────────────── */
 
@@ -655,6 +662,65 @@
   background: var(--bg-2);
   border: 1px solid var(--border);
   border-radius: var(--radius);
+}
+
+.setup-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid color-mix(in srgb, var(--accent) 36%, var(--border));
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--accent) 7%, var(--bg-1));
+}
+.setup-summary-warn {
+  border-color: color-mix(in srgb, var(--warn) 55%, var(--border));
+  background: color-mix(in srgb, var(--warn) 8%, var(--bg-1));
+}
+.setup-summary-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.setup-summary-title {
+  margin: 2px 0 0;
+  font-size: 16px;
+  font-weight: 650;
+}
+.setup-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 8px;
+}
+.setup-summary-fact {
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-1);
+}
+.setup-summary-fact span {
+  display: block;
+  color: var(--fg-muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.setup-summary-fact strong {
+  display: block;
+  margin-top: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg);
+  font-size: 13px;
+}
+.setup-summary-note {
+  margin: 0;
+  color: color-mix(in srgb, var(--warn) 84%, white);
+  font-size: 13px;
+  line-height: 1.45;
 }
 .section-title {
   font-size: 13px;
@@ -1593,13 +1659,32 @@
 
 .mcp-auth-pill {
   font-size: 10px;
-  text-transform: uppercase;
   letter-spacing: 0.06em;
   padding: 2px 7px;
   border-radius: 999px;
   border: 1px solid var(--border);
   color: var(--fg-muted);
   background: var(--bg-1);
+}
+.mcp-transport-pill {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--fg-muted);
+  background: var(--bg-2);
+}
+.mcp-transport-docker {
+  border-color: color-mix(in srgb, var(--ok) 55%, transparent);
+  color: var(--ok);
+  background: color-mix(in srgb, var(--ok) 10%, transparent);
+}
+.mcp-transport-remote {
+  border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
 }
 .mcp-auth-bearer {
   border-color: color-mix(in srgb, var(--accent) 50%, transparent);

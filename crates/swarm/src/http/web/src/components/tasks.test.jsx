@@ -33,7 +33,7 @@ describe('AuditListPage', () => {
 
     expect(screen.queryByPlaceholderText(/search errors/i)).toBeNull();
     expect(screen.queryByRole('button', { name: /^search$/i })).toBeNull();
-    expect(screen.getByRole('combobox')).toHaveDisplayValue('all tasks');
+    expect(screen.getByRole('combobox')).toHaveDisplayValue('all webhooks');
     expect(screen.getByText('no deliveries yet')).toBeInTheDocument();
     expect(listInstanceDeliveries.mock.calls[0][1]).not.toHaveProperty('q');
   });
@@ -74,9 +74,9 @@ describe('TaskFormPage', () => {
       </ApiProvider>,
     );
 
-    expect(screen.getByText('provider URL')).toBeInTheDocument();
+    expect(screen.getAllByText('provider URL').length).toBeGreaterThan(0);
     expect(screen.getByLabelText('url')).toHaveValue(
-      `${window.location.origin}/webhooks/inst-a/task-name`,
+      `${window.location.origin}/webhooks/inst-a/webhook-name`,
     );
     expect(screen.getByRole('button', { name: 'name first' })).toBeDisabled();
 

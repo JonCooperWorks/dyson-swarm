@@ -9,16 +9,15 @@ import { TopBar } from './topbar.jsx';
 afterEach(() => { cleanup(); });
 
 describe('TopBar', () => {
-  test('labels the artefacts nav item without the "all" prefix', () => {
+  test('labels the global artefacts nav item with its scope', () => {
     render(
       <ApiProvider client={{}} auth={{ mode: 'none' }}>
         <TopBar view={{ name: 'artefacts' }}/>
       </ApiProvider>,
     );
 
-    expect(screen.getByRole('link', { name: 'artefacts' })).toHaveAttribute('href', '#/artefacts');
-    const retiredLabel = ['all', 'artefacts'].join(' ');
-    expect(screen.queryByRole('link', { name: retiredLabel })).toBeNull();
+    expect(screen.getByRole('link', { name: 'all artefacts' })).toHaveAttribute('href', '#/artefacts');
+    expect(screen.getByRole('link', { name: 'agents' })).toHaveAttribute('href', '#/');
   });
 
   test('renders sign out as a topbar nav-aligned control', () => {

@@ -85,11 +85,11 @@ describe('instance subpage rail routing', () => {
 
     expect(screen.getAllByText('Alpha').length).toBeGreaterThan(0);
     expect(screen.getByText('Beta')).toBeInTheDocument();
-    expect(screen.getByText(/no tasks yet/)).toBeInTheDocument();
+    expect(screen.getByText(/no webhooks yet/)).toBeInTheDocument();
     expect(screen.getByText('Beta').closest('a')).toHaveAttribute('href', '#/i/b/tasks');
   });
 
-  test('offers an instance tab back to the instance overview', () => {
+  test('offers an overview tab back to the agent overview', () => {
     const row = {
       id: 'a',
       name: 'Alpha',
@@ -118,9 +118,9 @@ describe('instance subpage rail routing', () => {
       ),
     );
 
-    const instance = screen.getByRole('link', { name: 'instance' });
-    expect(instance).toHaveAttribute('href', '#/i/a');
-    expect(instance).toHaveClass('btn-active');
+    const overview = screen.getByRole('link', { name: 'overview' });
+    expect(overview).toHaveAttribute('href', '#/i/a');
+    expect(overview).toHaveClass('btn-active');
   });
 
   test('does not highlight artefacts solely because shared links exist', async () => {
@@ -743,7 +743,7 @@ describe('NewInstanceForm MCP setup', () => {
     });
     expect(screen.getByText('github')).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: 'hire' }));
+    fireEvent.click(screen.getByRole('button', { name: 'create agent' }));
 
     await waitFor(() => expect(client.createInstance).toHaveBeenCalledTimes(1));
     expect(client.createInstance.mock.calls[0][0]).not.toHaveProperty('mcp_servers');

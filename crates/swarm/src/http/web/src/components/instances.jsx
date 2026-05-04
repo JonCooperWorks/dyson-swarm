@@ -128,7 +128,7 @@ function InstanceList({ selectedId, onNew, view }) {
   return (
     <aside className="left-rail">
       <div className="rail-header">
-        <div className="rail-title">your instances</div>
+        <div className="rail-title">agents</div>
         <div className="rail-actions">
           <button className="btn btn-ghost btn-sm" onClick={refresh} disabled={refreshing} title="refresh">
             {refreshing ? '…' : '↻'}
@@ -138,7 +138,12 @@ function InstanceList({ selectedId, onNew, view }) {
       </div>
       <ul className="rail-list">
         {order.length === 0 ? (
-          <li className="rail-empty muted small">your roster's empty — hire one →</li>
+          <li className="rail-empty">
+            <div className="muted small">No agents yet.</div>
+            <button type="button" className="btn btn-primary btn-sm" onClick={onNew}>
+              create agent
+            </button>
+          </li>
         ) : order.map(id => {
           const row = byId[id];
           const label = row.name && row.name.trim() ? row.name : '(unnamed)';
@@ -267,13 +272,11 @@ export function profileLabel(p) {
   return `${p.name} — ${p.disk_gb} GB disk · ${vcpu} · ${ram}`;
 }
 
-// ─── New instance — dedicated page ─────────────────────────────────
+// ─── New agent — dedicated page ────────────────────────────────────
 //
-// Each Dyson is an employee.  The form reads top-down like an offer
-// letter: who they are, what they do, then the infrastructure bits.
-// Promoted from a modal to a dedicated page so there's room for the
-// full configuration surface (template, ttl, and — coming next —
-// per-instance network policy fed to the cube's BPF egress filter).
+// User-facing copy treats the sandbox/runtime as implementation
+// detail.  The flow starts with the agent brief and model, then lets
+// operators tune capabilities and runtime when they need to.
 
 export function NewInstancePage() {
   // ESC navigates back to the list — same affordance the modal had,
@@ -290,10 +293,10 @@ export function NewInstancePage() {
     <main className="page page-new">
       <header className="page-header">
         <a className="btn btn-ghost btn-sm" href="#/">← back</a>
-        <h1 className="page-title">hire a new agent</h1>
+        <h1 className="page-title">create agent</h1>
         <p className="page-sub muted">
-          Each agent is a long-lived employee.  Fill in the offer letter,
-          then click hire.
+          Give it a brief, pick a model, and decide what it can reach.
+          You can change the brief, model, tools, and network policy later.
         </p>
       </header>
       <NewInstanceForm/>
@@ -568,13 +571,13 @@ function ToolsPicker({ value, onChange, policyKind }) {
   }, [policyKind]);
   return (
     <ToolPicker
-      title="tools"
+      title="built-in tools"
       allNames={ALL_TOOL_NAMES}
       groups={TOOL_GROUPS}
       value={value}
       onChange={onChange}
       cellMeta={cellMeta}
-      hint="Built-in tools the agent registers on boot.  Air-gapped employees start with nothing — pick only what the task actually needs."
+      hint="Pick what the agent can call directly. Air-gapped agents start with nothing enabled, so opt in only the tools the brief needs."
     />
   );
 }
@@ -787,7 +790,7 @@ export function NewInstanceForm() {
   if (phase === 'provisioning') {
     return (
       <section className="page-section">
-        <p className="muted small">getting your agent ready…</p>
+        <p className="muted small">creating your agent…</p>
         <div className="progress-bar"><div className="progress-bar-indeterminate"/></div>
         <p className="muted small" style={{ marginTop: 12 }}>
           By the time this redirects, your agent is live and reachable.
@@ -799,7 +802,7 @@ export function NewInstanceForm() {
   return (
     <form onSubmit={submit} className="form page-form">
       <section className="page-section">
-        <h2 className="section-title">identity</h2>
+        <h2 className="section-title">agent</h2>
         <label className="field">
           <span>name</span>
           <input
@@ -810,18 +813,16 @@ export function NewInstanceForm() {
           />
         </label>
         <label className="field">
-          <span>task</span>
+          <span>brief</span>
           <textarea
             className="textarea"
             value={task}
             onChange={e => setTask(e.target.value)}
-            placeholder={`What this employee does, in prose.\n\nExample: Watch for new PRs in github.com/foo/bar. Comment with style-guide violations and link to the relevant section. Don't approve or merge.`}
+            placeholder={`What this agent should do.\n\nExample: Watch for new PRs in github.com/foo/bar. Comment with style-guide violations and link to the relevant section. Don't approve or merge.`}
             rows={6}
           />
           <span className="hint muted small">
-            The agent reads this on first boot as <code>SWARM_TASK</code>.
-            You can edit it later, but changes don't propagate to a
-            running employee.
+            This is the agent's working brief. You can edit it later.
           </span>
         </label>
       </section>
@@ -836,7 +837,7 @@ export function NewInstanceForm() {
       </section>
 
       <section className="page-section">
-        <h2 className="section-title">network access</h2>
+        <h2 className="section-title">network</h2>
         <NetworkPolicyPicker value={networkPolicy} onChange={setNetworkPolicy}/>
       </section>
 
@@ -847,19 +848,17 @@ export function NewInstanceForm() {
       />
 
       <section className="page-section">
-        <h2 className="section-title">MCP servers</h2>
+        <h2 className="section-title">connected tools</h2>
         <McpServersEditor value={mcpServers} onChange={setMcpServers}/>
         <span className="hint muted small">
-          MCP traffic flows through swarm — the agent only sees a swarm
-          proxy URL, never your upstream URL or its credentials. Bearer
-          tokens and OAuth refresh tokens land in your encrypted user
-          secret store. OAuth connections finish in a browser tab after
-          you hire the agent.
+          Add remote MCP servers or Docker-backed stdio servers. Swarm
+          seals upstream URLs and credentials; the agent only sees a
+          swarm proxy URL.
         </span>
       </section>
 
       <section className="page-section">
-        <h2 className="section-title">infrastructure</h2>
+        <h2 className="section-title">runtime</h2>
         {cubeProfiles.length >= 1 ? (
           <CubeProfilePicker
             profiles={cubeProfiles}
@@ -879,10 +878,20 @@ export function NewInstanceForm() {
           />
           <span className="hint muted small">
             Auto-destroyed by the TTL sweeper after this many seconds.
-            Leave blank for a long-lived employee.
+            Leave blank for a long-lived agent.
           </span>
         </label>
       </section>
+
+      <SetupSummary
+        name={name}
+        models={models}
+        networkPolicy={networkPolicy}
+        tools={tools}
+        mcpServers={mcpServers}
+        templateId={templateId}
+        cubeProfiles={cubeProfiles}
+      />
 
       {error ? <div className="error">{error}</div> : null}
       <div className="page-actions">
@@ -892,11 +901,69 @@ export function NewInstanceForm() {
           disabled={submitting || models.length === 0 || !templateId.trim()}
           title={models.length === 0 ? 'pick at least one model' : ''}
         >
-          {submitting ? 'hiring…' : 'hire'}
+          {submitting ? 'creating…' : 'create agent'}
         </button>
         <a className="btn btn-ghost" href="#/">cancel</a>
       </div>
     </form>
+  );
+}
+
+function SetupSummary({
+  name,
+  models,
+  networkPolicy,
+  tools,
+  mcpServers,
+  templateId,
+  cubeProfiles,
+}) {
+  const profile = findCubeProfile(templateId, cubeProfiles);
+  const agentLabel = name.trim() || 'Unnamed agent';
+  const networkLabel = POLICY_OPTIONS.find(p => p.kind === networkPolicy.kind)?.label || networkPolicy.kind;
+  const dockerCount = (mcpServers || []).filter(r => (r.serverType || 'remote') === 'docker').length;
+  const remoteCount = (mcpServers || []).filter(r => (r.serverType || 'remote') !== 'docker').length;
+  const mcpCount = dockerCount + remoteCount;
+  const toolCount = tools.length;
+  const lockedDown = networkPolicy.kind === 'airgap' && toolCount === 0 && mcpCount === 0;
+
+  return (
+    <section className={`setup-summary ${lockedDown ? 'setup-summary-warn' : ''}`}>
+      <div className="setup-summary-head">
+        <div>
+          <h2 className="section-title">review</h2>
+          <p className="setup-summary-title">{agentLabel}</p>
+        </div>
+        <span className={`badge ${lockedDown ? 'badge-warn' : 'badge-info'}`}>
+          {lockedDown ? 'locked down' : 'ready'}
+        </span>
+      </div>
+      <div className="setup-summary-grid">
+        <SummaryFact label="model" value={models[0] || 'pick one'}/>
+        <SummaryFact label="network" value={networkLabel}/>
+        <SummaryFact label="built-in tools" value={`${toolCount} enabled`}/>
+        <SummaryFact
+          label="MCP"
+          value={mcpCount === 0 ? 'none' : `${mcpCount} server${mcpCount === 1 ? '' : 's'}`}
+        />
+        <SummaryFact label="runtime" value={profile ? profile.name : (templateId || 'default')}/>
+      </div>
+      {lockedDown ? (
+        <p className="setup-summary-note">
+          This agent will start with no network, no built-in tools, and no MCP servers.
+          That is secure, but it may feel inert until you enable a capability.
+        </p>
+      ) : null}
+    </section>
+  );
+}
+
+function SummaryFact({ label, value }) {
+  return (
+    <div className="setup-summary-fact">
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
   );
 }
 
@@ -970,7 +1037,7 @@ export const POLICY_OPTIONS = [
   {
     kind: 'airgap',
     label: 'Air-gapped (LLM + MCP only)',
-    help: 'No outbound traffic at all, except to the swarm /llm and /mcp proxies. The agent can still call its model and any attached MCP servers (swarm forwards on its behalf), but the public internet is closed. The default — pick a wider profile only when the task actually needs it.',
+    help: 'No outbound traffic at all, except to the swarm /llm and /mcp proxies. The agent can still call its model and any attached MCP servers (swarm forwards on its behalf), but the public internet is closed. The default — pick a wider profile only when the brief actually needs it.',
   },
   {
     kind: 'allowlist',
@@ -1234,9 +1301,9 @@ function McpServersEditor({ value, onChange }) {
     return (
       <div className="mcp-empty">
         <p className="muted small" style={{ margin: 0 }}>
-          No MCP servers attached. The agent hires fine without any —
-          add one if you want it to call Linear, GitHub, a Docker stdio
-          server, or anything that speaks streamable-HTTP MCP.
+          No MCP servers attached. Add one when this agent needs Linear,
+          GitHub, a Docker stdio server, or any streamable-HTTP MCP
+          provider.
         </p>
         <button type="button" className="btn btn-ghost btn-sm" onClick={add}>
           + add MCP server
@@ -1735,8 +1802,8 @@ function InstanceDetail({ id, onNew, view }) {
     return () => { cancelled = true; };
   }, [client, id]);
 
-  // Webhooks list — fed into the "tasks" button's count badge.  Quiet
-  // on failure (the badge just stays hidden); the dedicated tasks page
+  // Webhooks list — fed into the "webhooks" button's count badge. Quiet
+  // on failure (the badge just stays hidden); the dedicated page
   // surfaces real errors when the user navigates in.
   React.useEffect(() => {
     if (!id) return;
@@ -1803,7 +1870,7 @@ function InstanceDetail({ id, onNew, view }) {
   );
 
   const destroy = async () => {
-    if (!confirm(`destroy instance ${id}? this is permanent.`)) return;
+    if (!confirm(`destroy agent ${displayName}? this is permanent.`)) return;
     setBusy(true); setErr(null);
     try {
       await client.destroyInstance(id);
@@ -1824,7 +1891,7 @@ function InstanceDetail({ id, onNew, view }) {
     const label = row.name && row.name.trim() ? row.name : id;
     const warning =
       `RESET ${label} on the latest template?\n\n` +
-      `The agent keeps its name, task, models, ` +
+      `The agent keeps its name, brief, models, ` +
       `tools, network policy, secrets, MCP servers, URL, and bearer ` +
       `token.  Memory, chats, knowledge base, and learned skills are ` +
       `replayed from the sealed swarm mirror.  Any in-flight work will ` +
@@ -1893,9 +1960,9 @@ function InstanceDetail({ id, onNew, view }) {
             href={`#/i/${encodeURIComponent(id)}`}
             aria-disabled={busy}
             onClick={(e) => { if (busy) e.preventDefault(); }}
-            title="instance data, runtime, snapshots, network, tools, secrets, and instructions"
+            title="runtime, snapshots, network, tools, secrets, MCP, and instructions"
           >
-            instance
+            overview
           </a>
           <a
             className={`btn btn-ghost ${activeSection === 'edit' ? 'btn-active' : ''}`}
@@ -1910,9 +1977,9 @@ function InstanceDetail({ id, onNew, view }) {
             href={`#/i/${encodeURIComponent(id)}/tasks`}
             aria-disabled={busy}
             onClick={(e) => { if (busy) e.preventDefault(); }}
-            title="webhook-triggered tasks for this agent"
+            title="webhook triggers for this agent"
           >
-            tasks
+            webhooks
             {enabledTaskCount > 0
               ? <span className="btn-count-badge" aria-label={`${enabledTaskCount} enabled`}>{enabledTaskCount}</span>
               : null}
@@ -1922,7 +1989,7 @@ function InstanceDetail({ id, onNew, view }) {
             href={`#/i/${encodeURIComponent(id)}/artefacts`}
             aria-disabled={busy}
             onClick={(e) => { if (busy) e.preventDefault(); }}
-            title="artefacts cached on swarm, with active shared links counted in the badge"
+            title="agent artefacts cached on swarm, with active shared links counted in the badge"
           >
             artefacts
             {activeShareCount > 0
@@ -1933,7 +2000,7 @@ function InstanceDetail({ id, onNew, view }) {
             className="btn btn-danger"
             onClick={reset}
             disabled={busy || row.status === 'destroyed'}
-            title="hire a fresh agent on the latest template, replaying mirrored memory, chats, kb, and skills"
+            title="create a fresh runtime on the latest template, replaying mirrored memory, chats, kb, and skills"
           >
             reset
           </button>
@@ -1986,7 +2053,7 @@ function InstanceDetail({ id, onNew, view }) {
                 <TaskProse markdown={row.task}/>
               ) : (
                 <p className="muted small">
-                  no task description — tap <em>edit</em> to write one.
+                  no brief yet — tap <em>edit</em> to write one.
                 </p>
               )}
             </div>
@@ -2245,7 +2312,7 @@ function EditInstanceForm({ instance, backHref, formId }) {
             />
           </label>
           <label className="field">
-            <span>task</span>
+            <span>brief</span>
             <textarea
               className="textarea"
               value={task}
@@ -2318,24 +2385,24 @@ function EmptyDetail({ onNew, hasInstances }) {
           <>
             <h1 className="empty-title">pick an agent</h1>
             <p className="empty-sub">
-              your roster is on the left — pick one to inspect, edit, or
-              fire it up. or hire a new employee for a new task.
+              Pick an agent from the left rail to inspect runtime, tools,
+              webhooks, and artefacts. Or create a new one for a fresh job.
             </p>
             <div className="empty-actions">
-              <button className="btn btn-primary" onClick={onNew}>+ hire an agent</button>
+              <button className="btn btn-primary" onClick={onNew}>create agent</button>
             </div>
           </>
         ) : (
           <>
             <h1 className="empty-title">build your swarm</h1>
             <p className="empty-sub">
-              agents are long-lived workers you put to work — one per task,
-              each with its own brief, model, and memory. start with one
-              employee; scale to hundreds.
+              Agents are long-lived workers with their own brief, model,
+              memory, tools, webhooks, and artefacts. Start with one and
+              scale when you need more hands.
             </p>
             <div className="empty-actions">
               <button className="btn btn-primary btn-lg" onClick={onNew}>
-                hire your first agent
+                create your first agent
               </button>
             </div>
             <p className="empty-hint muted small">
@@ -2987,6 +3054,7 @@ function McpServerRow({
 }) {
   const { client } = useApi();
   const isOauth = row.auth_kind === 'oauth';
+  const transport = isDockerMcpRow(row) ? 'docker' : 'remote';
   // OAuth-not-connected is the only state that surfaces a "connect"
   // CTA; bearer / none / oauth-connected all just show the auth pill.
   const needsConnect = isOauth && !row.connected;
@@ -3068,24 +3136,27 @@ function McpServerRow({
 
   const statusBadge = (() => {
     if (checking) return <span className="mcp-row-status small muted">checking…</span>;
-    if (checkErr) return <span className="mcp-row-status small mcp-row-warning">check failed</span>;
+    if (checkErr) return <span className="mcp-row-status small mcp-row-warning">last check failed</span>;
     if (catalog) return (
       <span className="mcp-row-status small muted">
-        connected · {catalog.tools.length} tools
+        last check ok · {catalog.tools.length} tools
       </span>
     );
-    return <span className="mcp-row-status small muted">not connected</span>;
+    return <span className="mcp-row-status small muted">not checked</span>;
   })();
 
   return (
     <li className="mcp-row">
       <div className="mcp-row-head">
         <code className="mcp-row-name">{row.name}</code>
-        <span className={`mcp-auth-pill mcp-auth-${row.auth_kind}`}>
-          {row.auth_kind}
+        <span className={`mcp-transport-pill mcp-transport-${transport}`}>
+          {transport}
+        </span>
+        <span className={`mcp-auth-pill mcp-auth-${row.auth_kind || 'none'}`}>
+          auth: {row.auth_kind || 'none'}
         </span>
         {needsConnect ? (
-          <span className="mcp-row-warning small">oauth not authorised</span>
+          <span className="mcp-row-warning small">OAuth sign-in needed</span>
         ) : null}
         {statusBadge}
       </div>
@@ -3134,7 +3205,7 @@ function McpServerRow({
           hint={
             allToolNames.length === 0
               ? 'Upstream advertises no tools.'
-              : `Tools advertised by ${row.name}.  Air-gapped instances start with nothing — pick only what the task actually needs.`
+              : `Tools advertised by ${row.name}. Air-gapped agents start with nothing — pick only what the brief actually needs.`
           }
         />
       ) : null}

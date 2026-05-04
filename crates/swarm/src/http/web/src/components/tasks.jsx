@@ -139,7 +139,7 @@ export function TasksListPage({ instanceId, embedded = false }) {
         <h1 className={embedded ? 'subpage-title' : 'page-title'}>webhooks</h1>
         <p className="page-sub muted">
           One URL per provider. When a signed request arrives, swarm
-          records the delivery and starts a fresh agent conversation
+          records the delivery and posts it into the agent's webhook inbox
           using the webhook instructions.
         </p>
       </header>
@@ -262,7 +262,7 @@ export function TaskFormPage({ instanceId, taskName, embedded = false }) {
         <p className="page-sub muted">
           {editing
             ? 'Update the instructions, rotate the shared secret, or disable the URL.'
-            : 'Create a provider-facing URL. When called and verified, the payload starts a fresh agent conversation.'}
+            : 'Create a provider-facing URL. When called and verified, the payload is posted into the agent webhook inbox.'}
         </p>
       </header>
       <TaskForm instanceId={instanceId} taskName={taskName}/>

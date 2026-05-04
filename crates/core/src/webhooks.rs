@@ -4,7 +4,7 @@
 //!     1. `WebhookStore`         — metadata (name, description, scheme, enabled)
 //!     2. `UserSecretsService`   — signing keys (sealed under owner's age cipher)
 //!     3. `DeliveryStore`        — audit log (metadata + sealed body)
-//!     4. `WebhookDispatcher`    — kicks off a fresh agent conversation
+//!     4. `WebhookDispatcher`    — posts into the agent's webhook chat
 //!     5. `CipherDirectory`      — owner-keyed age ciphers; used to seal
 //!                                 audit bodies at write time and open
 //!                                 them on the detail-page read.
@@ -51,6 +51,13 @@ pub(crate) const AGE_ARMOR_PREFIX: &[u8] = b"-----BEGIN AGE ENCRYPTED FILE-----"
 /// dyson's `MAX_TURN_BODY` so we never accept a payload the agent
 /// would refuse downstream.
 pub const MAX_WEBHOOK_BODY: usize = 4 * 1024 * 1024;
+
+/// Stable HTTP chat used by swarm webhook delivery inside each dyson
+/// sandbox.  Keeping webhook traffic in one conversation lets the
+/// agent's per-chat compaction and dream triggers see accumulated
+/// delivery history instead of a sequence of isolated one-shot chats.
+pub const WEBHOOK_CHAT_ID: &str = "c-swarm-webhooks";
+pub const WEBHOOK_CHAT_TITLE: &str = "Webhook inbox";
 
 /// Default page size for "recent deliveries" panel.  Caps higher to
 /// keep the SPA's payload bounded; operators with shell access can
@@ -129,8 +136,9 @@ pub struct WebhookSpec {
 /// standing up an agent HTTP server.
 #[async_trait]
 pub trait WebhookDispatcher: Send + Sync {
-    /// Mint a fresh conversation in the agent and post the payload as
-    /// the first turn.  `description` is the operator-authored task
+    /// Find or create the agent's stable webhook conversation and
+    /// post the payload as the next turn.  `description` is the
+    /// operator-authored task
     /// brief; `headers` is the safe-allowlisted header subset to
     /// forward; `body` is the raw inbound body bytes.
     ///
@@ -194,6 +202,58 @@ impl HttpWebhookDispatcher {
             sandbox_domain.trim_end_matches('/')
         )
     }
+
+    async fn webhook_chat_id(&self, base: &str, bearer: &str) -> Result<String, String> {
+        let list_resp = self
+            .http
+            .get(format!("{base}/api/conversations"))
+            .header("Authorization", bearer)
+            .send()
+            .await
+            .map_err(|e| format!("list-conversations send: {e}"))?;
+        let list_status = list_resp.status();
+        if !list_status.is_success() {
+            let body = list_resp.text().await.unwrap_or_default();
+            return Err(format!("list-conversations {list_status}: {body}"));
+        }
+        let conversations: Vec<ConversationSummary> = list_resp
+            .json()
+            .await
+            .map_err(|e| format!("list-conversations parse: {e}"))?;
+        if let Some(existing) = find_webhook_chat(&conversations) {
+            return Ok(existing.to_string());
+        }
+
+        let create_resp = self
+            .http
+            .post(format!("{base}/api/conversations"))
+            .header("Authorization", bearer)
+            .header("X-Dyson-CSRF", "swarm-webhook")
+            .json(&serde_json::json!({
+                "id": WEBHOOK_CHAT_ID,
+                "title": WEBHOOK_CHAT_TITLE,
+            }))
+            .send()
+            .await
+            .map_err(|e| format!("create-conversation send: {e}"))?;
+        let create_status = create_resp.status();
+        if !create_status.is_success() {
+            let body = create_resp.text().await.unwrap_or_default();
+            return Err(format!("create-conversation {create_status}: {body}"));
+        }
+        let created: CreateConversationResponse = create_resp
+            .json()
+            .await
+            .map_err(|e| format!("create-conversation parse: {e}"))?;
+        if created.id != WEBHOOK_CHAT_ID {
+            tracing::debug!(
+                requested = WEBHOOK_CHAT_ID,
+                returned = %created.id,
+                "dyson ignored requested webhook chat id; using returned compatibility chat"
+            );
+        }
+        Ok(created.id)
+    }
 }
 
 #[async_trait]
@@ -201,7 +261,7 @@ impl WebhookDispatcher for HttpWebhookDispatcher {
     async fn dispatch(
         &self,
         instance: &InstanceRow,
-        webhook_name: &str,
+        _webhook_name: &str,
         description: &str,
         headers: &[(String, String)],
         body: &[u8],
@@ -217,32 +277,8 @@ impl WebhookDispatcher for HttpWebhookDispatcher {
         let base = Self::cube_base_url(&self.sandbox_domain, port, sandbox_id);
         let bearer = format!("Bearer {}", instance.bearer_token);
 
-        // 1. Mint a fresh conversation.  Title carries the webhook
-        //    name + ts so it sorts naturally in the agent's chat list.
-        let now = chrono_seconds();
-        let title = format!("webhook: {webhook_name} @ {now}");
-        let create_resp = self
-            .http
-            .post(format!("{base}/api/conversations"))
-            .header("Authorization", &bearer)
-            .header("X-Dyson-CSRF", "swarm-webhook")
-            .json(&serde_json::json!({ "title": title }))
-            .send()
-            .await
-            .map_err(|e| format!("create-conversation send: {e}"))?;
-        let create_status = create_resp.status();
-        if !create_status.is_success() {
-            let body = create_resp.text().await.unwrap_or_default();
-            return Err(format!("create-conversation {create_status}: {body}"));
-        }
-        let created: serde_json::Value = create_resp
-            .json()
-            .await
-            .map_err(|e| format!("create-conversation parse: {e}"))?;
-        let chat_id = created
-            .get("id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| "create-conversation: response missing id".to_string())?;
+        // 1. Find or create the stable webhook conversation.
+        let chat_id = self.webhook_chat_id(&base, &bearer).await?;
 
         // 2. Compose the prompt and POST a turn.
         let prompt = render_prompt(description, headers, body);
@@ -250,7 +286,7 @@ impl WebhookDispatcher for HttpWebhookDispatcher {
             .http
             .post(format!(
                 "{base}/api/conversations/{}/turn",
-                urlencode(chat_id)
+                urlencode(&chat_id)
             ))
             .header("Authorization", &bearer)
             .header("X-Dyson-CSRF", "swarm-webhook")
@@ -267,8 +303,22 @@ impl WebhookDispatcher for HttpWebhookDispatcher {
     }
 }
 
-fn chrono_seconds() -> i64 {
-    crate::now_secs()
+#[derive(Debug, serde::Deserialize)]
+struct ConversationSummary {
+    id: String,
+    title: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct CreateConversationResponse {
+    id: String,
+}
+
+fn find_webhook_chat(conversations: &[ConversationSummary]) -> Option<&str> {
+    conversations
+        .iter()
+        .find(|c| c.id == WEBHOOK_CHAT_ID || c.title == WEBHOOK_CHAT_TITLE)
+        .map(|c| c.id.as_str())
 }
 
 /// Build the prompt shipped to the agent.  Bodies are best-effort
@@ -900,8 +950,10 @@ mod tests {
         );
         let secret_store: Arc<dyn SecretStore> =
             Arc::new(crate::db::secrets::SqlxSecretStore::new(pool.clone()));
-        let token_store: Arc<dyn TokenStore> =
-            Arc::new(crate::db::tokens::SqlxTokenStore::new(pool.clone(), system_cipher));
+        let token_store: Arc<dyn TokenStore> = Arc::new(crate::db::tokens::SqlxTokenStore::new(
+            pool.clone(),
+            system_cipher,
+        ));
         instances_store
             .create(InstanceRow {
                 id: "i1".into(),
@@ -1029,6 +1081,38 @@ mod tests {
         let s = render_prompt("brief", &[], &[0xff, 0xfe]);
         assert!(s.contains("non-utf8"));
         assert!(s.contains("fffe"));
+    }
+
+    #[test]
+    fn webhook_chat_id_is_safe_http_chat_id() {
+        assert!(WEBHOOK_CHAT_ID.starts_with("c-"));
+        assert!(
+            WEBHOOK_CHAT_ID
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'),
+            "webhook chat id must be safe as a dyson chat-history directory"
+        );
+    }
+
+    #[test]
+    fn find_webhook_chat_prefers_stable_id_or_compat_title() {
+        let by_id = vec![
+            ConversationSummary {
+                id: "c-0001".into(),
+                title: "other".into(),
+            },
+            ConversationSummary {
+                id: WEBHOOK_CHAT_ID.into(),
+                title: "after restart".into(),
+            },
+        ];
+        assert_eq!(find_webhook_chat(&by_id), Some(WEBHOOK_CHAT_ID));
+
+        let by_title = vec![ConversationSummary {
+            id: "c-0002".into(),
+            title: WEBHOOK_CHAT_TITLE.into(),
+        }];
+        assert_eq!(find_webhook_chat(&by_title), Some("c-0002"));
     }
 
     #[test]

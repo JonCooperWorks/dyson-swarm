@@ -96,6 +96,53 @@
   font-size: 18px;
 }
 
+.admin-catalog-modal {
+  max-width: min(920px, calc(100vw - 32px));
+}
+
+.admin-catalog-template {
+  min-height: 320px;
+}
+
+.admin-catalog-placeholders {
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+
+.admin-catalog-credential-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.admin-catalog-credential-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 0.85fr) minmax(140px, 1fr) minmax(160px, 1.2fr) minmax(120px, 0.9fr);
+  gap: 10px;
+  align-items: end;
+  border-bottom: 1px dashed var(--border);
+  padding-bottom: 10px;
+}
+
+.admin-catalog-credential-row:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+.admin-catalog-flags {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+@media (max-width: 760px) {
+  .admin-catalog-credential-row {
+    grid-template-columns: 1fr;
+  }
+}
+
 .banner-info {
   background: color-mix(in srgb, var(--accent) 12%, transparent);
   color: var(--fg);

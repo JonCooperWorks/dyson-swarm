@@ -377,6 +377,25 @@ pub fn entry_from_docker_catalog_template(
     Ok((name, entry))
 }
 
+/// Validate an operator-curated Docker MCP preset without needing real
+/// user credentials.  The same renderer/parser used by the user save
+/// path does the heavy lifting, so admin UI/API validation and runtime
+/// persistence stay in lockstep.
+pub fn validate_docker_catalog_server(catalog: &McpDockerCatalogServer) -> Result<(), String> {
+    if catalog.label.trim().is_empty() {
+        return Err("catalog label is required".into());
+    }
+    if catalog.template.trim().is_empty() {
+        return Err("catalog template is required".into());
+    }
+    let dummy_credentials = catalog
+        .credentials
+        .iter()
+        .map(|field| (field.id.clone(), format!("__{}__", field.id)))
+        .collect();
+    entry_from_docker_catalog_template(catalog, &dummy_credentials, None).map(|_| ())
+}
+
 struct ResolvedCatalogCredentials {
     render_values: BTreeMap<String, String>,
     stored_values: BTreeMap<String, String>,
@@ -1834,6 +1853,52 @@ mod tests {
             }
             other => panic!("expected docker stdio runtime, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn docker_catalog_validation_allows_no_placeholder_presets() {
+        let catalog = McpDockerCatalogServer {
+            id: "memory".into(),
+            label: "Memory".into(),
+            description: None,
+            template: serde_json::json!({
+                "servers": {
+                    "memory": {
+                        "type": "stdio",
+                        "command": "docker",
+                        "args": ["run", "--rm", "-i", "ghcr.io/example/memory-mcp"]
+                    }
+                }
+            })
+            .to_string(),
+            credentials: vec![],
+        };
+
+        validate_docker_catalog_server(&catalog).unwrap();
+    }
+
+    #[test]
+    fn docker_catalog_validation_rejects_unknown_placeholders() {
+        let catalog = McpDockerCatalogServer {
+            id: "github".into(),
+            label: "GitHub".into(),
+            description: None,
+            template: serde_json::json!({
+                "servers": {
+                    "github": {
+                        "type": "stdio",
+                        "command": "docker",
+                        "args": ["run", "--rm", "-i", "ghcr.io/example/github-mcp"],
+                        "env": { "GITHUB_TOKEN": "{{credential.github_token}}" }
+                    }
+                }
+            })
+            .to_string(),
+            credentials: vec![],
+        };
+
+        let err = validate_docker_catalog_server(&catalog).unwrap_err();
+        assert!(err.contains("unknown catalog credential"));
     }
 
     #[test]

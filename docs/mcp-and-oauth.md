@@ -23,12 +23,13 @@ Relevant code:
 
 ## Docker Catalog
 
-Operators can curate Docker-backed stdio MCP servers under
-`[mcp_runtime]` in `config.toml`.
+Operators can curate Docker-backed stdio MCP servers in the admin UI. The rows
+live in the `mcp_docker_catalog` table; `[[mcp_runtime.docker_catalog]]` entries
+in `config.toml` seed config-managed rows at startup.
 
 - `allow_user_docker_json = true` keeps the trusted-node path where users can
   paste one VS Code-style Docker MCP JSON object.
-- `allow_user_docker_json = false` removes that free-form surface; users choose
+- `allow_user_docker_json = false` (the default) removes that free-form surface; users choose
   from `[[mcp_runtime.docker_catalog]]` presets instead.
 - each catalog preset is still the same MCP JSON shape, but credential
   placeholders such as `{{credential.github_token}}` are rendered by swarm

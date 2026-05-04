@@ -692,7 +692,7 @@ export function NewInstanceForm() {
   // `id`) is built in `submit`.
   const [mcpServers, setMcpServers] = React.useState([]);
   const [mcpDockerCatalog, setMcpDockerCatalog] = React.useState({
-    allow_raw_json: true,
+    allow_raw_json: false,
     servers: [],
   });
   React.useEffect(() => {
@@ -1586,7 +1586,7 @@ function McpServerTypeField({ value, onChange, disabled = false, dockerCatalog =
 
 function normalizeDockerCatalog(catalog) {
   return {
-    allow_raw_json: catalog?.allow_raw_json !== false,
+    allow_raw_json: catalog?.allow_raw_json === true,
     servers: Array.isArray(catalog?.servers) ? catalog.servers : [],
   };
 }
@@ -3047,7 +3047,7 @@ export function McpServersPanel({ instanceId, policyKind, disabled }) {
   const { client } = useApi();
   const [rows, setRows] = React.useState(null);
   const [dockerCatalog, setDockerCatalog] = React.useState({
-    allow_raw_json: true,
+    allow_raw_json: false,
     servers: [],
   });
   const [err, setErr] = React.useState(null);
@@ -3216,24 +3216,32 @@ export function McpServersPanel({ instanceId, policyKind, disabled }) {
         <p className="muted small">no MCP servers attached.</p>
       ) : (
         <ul className="mcp-row-list">
-          {rows.map(r => (
-            <McpServerRow
-              key={r.name}
-              row={r}
-              instanceId={instanceId}
-              policyKind={policyKind}
-              busy={busy || disabled}
-              onEdit={
-                isDockerMcpRow(r) && !isCatalogMcpRow(r) && !dockerCatalog.allow_raw_json
-                  ? null
-                  : () => openEdit(r)
-              }
-              onConnect={() => connect(r.name)}
-              onDisconnect={() => disconnect(r.name)}
-              onRemove={() => remove(r.name)}
-              onCatalogUpdated={() => refresh()}
-            />
-          ))}
+          {rows.map(r => {
+            const catalogPreset = dockerCatalog.servers.find(server => server.id === r.docker_catalog_id);
+            const canEditCatalog = isCatalogMcpRow(r)
+              && Boolean(catalogPreset)
+              && (catalogPreset.credentials || []).length > 0;
+            const canEditRawDocker = isDockerMcpRow(r)
+              && !isCatalogMcpRow(r)
+              && dockerCatalog.allow_raw_json;
+            const canEdit = isCatalogMcpRow(r)
+              ? canEditCatalog
+              : (!isDockerMcpRow(r) || canEditRawDocker);
+            return (
+              <McpServerRow
+                key={r.name}
+                row={r}
+                instanceId={instanceId}
+                policyKind={policyKind}
+                busy={busy || disabled}
+                onEdit={canEdit ? () => openEdit(r) : null}
+                onConnect={() => connect(r.name)}
+                onDisconnect={() => disconnect(r.name)}
+                onRemove={() => remove(r.name)}
+                onCatalogUpdated={() => refresh()}
+              />
+            );
+          })}
         </ul>
       )}
       {editing ? (

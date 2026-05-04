@@ -9,14 +9,14 @@ import { TopBar } from './topbar.jsx';
 afterEach(() => { cleanup(); });
 
 describe('TopBar', () => {
-  test('labels the global artefacts nav item with its scope', () => {
+  test('labels the global artefacts nav item', () => {
     render(
       <ApiProvider client={{}} auth={{ mode: 'none' }}>
         <TopBar view={{ name: 'artefacts' }}/>
       </ApiProvider>,
     );
 
-    expect(screen.getByRole('link', { name: 'all artefacts' })).toHaveAttribute('href', '#/artefacts');
+    expect(screen.getByRole('link', { name: 'artefacts' })).toHaveAttribute('href', '#/artefacts');
     expect(screen.getByRole('link', { name: 'agents' })).toHaveAttribute('href', '#/');
   });
 

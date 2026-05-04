@@ -363,6 +363,21 @@ describe('McpServersPanel', () => {
     expect(client.putMcpJsonConfig).not.toHaveBeenCalled();
   });
 
+  test('Docker JSON add path is hidden when the catalog disallows raw JSON', async () => {
+    const client = {
+      listMcpServers: vi.fn().mockResolvedValue([]),
+      listMcpDockerCatalog: vi.fn().mockResolvedValue({ allow_raw_json: false, servers: [] }),
+      putMcpServer: vi.fn(),
+      putMcpJsonConfig: vi.fn(),
+    };
+    renderPanel(client);
+
+    await screen.findByText('no MCP servers attached.');
+    fireEvent.click(screen.getByRole('button', { name: 'add' }));
+    expect(screen.queryByRole('option', { name: 'Docker JSON' })).toBeNull();
+    expect(screen.getByLabelText('MCP server type')).toHaveValue('remote');
+  });
+
   test('Docker add path shows the JSON editor and saves through the single-server config API', async () => {
     let rows = [];
     const dockerConfig = {
@@ -516,6 +531,44 @@ describe('McpServersPanel', () => {
     ));
     expect(client.putMcpJsonConfig).not.toHaveBeenCalled();
     await screen.findByText('github');
+  });
+
+  test('Docker catalog rows with no placeholders have no edit surface', async () => {
+    const client = {
+      listMcpServers: vi.fn().mockResolvedValue([{
+        name: 'github',
+        url: 'docker://ghcr.io/example/github-mcp',
+        server_type: 'docker',
+        docker_catalog_id: 'github',
+        auth_kind: 'none',
+        connected: true,
+      }]),
+      listMcpDockerCatalog: vi.fn().mockResolvedValue({
+        allow_raw_json: false,
+        servers: [{
+          id: 'github',
+          label: 'GitHub',
+          template: JSON.stringify({
+            servers: {
+              github: {
+                type: 'stdio',
+                command: 'docker',
+                args: ['run', '--rm', '-i', 'ghcr.io/example/github-mcp'],
+              },
+            },
+          }),
+          credentials: [],
+        }],
+      }),
+      getMcpJsonConfig: vi.fn(),
+      putMcpJsonConfig: vi.fn(),
+      putMcpServer: vi.fn(),
+    };
+    renderPanel(client);
+
+    await screen.findByText('github');
+    expect(screen.queryByRole('button', { name: 'edit' })).toBeNull();
+    expect(client.getMcpJsonConfig).not.toHaveBeenCalled();
   });
 
   test('Docker add path does not submit the grey example when the editor is empty', async () => {
@@ -826,6 +879,7 @@ describe('NewInstanceForm MCP setup', () => {
       }),
       putMcpJsonConfig: vi.fn().mockResolvedValue({ ok: true }),
       probeInstance: vi.fn().mockResolvedValue({ status: 'healthy' }),
+      listMcpDockerCatalog: vi.fn().mockResolvedValue({ allow_raw_json: true, servers: [] }),
     };
 
     render(React.createElement(
@@ -844,6 +898,7 @@ describe('NewInstanceForm MCP setup', () => {
     ));
 
     fireEvent.click(screen.getByRole('button', { name: /add MCP server/i }));
+    await screen.findByRole('option', { name: 'Docker JSON' });
     fireEvent.change(screen.getByLabelText('MCP server type'), { target: { value: 'docker' } });
     expect(screen.getByText('docker config')).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText('MCP JSON config'), {

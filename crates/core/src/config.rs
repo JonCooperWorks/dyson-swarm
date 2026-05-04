@@ -263,7 +263,7 @@ pub struct McpRuntimeConfig {
 }
 
 fn default_allow_user_docker_json() -> bool {
-    true
+    false
 }
 
 #[derive(Debug, Clone, Deserialize)]

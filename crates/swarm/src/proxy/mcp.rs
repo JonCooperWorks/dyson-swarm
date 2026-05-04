@@ -25,7 +25,8 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
 use crate::auth::{CallerIdentity, extract_bearer};
-use crate::error::SwarmError;
+use crate::db::mcp_catalog::{McpDockerCatalogRow, SqlxMcpDockerCatalogStore};
+use crate::error::{StoreError, SwarmError};
 use crate::instance::InstanceService;
 use crate::mcp_servers::{
     self, AuthMetadata, DcrRequest, McpAuthSpec, McpOAuthTokens, McpRuntimeSpec, McpServerEntry,
@@ -64,6 +65,10 @@ pub struct McpService {
     /// routes.  Trusted nodes can keep this on; public nodes can
     /// require catalog presets only.
     pub allow_user_docker_json: bool,
+    /// DB-backed source of admin-managed Docker MCP presets.  When
+    /// absent, the static config vector above is used as a fallback so
+    /// small unit tests can construct the service without a pool.
+    pub docker_catalog_store: Option<Arc<SqlxMcpDockerCatalogStore>>,
 }
 
 impl McpService {
@@ -85,7 +90,8 @@ impl McpService {
             instance_svc: None,
             runtime_socket_path: None,
             docker_catalog: Vec::new(),
-            allow_user_docker_json: true,
+            allow_user_docker_json: false,
+            docker_catalog_store: None,
         })
     }
 
@@ -112,10 +118,47 @@ impl McpService {
         self
     }
 
+    pub fn with_docker_catalog_store(mut self, store: Arc<SqlxMcpDockerCatalogStore>) -> Self {
+        self.docker_catalog_store = Some(store);
+        self
+    }
+
     fn redirect_uri(&self) -> Option<String> {
         self.public_origin
             .as_deref()
             .map(|o| format!("{}/mcp/oauth/callback", o.trim_end_matches('/')))
+    }
+
+    async fn docker_catalog_rows(&self) -> Result<Vec<McpDockerCatalogRow>, StoreError> {
+        if let Some(store) = &self.docker_catalog_store {
+            return store.list().await;
+        }
+        Ok(self
+            .docker_catalog
+            .iter()
+            .cloned()
+            .map(|server| McpDockerCatalogRow {
+                server,
+                source: "config".into(),
+                created_at: 0,
+                updated_at: 0,
+                deleted_at: None,
+            })
+            .collect())
+    }
+
+    async fn get_docker_catalog_server(
+        &self,
+        id: &str,
+    ) -> Result<Option<mcp_servers::McpDockerCatalogServer>, StoreError> {
+        if let Some(store) = &self.docker_catalog_store {
+            return store.get(id).await.map(|row| row.map(|row| row.server));
+        }
+        Ok(self
+            .docker_catalog
+            .iter()
+            .find(|server| server.id == id)
+            .cloned())
     }
 }
 
@@ -161,6 +204,21 @@ pub fn user_router(svc: Arc<McpService>) -> Router {
             axum::routing::put(put_enabled_tools),
         )
         .route("/v1/instances/:id/mcp/oauth/start", post(oauth_start))
+        .with_state(svc)
+}
+
+/// `/v1/admin/mcp/...` routes — mounted into the admin-only router.
+pub fn admin_router(svc: Arc<McpService>) -> Router {
+    Router::new()
+        .route(
+            "/v1/admin/mcp/docker-catalog",
+            get(admin_list_docker_catalog),
+        )
+        .route(
+            "/v1/admin/mcp/docker-catalog/:catalog_id",
+            axum::routing::put(admin_put_docker_catalog_server)
+                .delete(admin_delete_docker_catalog_server),
+        )
         .with_state(svc)
 }
 
@@ -986,31 +1044,125 @@ struct DockerCatalogCredentialSummary {
 async fn list_docker_catalog(
     State(svc): State<Arc<McpService>>,
 ) -> Result<Json<DockerCatalogResponse>, Response<Body>> {
+    let rows = svc.docker_catalog_rows().await.map_err(store_err_to_resp)?;
     Ok(Json(DockerCatalogResponse {
         allow_raw_json: svc.allow_user_docker_json,
-        servers: svc
-            .docker_catalog
+        servers: rows
             .iter()
-            .map(|server| DockerCatalogServerSummary {
-                id: server.id.clone(),
-                label: server.label.clone(),
-                description: server.description.clone(),
-                template: server.template.clone(),
-                credentials: server
-                    .credentials
-                    .iter()
-                    .map(|credential| DockerCatalogCredentialSummary {
-                        id: credential.id.clone(),
-                        label: credential.label.clone(),
-                        description: credential.description.clone(),
-                        required: credential.required,
-                        secret: credential.secret,
-                        placeholder: credential.placeholder.clone(),
-                    })
-                    .collect(),
-            })
+            .map(|row| docker_catalog_summary(&row.server))
             .collect(),
     }))
+}
+
+#[derive(Serialize)]
+struct AdminDockerCatalogResponse {
+    allow_raw_json: bool,
+    servers: Vec<AdminDockerCatalogServerSummary>,
+}
+
+#[derive(Serialize)]
+struct AdminDockerCatalogServerSummary {
+    #[serde(flatten)]
+    server: DockerCatalogServerSummary,
+    source: String,
+    created_at: i64,
+    updated_at: i64,
+}
+
+#[derive(Deserialize)]
+struct AdminPutDockerCatalogBody {
+    label: String,
+    #[serde(default)]
+    description: Option<String>,
+    template: String,
+    #[serde(default)]
+    credentials: Vec<mcp_servers::McpDockerCredentialSpec>,
+}
+
+async fn admin_list_docker_catalog(
+    State(svc): State<Arc<McpService>>,
+) -> Result<Json<AdminDockerCatalogResponse>, Response<Body>> {
+    let rows = svc.docker_catalog_rows().await.map_err(store_err_to_resp)?;
+    Ok(Json(AdminDockerCatalogResponse {
+        allow_raw_json: svc.allow_user_docker_json,
+        servers: rows
+            .iter()
+            .map(|row| admin_docker_catalog_summary(row))
+            .collect(),
+    }))
+}
+
+async fn admin_put_docker_catalog_server(
+    State(svc): State<Arc<McpService>>,
+    Path(catalog_id): Path<String>,
+    Json(body): Json<AdminPutDockerCatalogBody>,
+) -> Result<Json<AdminDockerCatalogServerSummary>, Response<Body>> {
+    let store = svc.docker_catalog_store.as_ref().ok_or_else(|| {
+        error_resp(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "mcp docker catalog store not configured",
+        )
+    })?;
+    let server = mcp_servers::McpDockerCatalogServer {
+        id: catalog_id,
+        label: body.label,
+        description: body.description,
+        template: body.template,
+        credentials: body.credentials,
+    };
+    mcp_servers::validate_docker_catalog_server(&server)
+        .map_err(|err| error_resp(StatusCode::BAD_REQUEST, &err))?;
+    let row = store
+        .upsert_admin(&server)
+        .await
+        .map_err(store_err_to_resp)?;
+    Ok(Json(admin_docker_catalog_summary(&row)))
+}
+
+async fn admin_delete_docker_catalog_server(
+    State(svc): State<Arc<McpService>>,
+    Path(catalog_id): Path<String>,
+) -> Result<Json<serde_json::Value>, Response<Body>> {
+    let store = svc.docker_catalog_store.as_ref().ok_or_else(|| {
+        error_resp(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "mcp docker catalog store not configured",
+        )
+    })?;
+    let deleted = store.delete(&catalog_id).await.map_err(store_err_to_resp)?;
+    Ok(Json(serde_json::json!({ "ok": true, "deleted": deleted })))
+}
+
+fn docker_catalog_summary(
+    server: &mcp_servers::McpDockerCatalogServer,
+) -> DockerCatalogServerSummary {
+    DockerCatalogServerSummary {
+        id: server.id.clone(),
+        label: server.label.clone(),
+        description: server.description.clone(),
+        template: server.template.clone(),
+        credentials: server
+            .credentials
+            .iter()
+            .map(|credential| DockerCatalogCredentialSummary {
+                id: credential.id.clone(),
+                label: credential.label.clone(),
+                description: credential.description.clone(),
+                required: credential.required,
+                secret: credential.secret,
+                placeholder: credential.placeholder.clone(),
+            })
+            .collect(),
+    }
+}
+
+fn admin_docker_catalog_summary(row: &McpDockerCatalogRow) -> AdminDockerCatalogServerSummary {
+    AdminDockerCatalogServerSummary {
+        server: docker_catalog_summary(&row.server),
+        source: row.source.clone(),
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+    }
 }
 
 #[derive(Serialize)]
@@ -1058,9 +1210,9 @@ async fn put_docker_catalog_server(
         ));
     }
     let catalog = svc
-        .docker_catalog
-        .iter()
-        .find(|server| server.id == catalog_id)
+        .get_docker_catalog_server(&catalog_id)
+        .await
+        .map_err(store_err_to_resp)?
         .ok_or_else(|| error_resp(StatusCode::NOT_FOUND, "no such docker mcp catalog entry"))?;
     let isvc = svc.instance_svc.as_ref().ok_or_else(|| {
         error_resp(
@@ -1069,7 +1221,7 @@ async fn put_docker_catalog_server(
         )
     })?;
     let name = isvc
-        .put_docker_catalog_mcp_server(&caller.user_id, &instance_id, catalog, body.credentials)
+        .put_docker_catalog_mcp_server(&caller.user_id, &instance_id, &catalog, body.credentials)
         .await
         .map_err(swarm_err_to_resp)?;
     Ok(Json(serde_json::json!({ "ok": true, "name": name })))
@@ -1786,6 +1938,15 @@ fn swarm_err_to_resp(err: SwarmError) -> Response<Body> {
         _ => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
     };
     error_resp(status, &msg)
+}
+
+fn store_err_to_resp(err: StoreError) -> Response<Body> {
+    let status = match &err {
+        StoreError::NotFound => StatusCode::NOT_FOUND,
+        StoreError::Constraint(_) | StoreError::Malformed(_) => StatusCode::BAD_REQUEST,
+        StoreError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    error_resp(status, &err.to_string())
 }
 
 // ───────────────────────────────────────────────────────────────────

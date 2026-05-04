@@ -545,6 +545,7 @@ mod tests {
             user_auth,
             axum::Router::new(),
             axum::Router::new(),
+            axum::Router::new(),
         );
         tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();

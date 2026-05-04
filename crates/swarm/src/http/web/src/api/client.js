@@ -536,6 +536,23 @@ export class SwarmClient {
       { method: 'POST' },
     );
   }
+  adminListMcpDockerCatalog() {
+    return this._json('/v1/admin/mcp/docker-catalog', {
+      headers: { Accept: 'application/json' },
+    });
+  }
+  adminPutMcpDockerCatalogServer(id, { label, description = null, template, credentials = [] }) {
+    return this._json(`/v1/admin/mcp/docker-catalog/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ label, description, template, credentials }),
+    });
+  }
+  adminDeleteMcpDockerCatalogServer(id) {
+    return this._json(`/v1/admin/mcp/docker-catalog/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    });
+  }
 
   // ─── Provider keys (BYOK) ──────────────────────────────────────────
   //

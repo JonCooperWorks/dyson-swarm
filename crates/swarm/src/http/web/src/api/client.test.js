@@ -126,7 +126,7 @@ describe('SwarmClient', () => {
       label: 'GitHub',
       description: null,
       template: '{"servers":{}}',
-      credentials: [{ id: 'github_token', label: 'GitHub token' }],
+      placeholders: [{ id: 'github_token', label: 'GitHub token' }],
     });
     await client.adminDeleteMcpDockerCatalogServer('github/preset');
 
@@ -138,7 +138,7 @@ describe('SwarmClient', () => {
       label: 'GitHub',
       description: null,
       template: '{"servers":{}}',
-      credentials: [{ id: 'github_token', label: 'GitHub token' }],
+      placeholders: [{ id: 'github_token', label: 'GitHub token' }],
     });
     expect(fetchImpl.mock.calls[2][0]).toBe('/v1/admin/mcp/docker-catalog/github%2Fpreset');
     expect(fetchImpl.mock.calls[2][1].method).toBe('DELETE');

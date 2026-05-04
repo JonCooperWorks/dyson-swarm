@@ -488,7 +488,7 @@ describe('McpServersPanel', () => {
             },
           },
         }),
-        credentials: [{
+        placeholders: [{
           id: 'github_token',
           label: 'GitHub token',
           required: true,
@@ -559,7 +559,7 @@ describe('McpServersPanel', () => {
               },
             },
           }),
-          credentials: [],
+          placeholders: [],
         }],
       }),
       getMcpJsonConfig: vi.fn(),
@@ -836,7 +836,7 @@ describe('splitMcpSetupRows', () => {
             },
           },
         }),
-        credentials: [{
+        placeholders: [{
           id: 'github_token',
           label: 'GitHub token',
           required: true,
@@ -850,14 +850,14 @@ describe('splitMcpSetupRows', () => {
         id: 'catalog',
         serverType: 'docker_catalog',
         catalogId: 'github',
-        credentials: { github_token: 'ghp_secret' },
+        placeholders: { github_token: 'ghp_secret' },
       },
     ], catalog)).toEqual({
       remote: [],
       dockerConfigs: [],
       dockerCatalogServers: [{
         catalogId: 'github',
-        credentials: { github_token: 'ghp_secret' },
+        placeholders: { github_token: 'ghp_secret' },
       }],
     });
   });

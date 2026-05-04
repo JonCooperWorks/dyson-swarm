@@ -9,7 +9,7 @@ use sqlx::{Row, SqlitePool};
 use crate::db::map_sqlx;
 use crate::error::StoreError;
 use crate::mcp_servers::{
-    McpDockerCatalogServer, McpDockerCredentialSpec, validate_docker_catalog_server,
+    McpDockerCatalogServer, McpDockerPlaceholderSpec, validate_docker_catalog_server,
 };
 use crate::now_secs;
 
@@ -39,17 +39,17 @@ impl SqlxMcpDockerCatalogStore {
     pub async fn seed_config(&self, servers: &[McpDockerCatalogServer]) -> Result<(), StoreError> {
         for server in servers {
             validate_docker_catalog_server(server).map_err(StoreError::Malformed)?;
-            let credentials_json = credentials_json(&server.credentials)?;
+            let placeholders_json = placeholders_json(&server.placeholders)?;
             let now = now_secs();
             sqlx::query(
                 "INSERT INTO mcp_docker_catalog \
-                 (id, label, description, template, credentials_json, source, created_at, updated_at, deleted_at) \
+                 (id, label, description, template, placeholders_json, source, created_at, updated_at, deleted_at) \
                  VALUES (?, ?, ?, ?, ?, 'config', ?, ?, NULL) \
                  ON CONFLICT(id) DO UPDATE SET \
                    label = excluded.label, \
                    description = excluded.description, \
                    template = excluded.template, \
-                   credentials_json = excluded.credentials_json, \
+                   placeholders_json = excluded.placeholders_json, \
                    updated_at = excluded.updated_at \
                  WHERE mcp_docker_catalog.source = 'config' \
                    AND mcp_docker_catalog.deleted_at IS NULL",
@@ -58,7 +58,7 @@ impl SqlxMcpDockerCatalogStore {
             .bind(&server.label)
             .bind(&server.description)
             .bind(&server.template)
-            .bind(&credentials_json)
+            .bind(&placeholders_json)
             .bind(now)
             .bind(now)
             .execute(&self.pool)
@@ -70,7 +70,7 @@ impl SqlxMcpDockerCatalogStore {
 
     pub async fn list(&self) -> Result<Vec<McpDockerCatalogRow>, StoreError> {
         let rows = sqlx::query(
-            "SELECT id, label, description, template, credentials_json, source, created_at, updated_at, deleted_at \
+            "SELECT id, label, description, template, placeholders_json, source, created_at, updated_at, deleted_at \
              FROM mcp_docker_catalog \
              WHERE deleted_at IS NULL \
              ORDER BY label COLLATE NOCASE, id COLLATE NOCASE",
@@ -83,7 +83,7 @@ impl SqlxMcpDockerCatalogStore {
 
     pub async fn get(&self, id: &str) -> Result<Option<McpDockerCatalogRow>, StoreError> {
         let row = sqlx::query(
-            "SELECT id, label, description, template, credentials_json, source, created_at, updated_at, deleted_at \
+            "SELECT id, label, description, template, placeholders_json, source, created_at, updated_at, deleted_at \
              FROM mcp_docker_catalog \
              WHERE id = ? AND deleted_at IS NULL",
         )
@@ -99,17 +99,17 @@ impl SqlxMcpDockerCatalogStore {
         server: &McpDockerCatalogServer,
     ) -> Result<McpDockerCatalogRow, StoreError> {
         validate_docker_catalog_server(server).map_err(StoreError::Malformed)?;
-        let credentials_json = credentials_json(&server.credentials)?;
+        let placeholders_json = placeholders_json(&server.placeholders)?;
         let now = now_secs();
         sqlx::query(
             "INSERT INTO mcp_docker_catalog \
-             (id, label, description, template, credentials_json, source, created_at, updated_at, deleted_at) \
+             (id, label, description, template, placeholders_json, source, created_at, updated_at, deleted_at) \
              VALUES (?, ?, ?, ?, ?, 'admin', ?, ?, NULL) \
              ON CONFLICT(id) DO UPDATE SET \
                label = excluded.label, \
                description = excluded.description, \
                template = excluded.template, \
-               credentials_json = excluded.credentials_json, \
+               placeholders_json = excluded.placeholders_json, \
                source = 'admin', \
                updated_at = excluded.updated_at, \
                deleted_at = NULL",
@@ -118,7 +118,7 @@ impl SqlxMcpDockerCatalogStore {
         .bind(&server.label)
         .bind(&server.description)
         .bind(&server.template)
-        .bind(&credentials_json)
+        .bind(&placeholders_json)
         .bind(now)
         .bind(now)
         .execute(&self.pool)
@@ -146,22 +146,22 @@ impl SqlxMcpDockerCatalogStore {
     }
 }
 
-fn credentials_json(credentials: &[McpDockerCredentialSpec]) -> Result<String, StoreError> {
-    serde_json::to_string(credentials)
-        .map_err(|err| StoreError::Io(format!("mcp catalog credentials encode: {err}")))
+fn placeholders_json(placeholders: &[McpDockerPlaceholderSpec]) -> Result<String, StoreError> {
+    serde_json::to_string(placeholders)
+        .map_err(|err| StoreError::Io(format!("mcp catalog placeholders encode: {err}")))
 }
 
 fn row_to_catalog(row: sqlx::sqlite::SqliteRow) -> Result<McpDockerCatalogRow, StoreError> {
-    let credentials_json: String = row.try_get("credentials_json").map_err(map_sqlx)?;
-    let credentials: Vec<McpDockerCredentialSpec> = serde_json::from_str(&credentials_json)
-        .map_err(|err| StoreError::Malformed(format!("mcp catalog credentials_json: {err}")))?;
+    let placeholders_json: String = row.try_get("placeholders_json").map_err(map_sqlx)?;
+    let placeholders: Vec<McpDockerPlaceholderSpec> = serde_json::from_str(&placeholders_json)
+        .map_err(|err| StoreError::Malformed(format!("mcp catalog placeholders_json: {err}")))?;
     Ok(McpDockerCatalogRow {
         server: McpDockerCatalogServer {
             id: row.try_get("id").map_err(map_sqlx)?,
             label: row.try_get("label").map_err(map_sqlx)?,
             description: row.try_get("description").map_err(map_sqlx)?,
             template: row.try_get("template").map_err(map_sqlx)?,
-            credentials,
+            placeholders,
         },
         source: row.try_get("source").map_err(map_sqlx)?,
         created_at: row.try_get("created_at").map_err(map_sqlx)?,
@@ -175,21 +175,21 @@ mod tests {
     use super::*;
     use crate::db::open_in_memory;
 
-    fn catalog(id: &str, image: &str, credential_id: Option<&str>) -> McpDockerCatalogServer {
+    fn catalog(id: &str, image: &str, placeholder_id: Option<&str>) -> McpDockerCatalogServer {
         let mut server = serde_json::json!({
             "type": "stdio",
             "command": "docker",
             "args": ["run", "--rm", "-i", image],
             "env": {}
         });
-        if let Some(id) = credential_id {
+        if let Some(id) = placeholder_id {
             server["env"] = serde_json::json!({ "API_KEY": format!("{{{{placeholder.{id}}}}}") });
         }
         let mut servers = serde_json::Map::new();
         servers.insert(id.into(), server);
-        let credentials = credential_id
+        let placeholders = placeholder_id
             .map(|id| {
-                vec![McpDockerCredentialSpec {
+                vec![McpDockerPlaceholderSpec {
                     id: id.into(),
                     label: "API key".into(),
                     description: None,
@@ -204,7 +204,7 @@ mod tests {
             label: id.into(),
             description: None,
             template: serde_json::json!({ "servers": servers }).to_string(),
-            credentials,
+            placeholders,
         }
     }
 
@@ -223,7 +223,7 @@ mod tests {
 
         assert_eq!(saved.server.id, "github");
         assert_eq!(saved.source, "admin");
-        assert_eq!(saved.server.credentials[0].id, "token");
+        assert_eq!(saved.server.placeholders[0].id, "token");
 
         let list = store.list().await.unwrap();
         assert_eq!(list.len(), 1);

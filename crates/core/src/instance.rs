@@ -3208,17 +3208,17 @@ impl InstanceService {
     }
 
     /// Add or replace one Docker MCP server from the operator-curated
-    /// catalog.  The user only submits credential values; swarm renders
+    /// catalog.  The user only submits placeholder values; swarm renders
     /// the configured JSON template, validates it through the same
     /// Docker parser as raw JSON, seals the rendered runtime config,
     /// and records the catalog binding so future template updates can
-    /// keep existing credentials.
+    /// keep existing placeholder values.
     pub async fn put_docker_catalog_mcp_server(
         &self,
         owner_id: &str,
         id: &str,
         catalog: &mcp_servers::McpDockerCatalogServer,
-        credentials: BTreeMap<String, String>,
+        placeholders: BTreeMap<String, String>,
     ) -> Result<String, SwarmError> {
         let _row = self
             .instances
@@ -3251,7 +3251,7 @@ impl InstanceService {
 
         let (name, mut entry) = mcp_servers::entry_from_docker_catalog_template(
             catalog,
-            &credentials,
+            &placeholders,
             existing_catalog_entry.as_ref().map(|(_, entry)| entry),
         )
         .map_err(SwarmError::BadRequest)?;
@@ -5289,7 +5289,7 @@ mod tests {
                 }
             })
             .to_string(),
-            credentials: vec![crate::mcp_servers::McpDockerCredentialSpec {
+            placeholders: vec![crate::mcp_servers::McpDockerPlaceholderSpec {
                 id: "github_token".into(),
                 label: "GitHub token".into(),
                 description: None,
@@ -5356,7 +5356,7 @@ mod tests {
                 }
             })
             .to_string(),
-            credentials: vec![crate::mcp_servers::McpDockerCredentialSpec {
+            placeholders: vec![crate::mcp_servers::McpDockerPlaceholderSpec {
                 id: "github_token".into(),
                 label: "GitHub token".into(),
                 description: None,

@@ -4,7 +4,7 @@
  * everything else, with an extra middleware that requires the
  * caller's JWT to carry the configured admin permission/role.  The
  * SPA's normal access token is therefore sufficient — no separate
- * credential, no token prompt.  Users without the admin permission
+ * token prompt.  Users without the admin permission
  * see a "not authorized" splash instead of the panels (driven by a
  * probe of /v1/admin/users; backend is the source of truth).
  */
@@ -160,7 +160,7 @@ function DockerCatalogPanel({ client }) {
                   </span>
                 </td>
                 <td data-label="placeholders" className="muted small">
-                  {(row.credentials || []).length}
+                  {(row.placeholders || []).length}
                 </td>
                 <td data-label="updated" className="muted small">{fmtTime(row.updated_at)}</td>
                 <td className="row-actions">
@@ -193,7 +193,7 @@ function emptyDockerCatalogPreset() {
     label: '',
     description: '',
     template: '',
-    credentials: [],
+    placeholders: [],
   };
 }
 
@@ -232,7 +232,7 @@ function DockerCatalogEditorPage({ client, mode, catalogId }) {
         label: preset.label,
         description: preset.description,
         template: preset.template,
-        credentials: preset.credentials,
+        placeholders: preset.placeholders,
       });
       window.location.hash = '#/admin';
     } catch (e) {
@@ -280,7 +280,7 @@ function DockerCatalogForm({ mode, initial, busy, onCancel, onSave }) {
   const [placeholderName, setPlaceholderName] = React.useState('');
   const [friendlyName, setFriendlyName] = React.useState('');
   const [placeholderLabels, setPlaceholderLabels] = React.useState(
-    () => Object.fromEntries((initial?.credentials || []).map(field => [field.id, field.label || field.id])),
+    () => Object.fromEntries((initial?.placeholders || []).map(field => [field.id, field.label || field.id])),
   );
   const [err, setErr] = React.useState(null);
 
@@ -326,13 +326,13 @@ function DockerCatalogForm({ mode, initial, busy, onCancel, onSave }) {
   const submit = (e) => {
     e.preventDefault();
     setErr(null);
-    const credentials = placeholderSpecsFromTemplate(template, placeholderLabels);
+    const placeholders = placeholderSpecsFromTemplate(template, placeholderLabels);
     const preset = {
       id: id.trim(),
       label: label.trim(),
       description: description.trim() || null,
       template,
-      credentials,
+      placeholders,
     };
     const validation = validateCatalogPreset(preset);
     if (validation) {
@@ -560,7 +560,7 @@ function validateCatalogPreset(preset) {
     return e?.message || 'JSON template is not valid JSON';
   }
   const seen = new Set();
-  for (const field of preset.credentials) {
+  for (const field of preset.placeholders) {
     if (!SAFE_PLACEHOLDER_NAME_RE.test(field.id)) return 'placeholder ids must match [A-Za-z0-9_-]+';
     if (seen.has(field.id)) return `placeholder ${field.id} is duplicated`;
     seen.add(field.id);

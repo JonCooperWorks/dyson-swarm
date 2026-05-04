@@ -394,7 +394,7 @@ export function toolBlockedByNetwork(toolName, kind) {
   return isAirgap(kind) && NETWORK_REQUIRED_TOOL_NAMES.includes(toolName);
 }
 
-// Sentinel placeholder shown in MCP credential inputs on edit.  When
+// Sentinel placeholder shown in MCP secret inputs on edit.  When
 // the form submits with this value verbatim, the swarm side keeps
 // the existing sealed token instead of overwriting — the SPA never
 // reads back the real value, never decrypts.  The bullet character
@@ -798,7 +798,7 @@ export function NewInstanceForm() {
           await client.putMcpDockerCatalogServer(
             result.id,
             preset.catalogId,
-            preset.credentials,
+            preset.placeholders,
           );
         }
         await waitUntilHealthy(client, result.id);
@@ -1317,16 +1317,16 @@ export function splitMcpSetupRows(rows, dockerCatalog = null) {
       if (names.has(serverName)) {
         throw new Error(`MCP server "${serverName}" is configured more than once.`);
       }
-      const credentials = {};
-      for (const field of server.credentials || []) {
-        const value = row.credentials?.[field.id] || '';
+      const placeholders = {};
+      for (const field of server.placeholders || []) {
+        const value = row.placeholders?.[field.id] || '';
         if (field.required && !String(value).trim()) {
           throw new Error(`${field.label || field.id} is required for ${server.label || server.id}.`);
         }
-        if (String(value).trim()) credentials[field.id] = value;
+        if (String(value).trim()) placeholders[field.id] = value;
       }
       names.add(serverName);
-      dockerCatalogServers.push({ catalogId, credentials });
+      dockerCatalogServers.push({ catalogId, placeholders });
     }
   }
   return { remote, dockerConfigs, dockerCatalogServers };
@@ -1343,7 +1343,7 @@ function freshMcpRow(serverType = 'remote') {
     auth: { kind: 'none' },
     jsonText: '',
     catalogId: '',
-    credentials: {},
+    placeholders: {},
   };
 }
 
@@ -1409,8 +1409,8 @@ function McpServerCard({ row, dockerCatalog, onChange, onChangeAuth, onRemove })
     : (serverType === 'docker_catalog'
       ? (parsedCatalogName || selectedCatalog?.label || 'docker')
       : (row.name?.trim() || 'unnamed'));
-  const setCredential = (id, value) =>
-    onChange({ credentials: { ...(row.credentials || {}), [id]: value } });
+  const setPlaceholder = (id, value) =>
+    onChange({ placeholders: { ...(row.placeholders || {}), [id]: value } });
   return (
     <div className="mcp-card panel">
       <div className="mcp-card-head">
@@ -1447,7 +1447,7 @@ function McpServerCard({ row, dockerCatalog, onChange, onChangeAuth, onRemove })
               <span>Docker</span>
               <select
                 value={selectedCatalog?.id || ''}
-                onChange={e => onChange({ catalogId: e.target.value, credentials: {} })}
+                onChange={e => onChange({ catalogId: e.target.value, placeholders: {} })}
               >
                 {catalogServers.map(server => (
                   <option key={server.id} value={server.id}>
@@ -1463,8 +1463,8 @@ function McpServerCard({ row, dockerCatalog, onChange, onChangeAuth, onRemove })
               <>
                 <McpCatalogPlaceholderFields
                   server={selectedCatalog}
-                  values={row.credentials || {}}
-                  onChange={setCredential}
+                  values={row.placeholders || {}}
+                  onChange={setPlaceholder}
                 />
               </>
             ) : (
@@ -1606,7 +1606,7 @@ function McpDockerJsonField({ value, onChange, disabled = false, autoFocus = fal
 }
 
 function McpCatalogPlaceholderFields({ server, values, onChange, keepExisting = false }) {
-  const placeholders = server?.credentials || [];
+  const placeholders = server?.placeholders || [];
   if (placeholders.length === 0) {
     return <p className="muted small mcp-card-note">No placeholders to fill.</p>;
   }
@@ -3120,10 +3120,10 @@ export function McpServersPanel({ instanceId, policyKind, disabled }) {
     }
   };
 
-  const submitDockerCatalog = async ({ catalogId, credentials }) => {
+  const submitDockerCatalog = async ({ catalogId, placeholders }) => {
     setBusy(true); setErr(null);
     try {
-      await client.putMcpDockerCatalogServer(instanceId, catalogId, credentials);
+      await client.putMcpDockerCatalogServer(instanceId, catalogId, placeholders);
       await refresh();
       setEditing(null);
     } catch (e) {
@@ -3195,7 +3195,7 @@ export function McpServersPanel({ instanceId, policyKind, disabled }) {
             const catalogPreset = dockerCatalog.servers.find(server => server.id === r.docker_catalog_id);
             const canEditCatalog = isCatalogMcpRow(r)
               && Boolean(catalogPreset)
-              && (catalogPreset.credentials || []).length > 0;
+              && (catalogPreset.placeholders || []).length > 0;
             const canEditRawDocker = isDockerMcpRow(r)
               && !isCatalogMcpRow(r)
               && dockerCatalog.allow_raw_json;
@@ -3499,7 +3499,7 @@ function McpServerEditModal({
   // though the typical flow is just to leave it alone.
   const isNew = !initial;
   const initialAuthKind = initial?.auth_kind || 'none';
-  // True when the credential field for this auth kind is already
+  // True when the secret field for this auth kind is already
   // populated server-side and the operator is editing (not adding).
   // Bearer always carries a token, OAuth optionally carries a
   // client_secret — for OAuth we conservatively pre-mask only when
@@ -3534,9 +3534,9 @@ function McpServerEditModal({
     initialIsDocker && initial?.raw_config ? JSON.stringify(initial.raw_config, null, 2) : ''
   );
   const [catalogId, setCatalogId] = React.useState(initial?.docker_catalog_id || initialCatalog?.id || '');
-  const [catalogCredentials, setCatalogCredentials] = React.useState(() => {
+  const [catalogPlaceholders, setCatalogPlaceholders] = React.useState(() => {
     if (!initialIsCatalog || !initialCatalog) return {};
-    return Object.fromEntries((initialCatalog.credentials || []).map(field => [field.id, MCP_KEEP_TOKEN]));
+    return Object.fromEntries((initialCatalog.placeholders || []).map(field => [field.id, MCP_KEEP_TOKEN]));
   });
   const [err, setErr] = React.useState(null);
   const isDockerJsonMode = (isNew && serverType === 'docker') || (!isNew && initialIsDocker);
@@ -3557,9 +3557,9 @@ function McpServerEditModal({
 
   React.useEffect(() => {
     if (!isDockerCatalogMode || !selectedCatalog) return;
-    setCatalogCredentials(curr => {
+    setCatalogPlaceholders(curr => {
       const next = {};
-      for (const field of selectedCatalog.credentials || []) {
+      for (const field of selectedCatalog.placeholders || []) {
         next[field.id] = curr[field.id] || (!isNew && initialIsCatalog ? MCP_KEEP_TOKEN : '');
       }
       return next;
@@ -3587,15 +3587,15 @@ function McpServerEditModal({
         setErr(`a server named "${serverName}" already exists`);
         return;
       }
-      for (const field of selectedCatalog.credentials || []) {
-        const value = catalogCredentials[field.id] || '';
+      for (const field of selectedCatalog.placeholders || []) {
+        const value = catalogPlaceholders[field.id] || '';
         const keepExisting = !isNew && value === MCP_KEEP_TOKEN;
         if (field.required && !keepExisting && !String(value).trim()) {
           setErr(`${field.label || field.id} is required`);
           return;
         }
       }
-      onSubmitCatalog({ catalogId: selectedCatalog.id, credentials: catalogCredentials });
+      onSubmitCatalog({ catalogId: selectedCatalog.id, placeholders: catalogPlaceholders });
       return;
     }
     if (isDockerJsonMode) {
@@ -3681,7 +3681,7 @@ function McpServerEditModal({
                   value={selectedCatalog?.id || ''}
                   onChange={e => {
                     setCatalogId(e.target.value);
-                    setCatalogCredentials({});
+                    setCatalogPlaceholders({});
                   }}
                   disabled={busy || !isNew}
                 >
@@ -3699,8 +3699,8 @@ function McpServerEditModal({
                 <>
                   <McpCatalogPlaceholderFields
                     server={selectedCatalog}
-                    values={catalogCredentials}
-                    onChange={(id, value) => setCatalogCredentials(curr => ({ ...curr, [id]: value }))}
+                    values={catalogPlaceholders}
+                    onChange={(id, value) => setCatalogPlaceholders(curr => ({ ...curr, [id]: value }))}
                     keepExisting={!isNew}
                   />
                 </>

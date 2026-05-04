@@ -541,11 +541,11 @@ export class SwarmClient {
       headers: { Accept: 'application/json' },
     });
   }
-  adminPutMcpDockerCatalogServer(id, { label, description = null, template, credentials = [] }) {
+  adminPutMcpDockerCatalogServer(id, { label, description = null, template, placeholders = [] }) {
     return this._json(`/v1/admin/mcp/docker-catalog/${encodeURIComponent(id)}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ label, description, template, credentials }),
+      body: JSON.stringify({ label, description, template, placeholders }),
     });
   }
   adminDeleteMcpDockerCatalogServer(id) {
@@ -619,13 +619,13 @@ export class SwarmClient {
     });
   }
 
-  putMcpDockerCatalogServer(instanceId, catalogId, credentials = {}) {
+  putMcpDockerCatalogServer(instanceId, catalogId, placeholders = {}) {
     return this._json(
       `/v1/instances/${encodeURIComponent(instanceId)}/mcp/docker-catalog/${encodeURIComponent(catalogId)}`,
       {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ credentials }),
+        body: JSON.stringify({ placeholders }),
       },
     );
   }

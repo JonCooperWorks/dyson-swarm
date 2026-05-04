@@ -21,7 +21,7 @@ describe('AdminView Docker MCP catalog', () => {
           id: 'github',
           label: 'GitHub',
           template: '{"servers":{}}',
-          credentials: [],
+          placeholders: [],
           source: 'admin',
           created_at: 1,
           updated_at: 2,
@@ -118,7 +118,7 @@ describe('AdminView Docker MCP catalog', () => {
       label: 'GitHub',
       description: 'GitHub MCP tools',
       template: expect.stringContaining('{{placeholder.github_token}}'),
-      credentials: [{
+      placeholders: [{
         id: 'github_token',
         label: 'GitHub token',
         description: null,

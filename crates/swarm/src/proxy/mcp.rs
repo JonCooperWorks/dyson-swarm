@@ -58,7 +58,7 @@ pub struct McpService {
     /// entries return a clear 503.
     pub runtime_socket_path: Option<PathBuf>,
     /// Operator-curated Docker stdio presets.  Users see a slim
-    /// credential surface and read-only JSON preview instead of a
+    /// placeholder surface and read-only JSON preview instead of a
     /// free-form Docker command surface.
     pub docker_catalog: Vec<mcp_servers::McpDockerCatalogServer>,
     /// Whether raw Docker MCP JSON is accepted from user-session
@@ -1122,11 +1122,11 @@ struct DockerCatalogServerSummary {
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
     template: String,
-    credentials: Vec<DockerCatalogCredentialSummary>,
+    placeholders: Vec<DockerCatalogPlaceholderSummary>,
 }
 
 #[derive(Serialize)]
-struct DockerCatalogCredentialSummary {
+struct DockerCatalogPlaceholderSummary {
     id: String,
     label: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1172,7 +1172,7 @@ struct AdminPutDockerCatalogBody {
     description: Option<String>,
     template: String,
     #[serde(default)]
-    credentials: Vec<mcp_servers::McpDockerCredentialSpec>,
+    placeholders: Vec<mcp_servers::McpDockerPlaceholderSpec>,
 }
 
 async fn admin_list_docker_catalog(
@@ -1204,7 +1204,7 @@ async fn admin_put_docker_catalog_server(
         label: body.label,
         description: body.description,
         template: body.template,
-        credentials: body.credentials,
+        placeholders: body.placeholders,
     };
     mcp_servers::validate_docker_catalog_server(&server)
         .map_err(|err| error_resp(StatusCode::BAD_REQUEST, &err))?;
@@ -1256,16 +1256,16 @@ fn docker_catalog_summary(
         label: server.label.clone(),
         description: server.description.clone(),
         template: server.template.clone(),
-        credentials: server
-            .credentials
+        placeholders: server
+            .placeholders
             .iter()
-            .map(|credential| DockerCatalogCredentialSummary {
-                id: credential.id.clone(),
-                label: credential.label.clone(),
-                description: credential.description.clone(),
-                required: credential.required,
-                secret: credential.secret,
-                placeholder: credential.placeholder.clone(),
+            .map(|placeholder| DockerCatalogPlaceholderSummary {
+                id: placeholder.id.clone(),
+                label: placeholder.label.clone(),
+                description: placeholder.description.clone(),
+                required: placeholder.required,
+                secret: placeholder.secret,
+                placeholder: placeholder.placeholder.clone(),
             })
             .collect(),
     }
@@ -1309,7 +1309,7 @@ struct ServerSummary {
 #[derive(Deserialize)]
 struct PutDockerCatalogBody {
     #[serde(default)]
-    credentials: BTreeMap<String, String>,
+    placeholders: BTreeMap<String, String>,
 }
 
 async fn put_docker_catalog_server(
@@ -1336,7 +1336,7 @@ async fn put_docker_catalog_server(
         )
     })?;
     let name = isvc
-        .put_docker_catalog_mcp_server(&caller.user_id, &instance_id, &catalog, body.credentials)
+        .put_docker_catalog_mcp_server(&caller.user_id, &instance_id, &catalog, body.placeholders)
         .await
         .map_err(swarm_err_to_resp)?;
     Ok(Json(serde_json::json!({ "ok": true, "name": name })))

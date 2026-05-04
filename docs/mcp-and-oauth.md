@@ -31,12 +31,12 @@ in `config.toml` seed config-managed rows at startup.
   paste one VS Code-style Docker MCP JSON object.
 - `allow_user_docker_json = false` (the default) removes that free-form surface; users choose
   from `[[mcp_runtime.docker_catalog]]` presets instead.
-- each catalog preset is still the same MCP JSON shape, but credential
-  placeholders such as `{{credential.github_token}}` are rendered by swarm
-  after the user fills declared credential fields.
+- each catalog preset is still the same MCP JSON shape, but placeholders
+  such as `{{placeholder.github_token}}` are rendered by swarm after the user
+  fills the declared fields.
 
 The SPA shows the preset JSON as read-only and sends only the selected
-`catalog_id` plus credential values. Rendered runtime config and credentials are
+`catalog_id` plus placeholder values. Rendered runtime config and values are
 sealed into user secrets; the agent still receives only the swarm proxy URL.
 
 ## Proxy Surfaces

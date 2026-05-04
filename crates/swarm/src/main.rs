@@ -177,6 +177,11 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         pool.clone(),
         cipher_dir.clone(),
     ));
+    let state_files = std::sync::Arc::new(dyson_swarm::state_files::StateFileService::new(
+        pool.clone(),
+        cfg.backup.local_cache_dir.clone(),
+        cipher_dir.clone(),
+    ));
 
     // Dyson agents inside cube sandboxes can't reach swarm's bind
     // (which is loopback 127.0.0.1:8080 by design — Caddy is the only
@@ -277,6 +282,7 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     // stolen sqlite row leaks nothing without their age key — same
     // posture as the OpenRouter BYOK path.
     instance_svc = instance_svc.with_mcp_secrets(user_secrets_svc.clone());
+    instance_svc = instance_svc.with_state_files(state_files.clone());
     let instance_svc = Arc::new(instance_svc);
 
     // Name push sweep.  Every swarm restart re-pushes the per-instance
@@ -658,12 +664,6 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         cfg.backup.local_cache_dir.clone(),
         cipher_dir.clone(),
     ));
-    let state_files = std::sync::Arc::new(dyson_swarm::state_files::StateFileService::new(
-        pool.clone(),
-        cfg.backup.local_cache_dir.clone(),
-        cipher_dir.clone(),
-    ));
-
     let app_state = http::AppState {
         secrets: secrets_svc,
         user_secrets: user_secrets_svc,

@@ -330,6 +330,11 @@ pub struct InstanceService {
     /// agent only ever sees the swarm proxy URL — never the real
     /// upstream + token.
     mcp_secrets: Option<Arc<UserSecretsService>>,
+    /// Swarm-side sealed mirror of dyson workspace/chat state.  When
+    /// present, rebuild paths replay this into the fresh sandbox before
+    /// cutting traffic over, so redeploys do not surface an empty chat
+    /// or workspace while the cube catches up.
+    state_files: Option<crate::state_files::StateFiles>,
 }
 
 /// Anything that can push swarm-side identity/task/model state to a
@@ -749,6 +754,7 @@ impl InstanceService {
             llm_cidr: None,
             resolver: Arc::new(DnsHostResolver),
             mcp_secrets: None,
+            state_files: None,
         }
     }
 
@@ -794,12 +800,67 @@ impl InstanceService {
         self
     }
 
+    /// Builder-style: plug in the sealed workspace/chat mirror used by
+    /// rebuild paths.  Create/clone keep their existing behaviour; only
+    /// paths that replace an existing sandbox use this as the durable
+    /// source before state sync is re-enabled.
+    pub fn with_state_files(mut self, state_files: crate::state_files::StateFiles) -> Self {
+        self.state_files = Some(state_files);
+        self
+    }
+
     /// Build the `<proxy_base>/openrouter` URL the image-gen provider
     /// uses for its `base_url`.  Same shape as `swarm_provider_base_url`
     /// on the dyson-binary side — the trailing `/v1` is added by
     /// dyson's `OpenRouterImageProvider` when it builds the request.
     fn image_proxy_base(&self) -> String {
         format!("{}/openrouter", self.proxy_base.trim_end_matches('/'))
+    }
+
+    fn configure_body_for_existing_row(
+        &self,
+        source: &InstanceRow,
+        proxy_token: &str,
+        ingest_token: &str,
+        state_sync_token: &str,
+    ) -> ReconfigureBody {
+        ReconfigureBody {
+            name: Some(source.name.clone()).filter(|s| !s.is_empty()),
+            task: Some(source.task.clone()).filter(|s| !s.is_empty()),
+            models: source.models.clone(),
+            instance_id: Some(source.id.clone()),
+            proxy_token: Some(proxy_token.to_owned()),
+            proxy_base: Some(format!(
+                "{}/openrouter",
+                self.proxy_base.trim_end_matches('/')
+            )),
+            ingest_url: {
+                let u = build_ingest_url(&self.proxy_base);
+                if u.is_empty() { None } else { Some(u) }
+            },
+            ingest_token: Some(ingest_token.to_owned()),
+            state_sync_url: {
+                let u = build_state_sync_url(&self.proxy_base);
+                if u.is_empty() { None } else { Some(u) }
+            },
+            state_sync_token: Some(state_sync_token.to_owned()),
+            image_provider_name: self
+                .image_gen_defaults
+                .as_ref()
+                .map(|d| d.provider_name.clone()),
+            image_provider_block: self
+                .image_gen_defaults
+                .as_ref()
+                .map(|d| d.provider_block(&self.image_proxy_base(), proxy_token)),
+            image_generation_provider: self
+                .image_gen_defaults
+                .as_ref()
+                .map(|d| d.provider_name.clone()),
+            image_generation_model: self.image_gen_defaults.as_ref().map(|d| d.model.clone()),
+            reset_skills: source.tools.is_empty(),
+            tools: (!source.tools.is_empty()).then(|| source.tools.clone()),
+            mcp_servers: None,
+        }
     }
 
     /// Re-push the per-instance `name` to every Live instance.  The
@@ -1403,7 +1464,8 @@ impl InstanceService {
         // new cube's env envelope — same shape `restore` uses.  Note
         // the SecretStore returns ciphertexts; we don't decrypt here.
         let existing = self.secrets.list(&source.id).await?;
-        let managed = managed_env(
+        let replay_state_files = self.state_files.clone();
+        let mut managed = managed_env(
             &self.proxy_base,
             &proxy_token,
             &ingest_token,
@@ -1414,6 +1476,14 @@ impl InstanceService {
             &source.task,
             &target_policy,
         );
+        if replay_state_files.is_some() {
+            // The fresh cube must not mirror a template-default or
+            // snapshot-stale chat tree back over the durable swarm copy
+            // before replay completes. The configure push after replay
+            // enables state sync with the same token.
+            managed.remove(ENV_STATE_SYNC_URL);
+            managed.remove(ENV_STATE_SYNC_TOKEN);
+        }
         let env = compose_sandbox_env(&managed, &BTreeMap::new(), &existing)?;
 
         // Phase 3: spin up a fresh cube under the new template using
@@ -1445,6 +1515,44 @@ impl InstanceService {
             new_sandbox = %info.sandbox_id,
             "rotate-in-place: new cube live"
         );
+
+        if let Some(state_files) = replay_state_files.as_ref() {
+            if let Err(err) = self
+                .replay_state_files_to_sandbox(owner_id, &source.id, &info.sandbox_id, state_files)
+                .await
+            {
+                if quiesced {
+                    if let Some(rc) = self.reconfigurer.as_ref() {
+                        unquiesce_on_drop("state replay failed", &err);
+                        let _ = rc.unquiesce(&source.id, &old_sandbox_id).await;
+                    }
+                }
+                let _ = self.cube.destroy_sandbox(&info.sandbox_id).await;
+                return Err(err);
+            }
+
+            let reconfigurer = self.reconfigurer.as_ref().ok_or_else(|| {
+                SwarmError::PolicyDenied("dyson reconfigurer not configured".into())
+            })?;
+            let body = self.configure_body_for_existing_row(
+                &source,
+                &proxy_token,
+                &ingest_token,
+                &state_sync_token,
+            );
+            if let Err(err) =
+                push_with_retry(reconfigurer.as_ref(), &source.id, &info.sandbox_id, &body).await
+            {
+                if quiesced {
+                    unquiesce_on_drop("configure-push failed after state replay", &err);
+                    let _ = reconfigurer.unquiesce(&source.id, &old_sandbox_id).await;
+                }
+                let _ = self.cube.destroy_sandbox(&info.sandbox_id).await;
+                return Err(SwarmError::Internal(format!(
+                    "rotate configure-push failed after state replay: {err}"
+                )));
+            }
+        }
 
         // Phase 4: swap on the row.  After this commit, DNS for
         // `<id>.<host>` resolves to the new sandbox — that's the
@@ -1489,44 +1597,15 @@ impl InstanceService {
         // pointing at a Live cube that hasn't been reconfigured yet,
         // which the running `push-names` / `rewire-image-gen` sweeps
         // at next swarm restart will pick up.
-        if let Some(reconfigurer) = self.reconfigurer.as_ref() {
-            let body = ReconfigureBody {
-                name: Some(source.name.clone()).filter(|s| !s.is_empty()),
-                task: Some(source.task.clone()).filter(|s| !s.is_empty()),
-                models: source.models.clone(),
-                instance_id: Some(source.id.clone()),
-                proxy_token: Some(proxy_token.clone()),
-                proxy_base: Some(format!(
-                    "{}/openrouter",
-                    self.proxy_base.trim_end_matches('/')
-                )),
-                ingest_url: {
-                    let u = build_ingest_url(&self.proxy_base);
-                    if u.is_empty() { None } else { Some(u) }
-                },
-                ingest_token: Some(ingest_token.clone()),
-                state_sync_url: {
-                    let u = build_state_sync_url(&self.proxy_base);
-                    if u.is_empty() { None } else { Some(u) }
-                },
-                state_sync_token: Some(state_sync_token.clone()),
-                image_provider_name: self
-                    .image_gen_defaults
-                    .as_ref()
-                    .map(|d| d.provider_name.clone()),
-                image_provider_block: self
-                    .image_gen_defaults
-                    .as_ref()
-                    .map(|d| d.provider_block(&self.image_proxy_base(), &proxy_token)),
-                image_generation_provider: self
-                    .image_gen_defaults
-                    .as_ref()
-                    .map(|d| d.provider_name.clone()),
-                image_generation_model: self.image_gen_defaults.as_ref().map(|d| d.model.clone()),
-                reset_skills: source.tools.is_empty(),
-                tools: (!source.tools.is_empty()).then(|| source.tools.clone()),
-                mcp_servers: None,
-            };
+        if replay_state_files.is_none()
+            && let Some(reconfigurer) = self.reconfigurer.as_ref()
+        {
+            let body = self.configure_body_for_existing_row(
+                &source,
+                &proxy_token,
+                &ingest_token,
+                &state_sync_token,
+            );
             if let Err(err) =
                 push_with_retry(reconfigurer.as_ref(), &source.id, &info.sandbox_id, &body).await
             {
@@ -1760,9 +1839,10 @@ impl InstanceService {
     /// fresh cube under `new_template_id` using the same swarm id,
     /// bearer, name, task, models, tools, and per-instance secrets;
     /// swaps the row; pushes the configure envelope; destroys the
-    /// old cube.  No workspace snapshot is taken, so any in-VM state
-    /// (chat history, on-disk artefacts, agent memory) is lost — the
-    /// new cube starts from the template's clean rootfs.
+    /// old cube.  No cube snapshot is taken; when the sealed swarm-side
+    /// state mirror is configured, workspace/chat files are replayed
+    /// before cutover so the user never lands in an empty fresh rootfs.
+    /// Without that mirror this remains a destructive escape hatch.
     ///
     /// Used as the operator escape hatch when the cube snapshot path
     /// is broken but a template swap still has to happen.  The DNS,
@@ -1807,7 +1887,8 @@ impl InstanceService {
             instance = %source.id,
             from_template = %source.template_id,
             to_template = %new_template_id,
-            "recreate-in-place: starting destructive swap (workspace WILL NOT be preserved)"
+            state_replay = self.state_files.is_some(),
+            "recreate-in-place: starting clean swap"
         );
 
         let proxy_token = match self.tokens.lookup_by_instance(&source.id).await? {
@@ -1831,7 +1912,8 @@ impl InstanceService {
             None => self.tokens.mint_state_sync(&source.id).await?,
         };
         let existing = self.secrets.list(&source.id).await?;
-        let managed = managed_env(
+        let replay_state_files = self.state_files.clone();
+        let mut managed = managed_env(
             &self.proxy_base,
             &proxy_token,
             &ingest_token,
@@ -1842,6 +1924,12 @@ impl InstanceService {
             &source.task,
             &target_policy,
         );
+        if replay_state_files.is_some() {
+            // Keep the clean cube from syncing template-default state
+            // back over the durable mirror before replay lands.
+            managed.remove(ENV_STATE_SYNC_URL);
+            managed.remove(ENV_STATE_SYNC_TOKEN);
+        }
         let env = compose_sandbox_env(&managed, &BTreeMap::new(), &existing)?;
 
         let info = self
@@ -1860,6 +1948,34 @@ impl InstanceService {
             "recreate-in-place: new cube live"
         );
 
+        if let Some(state_files) = replay_state_files.as_ref() {
+            if let Err(err) = self
+                .replay_state_files_to_sandbox(owner_id, &source.id, &info.sandbox_id, state_files)
+                .await
+            {
+                let _ = self.cube.destroy_sandbox(&info.sandbox_id).await;
+                return Err(err);
+            }
+
+            let reconfigurer = self.reconfigurer.as_ref().ok_or_else(|| {
+                SwarmError::PolicyDenied("dyson reconfigurer not configured".into())
+            })?;
+            let body = self.configure_body_for_existing_row(
+                &source,
+                &proxy_token,
+                &ingest_token,
+                &state_sync_token,
+            );
+            if let Err(err) =
+                push_with_retry(reconfigurer.as_ref(), &source.id, &info.sandbox_id, &body).await
+            {
+                let _ = self.cube.destroy_sandbox(&info.sandbox_id).await;
+                return Err(SwarmError::Internal(format!(
+                    "recreate configure-push failed after state replay: {err}"
+                )));
+            }
+        }
+
         self.instances
             .replace_cube_sandbox(
                 &source.id,
@@ -1871,44 +1987,15 @@ impl InstanceService {
             )
             .await?;
 
-        if let Some(reconfigurer) = self.reconfigurer.as_ref() {
-            let body = ReconfigureBody {
-                name: Some(source.name.clone()).filter(|s| !s.is_empty()),
-                task: Some(source.task.clone()).filter(|s| !s.is_empty()),
-                models: source.models.clone(),
-                instance_id: Some(source.id.clone()),
-                proxy_token: Some(proxy_token.clone()),
-                proxy_base: Some(format!(
-                    "{}/openrouter",
-                    self.proxy_base.trim_end_matches('/')
-                )),
-                ingest_url: {
-                    let u = build_ingest_url(&self.proxy_base);
-                    if u.is_empty() { None } else { Some(u) }
-                },
-                ingest_token: Some(ingest_token.clone()),
-                state_sync_url: {
-                    let u = build_state_sync_url(&self.proxy_base);
-                    if u.is_empty() { None } else { Some(u) }
-                },
-                state_sync_token: Some(state_sync_token.clone()),
-                image_provider_name: self
-                    .image_gen_defaults
-                    .as_ref()
-                    .map(|d| d.provider_name.clone()),
-                image_provider_block: self
-                    .image_gen_defaults
-                    .as_ref()
-                    .map(|d| d.provider_block(&self.image_proxy_base(), &proxy_token)),
-                image_generation_provider: self
-                    .image_gen_defaults
-                    .as_ref()
-                    .map(|d| d.provider_name.clone()),
-                image_generation_model: self.image_gen_defaults.as_ref().map(|d| d.model.clone()),
-                reset_skills: source.tools.is_empty(),
-                tools: (!source.tools.is_empty()).then(|| source.tools.clone()),
-                mcp_servers: None,
-            };
+        if replay_state_files.is_none()
+            && let Some(reconfigurer) = self.reconfigurer.as_ref()
+        {
+            let body = self.configure_body_for_existing_row(
+                &source,
+                &proxy_token,
+                &ingest_token,
+                &state_sync_token,
+            );
             if let Err(err) =
                 push_with_retry(reconfigurer.as_ref(), &source.id, &info.sandbox_id, &body).await
             {
@@ -2206,7 +2293,7 @@ impl InstanceService {
             instance = %instance_id,
             sandbox = %sandbox_id,
             files = replayed,
-            "reset-in-place: replayed sealed state files"
+            "state-replay: replayed sealed state files"
         );
         Ok(replayed)
     }
@@ -7231,6 +7318,162 @@ mod tests {
                 .iter()
                 .all(|event| event.starts_with("restore:")),
             "all replay calls must happen before configure enables state sync: {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn binary_rotation_replays_sealed_chats_before_enabling_sync() {
+        let pool = open_in_memory().await.unwrap();
+        let owner = "facefeed".repeat(4);
+        sqlx::query(
+            "INSERT INTO users (id, subject, status, created_at) VALUES (?, ?, 'active', ?)",
+        )
+        .bind(&owner)
+        .bind(&owner)
+        .bind(0i64)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let cube = MockCube::new();
+        let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(
+            pool.clone(),
+            crate::db::test_system_cipher(),
+        ));
+        let secrets_store: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
+        let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(
+            pool.clone(),
+            crate::db::test_system_cipher(),
+        ));
+        let snaps: Arc<dyn SnapshotStore> = Arc::new(SqliteSnapshotStore::new(pool.clone()));
+        let recorder = Arc::new(RecordingReconfigurer::default());
+        let state_root = tempfile::tempdir().unwrap();
+        let keys = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+        let ciphers: Arc<dyn crate::envelope::CipherDirectory> =
+            Arc::new(crate::envelope::AgeCipherDirectory::new(keys.path()).unwrap());
+        let state_files = Arc::new(crate::state_files::StateFileService::new(
+            pool.clone(),
+            state_root.path().into(),
+            ciphers,
+        ));
+        let isvc = Arc::new(
+            InstanceService::new(
+                cube.clone(),
+                instances.clone(),
+                secrets_store,
+                tokens,
+                "https://swarm.test/llm",
+            )
+            .with_reconfigurer(recorder.clone())
+            .with_state_files(state_files.clone()),
+        );
+        let backup: Arc<dyn BackupSink> = Arc::new(LocalDiskBackupSink::new(cube.clone()));
+        let ssvc = Arc::new(SnapshotService::new(
+            cube.clone(),
+            instances.clone(),
+            snaps,
+            backup,
+            isvc.clone(),
+        ));
+
+        let src = isvc
+            .create(
+                &owner,
+                CreateRequest {
+                    template_id: "tpl-v1".into(),
+                    name: Some("redeploy-safe".into()),
+                    task: Some("keep chats".into()),
+                    env: env_with_model(),
+                    ttl_seconds: None,
+                    network_policy: NetworkPolicy::Open,
+                    mcp_servers: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+        recorder.pushed.lock().unwrap().clear();
+        recorder.restored.lock().unwrap().clear();
+        recorder.events.lock().unwrap().clear();
+
+        state_files
+            .ingest(
+                crate::state_files::StateFileMeta {
+                    instance_id: &src.id,
+                    owner_id: &owner,
+                    namespace: "workspace",
+                    path: "memory/SOUL.md",
+                    mime: Some("text/markdown"),
+                    updated_at: 1_777_710_000,
+                },
+                b"still here",
+            )
+            .await
+            .unwrap();
+        state_files
+            .ingest(
+                crate::state_files::StateFileMeta {
+                    instance_id: &src.id,
+                    owner_id: &owner,
+                    namespace: "chats",
+                    path: "c-99/transcript.json",
+                    mime: Some("application/json"),
+                    updated_at: 1_777_710_001,
+                },
+                br#"[{"role":"user","content":"please persist me"}]"#,
+            )
+            .await
+            .unwrap();
+
+        let report = isvc.rotate_binary_all(&ssvc, "tpl-v2").await.unwrap();
+        assert_eq!(report.visited, 1);
+        assert_eq!(report.rotated, 1);
+        assert!(report.failed.is_empty());
+
+        let row = instances
+            .get_for_owner(&owner, &src.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.id, src.id);
+        assert_eq!(row.template_id, "tpl-v2");
+
+        let captured = cube.last_create();
+        assert_eq!(captured.template_id, "tpl-v2");
+        assert!(
+            captured.from_snapshot.is_some(),
+            "redeploy rotation should still use the cube snapshot"
+        );
+        assert!(
+            !captured.env.contains_key(ENV_STATE_SYNC_URL),
+            "rotation create env must keep state sync disabled until replay finishes"
+        );
+        assert!(!captured.env.contains_key(ENV_STATE_SYNC_TOKEN));
+
+        let restored = recorder.restored.lock().unwrap();
+        assert_eq!(restored.len(), 2);
+        assert!(
+            restored
+                .iter()
+                .any(|(_, _, b)| b.namespace == "chats" && b.path == "c-99/transcript.json"),
+            "chat transcript must be replayed during redeploy rotation"
+        );
+        drop(restored);
+
+        let pushed = recorder.pushed.lock().unwrap();
+        assert_eq!(pushed.len(), 1);
+        assert!(
+            pushed[0].2.state_sync_url.is_some() && pushed[0].2.state_sync_token.is_some(),
+            "state sync should be re-enabled only by the post-replay configure push"
+        );
+        drop(pushed);
+
+        let events = recorder.events.lock().unwrap();
+        assert_eq!(events.last().map(String::as_str), Some("push"));
+        assert!(
+            events[..events.len() - 1]
+                .iter()
+                .all(|event| event.starts_with("restore:")),
+            "all state replay calls must happen before configure enables state sync: {events:?}"
         );
     }
 

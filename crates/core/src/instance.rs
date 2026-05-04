@@ -153,6 +153,7 @@ pub const ENV_STATE_SYNC_TOKEN: &str = "SWARM_STATE_SYNC_TOKEN";
 /// and the env exposure here can't drift.
 const INGEST_PATH: &str = "/v1/internal/ingest/artefact";
 const STATE_SYNC_PATH: &str = "/v1/internal/state/file";
+const LEGACY_WEBHOOK_SECRET_PREFIX: &str = "_webhook_";
 
 /// Comma-separated ordered fallback list of model ids.  First entry
 /// matches `SWARM_MODEL`; trailing entries let agents that support
@@ -473,6 +474,10 @@ fn validate_caller_env(env: &BTreeMap<String, String>) -> Result<(), SwarmError>
     )))
 }
 
+fn is_managed_instance_secret_name(name: &str) -> bool {
+    name.starts_with(LEGACY_WEBHOOK_SECRET_PREFIX)
+}
+
 fn compose_sandbox_env(
     managed: &BTreeMap<String, String>,
     caller: &BTreeMap<String, String>,
@@ -482,7 +487,13 @@ fn compose_sandbox_env(
     let filtered_existing: Vec<(String, String)> = existing
         .iter()
         .filter_map(|(name, value)| {
-            if is_reserved_env_name(name) {
+            if is_managed_instance_secret_name(name) {
+                tracing::warn!(
+                    env = %name,
+                    "sandbox env: ignoring managed instance_secret"
+                );
+                None
+            } else if is_reserved_env_name(name) {
                 tracing::warn!(
                     env = %name,
                     "sandbox env: ignoring reserved instance_secret override"
@@ -2273,6 +2284,9 @@ impl InstanceService {
         // can be copied through the store API as-is.
         let existing = self.secrets.list(&source.id).await?;
         for (name, value) in existing {
+            if is_managed_instance_secret_name(&name) {
+                continue;
+            }
             if let Err(err) = self.secrets.put(&created.id, &name, &value).await {
                 tracing::warn!(
                     source = %source.id,
@@ -3435,7 +3449,12 @@ impl InstanceService {
                 .get_for_owner(owner_id, src)
                 .await?
                 .ok_or(SwarmError::NotFound)?;
-            self.secrets.list(src).await?
+            self.secrets
+                .list(src)
+                .await?
+                .into_iter()
+                .filter(|(name, _)| !is_managed_instance_secret_name(name))
+                .collect()
         } else {
             Vec::new()
         };

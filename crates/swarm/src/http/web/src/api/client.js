@@ -213,8 +213,8 @@ export class SwarmClient {
   // Each row is `{ name, description, auth_scheme, enabled, has_secret,
   // path, created_at, updated_at }`.  Signing keys never round-trip in
   // either direction — `has_secret` is the only signal the client gets,
-  // and the secret lives in the standard owner-sealed instance_secrets
-  // store under the convention name `_webhook_<name>`.
+  // and the secret lives in owner-sealed infrastructure storage that is
+  // not passed into the agent runtime.
 
   listWebhooks(instanceId) {
     return this._json(

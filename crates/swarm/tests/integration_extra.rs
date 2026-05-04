@@ -357,7 +357,7 @@ async fn build_stack(subject_for_no_bearer: &str) -> Stack {
     let webhooks_svc = Arc::new(dyson_swarm::webhooks::WebhookService::new(
         webhook_store,
         delivery_store,
-        secrets_svc.clone(),
+        user_secrets_svc.clone(),
         instance_svc.clone(),
         Arc::new(dyson_swarm::webhooks::NullWebhookDispatcher),
         cipher_dir.clone(),

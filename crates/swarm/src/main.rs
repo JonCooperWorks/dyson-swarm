@@ -620,7 +620,7 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     let webhooks_svc = Arc::new(dyson_swarm::webhooks::WebhookService::new(
         webhook_store,
         delivery_store,
-        secrets_svc.clone(),
+        user_secrets_svc.clone(),
         instance_svc.clone(),
         webhook_dispatcher,
         cipher_dir.clone(),

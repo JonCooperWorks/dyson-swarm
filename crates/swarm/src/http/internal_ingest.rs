@@ -312,7 +312,7 @@ mod tests {
         let webhooks_svc = Arc::new(crate::webhooks::WebhookService::new(
             webhook_store,
             delivery_store,
-            secrets_svc.clone(),
+            user_secrets_svc.clone(),
             instance_svc.clone(),
             Arc::new(crate::webhooks::NullWebhookDispatcher),
             cipher_dir.clone(),

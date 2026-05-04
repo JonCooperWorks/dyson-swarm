@@ -2,7 +2,7 @@
 //!
 //! - `WebhookService` glues:
 //!     1. `WebhookStore`         — metadata (name, description, scheme, enabled)
-//!     2. `SecretsService`       — signing keys (sealed under owner's age cipher)
+//!     2. `UserSecretsService`   — signing keys (sealed under owner's age cipher)
 //!     3. `DeliveryStore`        — audit log (metadata + sealed body)
 //!     4. `WebhookDispatcher`    — kicks off a fresh agent conversation
 //!     5. `CipherDirectory`      — owner-keyed age ciphers; used to seal
@@ -32,7 +32,7 @@ use uuid::Uuid;
 use crate::envelope::CipherDirectory;
 use crate::error::StoreError;
 use crate::instance::InstanceService;
-use crate::secrets::{SecretsError, SecretsService};
+use crate::secrets::{SecretsError, UserSecretsService};
 use crate::traits::{
     DeliveryRow, DeliveryStore, InstanceRow, WebhookAuthScheme, WebhookRow, WebhookStore,
 };
@@ -58,13 +58,18 @@ pub const MAX_WEBHOOK_BODY: usize = 4 * 1024 * 1024;
 pub const DEFAULT_DELIVERY_LIMIT: u32 = 50;
 pub const MAX_DELIVERY_LIMIT: u32 = 200;
 
-/// Convention for the `secret_name` column: signing keys are stored
-/// in `instance_secrets` with this prefix so the SPA's regular
-/// secrets panel can hide them (they're managed, not user-set).
-pub const WEBHOOK_SECRET_PREFIX: &str = "_webhook_";
+/// Legacy convention for webhook signing keys when they lived in
+/// `instance_secrets`.  Anything with this prefix is managed
+/// infrastructure state and must never be exposed to an agent runtime.
+pub const LEGACY_WEBHOOK_SECRET_PREFIX: &str = "_webhook_";
 
-pub fn webhook_secret_name(webhook_name: &str) -> String {
-    format!("{WEBHOOK_SECRET_PREFIX}{webhook_name}")
+/// Convention for the `secret_name` column: signing keys are stored in
+/// `user_secrets` under a per-instance, per-webhook key.  They verify
+/// inbound webhooks only; they are not agent-readable runtime secrets.
+pub const WEBHOOK_SECRET_PREFIX: &str = "webhook:";
+
+pub fn webhook_secret_name(instance_id: &str, webhook_name: &str) -> String {
+    format!("{WEBHOOK_SECRET_PREFIX}{instance_id}:{webhook_name}")
 }
 
 /// Lower-cased name accepted for the URL path.  Slug-ish: ascii
@@ -103,10 +108,10 @@ pub enum WebhookError {
     Dispatch(String),
 }
 
-/// One ready-to-write spec.  `secret` is plaintext on the way in;
-/// the service seals it via `SecretsService` and stores the resulting
-/// `secret_name` pointer on the row.  `secret = None` is only valid
-/// for `auth_scheme = None`; the service enforces this at PUT time.
+/// One ready-to-write spec.  `secret` is plaintext on the way in; the
+/// service seals it via `UserSecretsService` and stores the resulting
+/// `secret_name` pointer on the row.  `secret = None` is only valid for
+/// `auth_scheme = None`; the service enforces this at PUT time.
 #[derive(Debug, Clone)]
 pub struct WebhookSpec {
     pub instance_id: String,
@@ -325,13 +330,13 @@ fn urlencode(s: &str) -> String {
 pub struct WebhookService {
     webhooks: Arc<dyn WebhookStore>,
     deliveries: Arc<dyn DeliveryStore>,
-    secrets: Arc<SecretsService>,
+    user_secrets: Arc<UserSecretsService>,
     instances: Arc<InstanceService>,
     dispatcher: Arc<dyn WebhookDispatcher>,
     /// Per-user age ciphers — used to seal audit bodies so the SQLite
     /// file can't be read offline to recover historical webhook
-    /// payloads.  Same directory used by `SecretsService` so we don't
-    /// bring a second key namespace into the picture.
+    /// payloads.  Same directory used by the secret services so we
+    /// don't bring a second key namespace into the picture.
     ciphers: Arc<dyn CipherDirectory>,
 }
 
@@ -339,7 +344,7 @@ impl WebhookService {
     pub fn new(
         webhooks: Arc<dyn WebhookStore>,
         deliveries: Arc<dyn DeliveryStore>,
-        secrets: Arc<SecretsService>,
+        user_secrets: Arc<UserSecretsService>,
         instances: Arc<InstanceService>,
         dispatcher: Arc<dyn WebhookDispatcher>,
         ciphers: Arc<dyn CipherDirectory>,
@@ -347,7 +352,7 @@ impl WebhookService {
         Self {
             webhooks,
             deliveries,
-            secrets,
+            user_secrets,
             instances,
             dispatcher,
             ciphers,
@@ -397,9 +402,9 @@ impl WebhookService {
                 existing.as_ref().and_then(|r| r.secret_name.as_ref()),
             ) {
                 (Some(plain), _) => {
-                    let target = webhook_secret_name(&spec.name);
-                    self.secrets
-                        .put(owner_id, &spec.instance_id, &target, plain)
+                    let target = webhook_secret_name(&spec.instance_id, &spec.name);
+                    self.user_secrets
+                        .put(owner_id, &target, plain.as_bytes())
                         .await?;
                     Some(target)
                 }
@@ -441,15 +446,10 @@ impl WebhookService {
     ) -> Result<(), WebhookError> {
         self.ensure_owner(owner_id, instance_id).await?;
         // Cascade the linked signing key, best-effort.  A failed
-        // secret delete is logged but doesn't block the row delete —
-        // the orphan would be invisible (not exposed in the SPA's
-        // secrets list because of the `_webhook_` prefix filter).
+        // secret delete is logged but doesn't block the row delete.
         if let Ok(Some(row)) = self.webhooks.get(instance_id, name).await
             && let Some(secret_name) = row.secret_name.as_deref()
-            && let Err(e) = self
-                .secrets
-                .delete(owner_id, instance_id, secret_name)
-                .await
+            && let Err(e) = self.user_secrets.delete(owner_id, secret_name).await
         {
             tracing::warn!(
                 instance = %instance_id, webhook = %name, error = %e,
@@ -777,12 +777,12 @@ impl WebhookService {
             .secret_name
             .as_deref()
             .ok_or(WebhookError::SignatureMismatch)?;
-        let listed = self.secrets.list(owner_id, &row.instance_id).await?;
-        listed
-            .into_iter()
-            .find(|(n, _)| n == secret_name)
-            .map(|(_, v)| v)
-            .ok_or(WebhookError::SignatureMismatch)
+        let bytes = self
+            .user_secrets
+            .get(owner_id, secret_name)
+            .await?
+            .ok_or(WebhookError::SignatureMismatch)?;
+        String::from_utf8(bytes).map_err(|_| WebhookError::SignatureMismatch)
     }
 
     async fn ensure_owner(&self, owner_id: &str, instance_id: &str) -> Result<(), WebhookError> {
@@ -812,7 +812,39 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::traits::WebhookAuthScheme;
+    use crate::network_policy::NetworkPolicy;
+    use crate::traits::{
+        CreateSandboxArgs, CubeClient, InstanceRow, InstanceStatus, InstanceStore, SandboxInfo,
+        SecretStore, SnapshotInfo, TokenStore, WebhookAuthScheme,
+    };
+
+    struct StubCube;
+
+    #[async_trait::async_trait]
+    impl CubeClient for StubCube {
+        async fn create_sandbox(
+            &self,
+            _: CreateSandboxArgs,
+        ) -> Result<SandboxInfo, crate::error::CubeError> {
+            unreachable!()
+        }
+
+        async fn destroy_sandbox(&self, _: &str) -> Result<(), crate::error::CubeError> {
+            unreachable!()
+        }
+
+        async fn snapshot_sandbox(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> Result<SnapshotInfo, crate::error::CubeError> {
+            unreachable!()
+        }
+
+        async fn delete_snapshot(&self, _: &str, _: &str) -> Result<(), crate::error::CubeError> {
+            unreachable!()
+        }
+    }
 
     #[test]
     fn validate_name_accepts_slug() {
@@ -842,8 +874,105 @@ mod tests {
     }
 
     #[test]
-    fn webhook_secret_name_uses_prefix() {
-        assert_eq!(webhook_secret_name("ping"), "_webhook_ping");
+    fn webhook_secret_name_scopes_to_instance() {
+        assert_eq!(webhook_secret_name("i1", "ping"), "webhook:i1:ping");
+    }
+
+    #[tokio::test]
+    async fn put_stores_verifier_key_outside_instance_secrets() {
+        let pool = crate::db::open_in_memory().await.unwrap();
+        let owner = "00000000000000a100000000000000a1";
+        sqlx::query(
+            "INSERT INTO users (id, subject, email, display_name, status, created_at, activated_at) \
+             VALUES (?, ?, NULL, 'Webhook Owner', 'active', 0, 0)",
+        )
+        .bind(owner)
+        .bind(owner)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let keys_tmp = tempfile::tempdir().unwrap();
+        let cipher_dir: Arc<dyn crate::envelope::CipherDirectory> =
+            Arc::new(crate::envelope::AgeCipherDirectory::new(keys_tmp.path()).unwrap());
+        let system_cipher = cipher_dir.system().unwrap();
+        let instances_store: Arc<dyn InstanceStore> = Arc::new(
+            crate::db::instances::SqlxInstanceStore::new(pool.clone(), system_cipher.clone()),
+        );
+        let secret_store: Arc<dyn SecretStore> =
+            Arc::new(crate::db::secrets::SqlxSecretStore::new(pool.clone()));
+        let token_store: Arc<dyn TokenStore> =
+            Arc::new(crate::db::tokens::SqlxTokenStore::new(pool.clone(), system_cipher));
+        instances_store
+            .create(InstanceRow {
+                id: "i1".into(),
+                owner_id: owner.into(),
+                name: String::new(),
+                task: String::new(),
+                cube_sandbox_id: None,
+                template_id: "tpl".into(),
+                status: InstanceStatus::Live,
+                bearer_token: "bt".into(),
+                pinned: false,
+                expires_at: None,
+                last_active_at: crate::now_secs(),
+                last_probe_at: None,
+                last_probe_status: None,
+                created_at: crate::now_secs(),
+                destroyed_at: None,
+                rotated_to: None,
+                network_policy: NetworkPolicy::Open,
+                network_policy_cidrs: Vec::new(),
+                models: Vec::new(),
+                tools: Vec::new(),
+            })
+            .await
+            .unwrap();
+        let instance_svc = Arc::new(InstanceService::new(
+            Arc::new(StubCube),
+            instances_store,
+            secret_store.clone(),
+            token_store,
+            "http://swarm.test/llm",
+        ));
+        let user_secrets = Arc::new(UserSecretsService::new(
+            Arc::new(crate::db::secrets::SqlxUserSecretStore::new(pool.clone())),
+            cipher_dir.clone(),
+        ));
+        let svc = WebhookService::new(
+            Arc::new(crate::db::webhooks::SqlxWebhookStore::new(pool.clone())),
+            Arc::new(crate::db::webhooks::SqlxDeliveryStore::new(pool.clone())),
+            user_secrets.clone(),
+            instance_svc,
+            Arc::new(NullWebhookDispatcher),
+            cipher_dir,
+        );
+
+        let row = svc
+            .put(
+                owner,
+                WebhookSpec {
+                    instance_id: "i1".into(),
+                    name: "ping".into(),
+                    description: "verify me".into(),
+                    auth_scheme: WebhookAuthScheme::HmacSha256,
+                    secret_plaintext: Some("super-secret".into()),
+                    enabled: true,
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(row.secret_name.as_deref(), Some("webhook:i1:ping"));
+        assert!(
+            secret_store.list("i1").await.unwrap().is_empty(),
+            "webhook verifier keys must not be stored in agent runtime secrets"
+        );
+        let stored = user_secrets
+            .get(owner, "webhook:i1:ping")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(String::from_utf8(stored).unwrap(), "super-secret");
     }
 
     #[test]

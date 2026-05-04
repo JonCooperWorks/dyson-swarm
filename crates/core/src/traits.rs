@@ -551,8 +551,8 @@ pub trait PolicyStore: Send + Sync {
 }
 
 /// Per-instance webhook ("task") row.  Pure-data record — no plaintext
-/// secrets ever live here; `secret_name` points into `instance_secrets`
-/// where the signing key is sealed under the owner's age cipher.
+/// secrets ever live here; `secret_name` points into `user_secrets`
+/// where the verifier key is sealed under the owner's age cipher.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WebhookRow {
     pub instance_id: String,
@@ -597,7 +597,7 @@ impl WebhookAuthScheme {
         }
     }
 
-    /// Whether this scheme needs a signing key in `instance_secrets`.
+    /// Whether this scheme needs a verifier key in `user_secrets`.
     pub fn needs_secret(self) -> bool {
         !matches!(self, Self::None)
     }
@@ -734,10 +734,5 @@ pub trait ProviderAdapter: Send + Sync {
     /// Lifetime is tied to the borrowed `ProviderConfig` so impls can
     /// return `&config.upstream` directly.
     fn upstream_base_url<'a>(&self, config: &'a ProviderConfig) -> &'a str;
-    fn rewrite_auth(
-        &self,
-        headers: &mut http::HeaderMap,
-        url: &mut http::Uri,
-        real_key: &str,
-    );
+    fn rewrite_auth(&self, headers: &mut http::HeaderMap, url: &mut http::Uri, real_key: &str);
 }

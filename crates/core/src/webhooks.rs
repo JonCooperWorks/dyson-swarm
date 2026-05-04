@@ -52,12 +52,12 @@ pub(crate) const AGE_ARMOR_PREFIX: &[u8] = b"-----BEGIN AGE ENCRYPTED FILE-----"
 /// would refuse downstream.
 pub const MAX_WEBHOOK_BODY: usize = 4 * 1024 * 1024;
 
-/// Stable HTTP chat used by swarm webhook delivery inside each dyson
-/// sandbox.  Keeping webhook traffic in one conversation lets the
-/// agent's per-chat compaction and dream triggers see accumulated
-/// delivery history instead of a sequence of isolated one-shot chats.
-pub const WEBHOOK_CHAT_ID: &str = "c-swarm-webhooks";
-pub const WEBHOOK_CHAT_TITLE: &str = "Webhook inbox";
+/// Stable HTTP chat id prefix used by swarm webhook delivery inside
+/// each dyson sandbox.  The webhook name is already slug-validated
+/// (`[a-z0-9_-]`, max 64), so prefix + name is safe as a Dyson chat id
+/// and stays within Dyson's requested-id limit of 80 chars.
+pub const WEBHOOK_CHAT_ID_PREFIX: &str = "c-swarm-webhook-";
+pub const WEBHOOK_CHAT_TITLE_PREFIX: &str = "Webhook: ";
 
 /// Default page size for "recent deliveries" panel.  Caps higher to
 /// keep the SPA's payload bounded; operators with shell access can
@@ -77,6 +77,14 @@ pub const WEBHOOK_SECRET_PREFIX: &str = "webhook:";
 
 pub fn webhook_secret_name(instance_id: &str, webhook_name: &str) -> String {
     format!("{WEBHOOK_SECRET_PREFIX}{instance_id}:{webhook_name}")
+}
+
+pub fn webhook_chat_id(webhook_name: &str) -> String {
+    format!("{WEBHOOK_CHAT_ID_PREFIX}{webhook_name}")
+}
+
+pub fn webhook_chat_title(webhook_name: &str) -> String {
+    format!("{WEBHOOK_CHAT_TITLE_PREFIX}{webhook_name}")
 }
 
 /// Lower-cased name accepted for the URL path.  Slug-ish: ascii
@@ -203,7 +211,14 @@ impl HttpWebhookDispatcher {
         )
     }
 
-    async fn webhook_chat_id(&self, base: &str, bearer: &str) -> Result<String, String> {
+    async fn ensure_webhook_chat_id(
+        &self,
+        base: &str,
+        bearer: &str,
+        webhook_name: &str,
+    ) -> Result<String, String> {
+        let target_id = webhook_chat_id(webhook_name);
+        let target_title = webhook_chat_title(webhook_name);
         let list_resp = self
             .http
             .get(format!("{base}/api/conversations"))
@@ -220,7 +235,7 @@ impl HttpWebhookDispatcher {
             .json()
             .await
             .map_err(|e| format!("list-conversations parse: {e}"))?;
-        if let Some(existing) = find_webhook_chat(&conversations) {
+        if let Some(existing) = find_webhook_chat(&conversations, &target_id, &target_title) {
             return Ok(existing.to_string());
         }
 
@@ -230,8 +245,8 @@ impl HttpWebhookDispatcher {
             .header("Authorization", bearer)
             .header("X-Dyson-CSRF", "swarm-webhook")
             .json(&serde_json::json!({
-                "id": WEBHOOK_CHAT_ID,
-                "title": WEBHOOK_CHAT_TITLE,
+                "id": target_id,
+                "title": target_title,
             }))
             .send()
             .await
@@ -245,9 +260,9 @@ impl HttpWebhookDispatcher {
             .json()
             .await
             .map_err(|e| format!("create-conversation parse: {e}"))?;
-        if created.id != WEBHOOK_CHAT_ID {
+        if created.id != webhook_chat_id(webhook_name) {
             tracing::debug!(
-                requested = WEBHOOK_CHAT_ID,
+                requested = %webhook_chat_id(webhook_name),
                 returned = %created.id,
                 "dyson ignored requested webhook chat id; using returned compatibility chat"
             );
@@ -261,7 +276,7 @@ impl WebhookDispatcher for HttpWebhookDispatcher {
     async fn dispatch(
         &self,
         instance: &InstanceRow,
-        _webhook_name: &str,
+        webhook_name: &str,
         description: &str,
         headers: &[(String, String)],
         body: &[u8],
@@ -277,8 +292,10 @@ impl WebhookDispatcher for HttpWebhookDispatcher {
         let base = Self::cube_base_url(&self.sandbox_domain, port, sandbox_id);
         let bearer = format!("Bearer {}", instance.bearer_token);
 
-        // 1. Find or create the stable webhook conversation.
-        let chat_id = self.webhook_chat_id(&base, &bearer).await?;
+        // 1. Find or create this webhook URL's stable conversation.
+        let chat_id = self
+            .ensure_webhook_chat_id(&base, &bearer, webhook_name)
+            .await?;
 
         // 2. Compose the prompt and POST a turn.
         let prompt = render_prompt(description, headers, body);
@@ -314,10 +331,14 @@ struct CreateConversationResponse {
     id: String,
 }
 
-fn find_webhook_chat(conversations: &[ConversationSummary]) -> Option<&str> {
+fn find_webhook_chat<'a>(
+    conversations: &'a [ConversationSummary],
+    target_id: &str,
+    target_title: &str,
+) -> Option<&'a str> {
     conversations
         .iter()
-        .find(|c| c.id == WEBHOOK_CHAT_ID || c.title == WEBHOOK_CHAT_TITLE)
+        .find(|c| c.id == target_id || c.title == target_title)
         .map(|c| c.id.as_str())
 }
 
@@ -1084,10 +1105,24 @@ mod tests {
     }
 
     #[test]
-    fn webhook_chat_id_is_safe_http_chat_id() {
-        assert!(WEBHOOK_CHAT_ID.starts_with("c-"));
+    fn webhook_chat_id_is_safe_and_distinct_per_webhook_name() {
+        let mail = webhook_chat_id("mail");
+        let github = webhook_chat_id("github");
+        assert_eq!(mail, "c-swarm-webhook-mail");
+        assert_eq!(github, "c-swarm-webhook-github");
+        assert_ne!(mail, github);
+        assert!(mail.starts_with("c-"));
         assert!(
-            WEBHOOK_CHAT_ID
+            mail.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'),
+            "webhook chat id must be safe as a dyson chat-history directory"
+        );
+
+        let max_name = "a".repeat(64);
+        let max_id = webhook_chat_id(&max_name);
+        assert_eq!(max_id.len(), 80, "must fit dyson's requested-id limit");
+        assert!(
+            max_id
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'),
             "webhook chat id must be safe as a dyson chat-history directory"
@@ -1096,23 +1131,39 @@ mod tests {
 
     #[test]
     fn find_webhook_chat_prefers_stable_id_or_compat_title() {
+        let target_id = webhook_chat_id("mail");
+        let target_title = webhook_chat_title("mail");
         let by_id = vec![
             ConversationSummary {
                 id: "c-0001".into(),
                 title: "other".into(),
             },
             ConversationSummary {
-                id: WEBHOOK_CHAT_ID.into(),
+                id: target_id.clone(),
                 title: "after restart".into(),
             },
         ];
-        assert_eq!(find_webhook_chat(&by_id), Some(WEBHOOK_CHAT_ID));
+        assert_eq!(
+            find_webhook_chat(&by_id, &target_id, &target_title),
+            Some(target_id.as_str())
+        );
 
         let by_title = vec![ConversationSummary {
             id: "c-0002".into(),
-            title: WEBHOOK_CHAT_TITLE.into(),
+            title: target_title.clone(),
         }];
-        assert_eq!(find_webhook_chat(&by_title), Some("c-0002"));
+        assert_eq!(
+            find_webhook_chat(&by_title, &target_id, &target_title),
+            Some("c-0002")
+        );
+
+        let github_id = webhook_chat_id("github");
+        let github_title = webhook_chat_title("github");
+        assert_eq!(
+            find_webhook_chat(&by_title, &github_id, &github_title),
+            None,
+            "mail's compatibility title must not catch github deliveries"
+        );
     }
 
     #[test]

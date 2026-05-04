@@ -61,6 +61,7 @@ describe('TasksListPage', () => {
     );
 
     await waitFor(() => expect(listWebhooks).toHaveBeenCalled());
+    expect(screen.getByText(/that webhook's stable chat/i)).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'mail-research' })).toBeInTheDocument();
     expect(screen.queryByText(/Decide whether to invest/i)).toBeNull();
   });
@@ -75,6 +76,7 @@ describe('TaskFormPage', () => {
     );
 
     expect(screen.getAllByText('provider URL').length).toBeGreaterThan(0);
+    expect(screen.getByText(/stable chat for that webhook/i)).toBeInTheDocument();
     expect(screen.getByLabelText('url')).toHaveValue(
       `${window.location.origin}/webhooks/inst-a/webhook-name`,
     );

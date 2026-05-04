@@ -31,7 +31,7 @@ const SCHEMES = [
   {
     value: 'hmac_sha256',
     label: 'HMAC-SHA256',
-    hint: 'Caller signs the body with the shared secret. Standard for GitHub/Stripe-style webhooks.',
+    hint: 'Caller signs the body with the shared secret and sends it in the configured signature header.',
   },
   {
     value: 'bearer',
@@ -47,6 +47,7 @@ const SCHEMES = [
 
 const TASK_SLUG_RE = /^[a-z0-9_-]{1,64}$/;
 const TASK_URL_PLACEHOLDER = 'webhook-name';
+const DEFAULT_SIGNATURE_HEADER = 'x-swarm-signature';
 const TASK_MARKDOWN_PLUGINS = [remarkGfm, remarkBreaks];
 const TASK_MARKDOWN_COMPONENTS = {
   a: ({ node, ...props }) => (
@@ -281,6 +282,7 @@ function TaskForm({ instanceId, taskName }) {
   const [name, setName] = React.useState(taskName || '');
   const [description, setDescription] = React.useState('');
   const [scheme, setScheme] = React.useState('hmac_sha256');
+  const [signatureHeader, setSignatureHeader] = React.useState(DEFAULT_SIGNATURE_HEADER);
   const [secret, setSecret] = React.useState('');
   const [hasSecret, setHasSecret] = React.useState(false);
   const [enabled, setEnabled] = React.useState(true);
@@ -298,6 +300,7 @@ function TaskForm({ instanceId, taskName }) {
       setDescription(row.description || '');
       setScheme(row.auth_scheme);
       setOrigScheme(row.auth_scheme);
+      setSignatureHeader(row.signature_header || DEFAULT_SIGNATURE_HEADER);
       setHasSecret(!!row.has_secret);
       setEnabled(!!row.enabled);
       setLoaded(true);
@@ -308,6 +311,7 @@ function TaskForm({ instanceId, taskName }) {
   }, [client, editing, instanceId, taskName]);
 
   const schemeChanged = editing && scheme !== origScheme;
+  const usesHmac = scheme === 'hmac_sha256';
   const needsSecret = scheme !== 'none';
   const requireSecretOnSave = needsSecret && (!editing || schemeChanged || !hasSecret);
 
@@ -327,11 +331,13 @@ function TaskForm({ instanceId, taskName }) {
     try {
       if (editing) {
         const body = { description, auth_scheme: scheme, enabled };
+        if (usesHmac) body.signature_header = signatureHeader.trim() || DEFAULT_SIGNATURE_HEADER;
         if (secret) body.secret = secret;
         const updated = await client.updateWebhook(instanceId, taskName, body);
         upsertWebhook(instanceId, updated);
       } else {
         const body = { name, description, auth_scheme: scheme, enabled };
+        if (usesHmac) body.signature_header = signatureHeader.trim() || DEFAULT_SIGNATURE_HEADER;
         if (secret) body.secret = secret;
         const created = await client.createWebhook(instanceId, body);
         upsertWebhook(instanceId, created);
@@ -421,7 +427,7 @@ function TaskForm({ instanceId, taskName }) {
               />
               <small className="muted">
                 {scheme === 'hmac_sha256'
-                  ? 'Use the same secret in the provider. It signs the body and sends X-Swarm-Signature: sha256=<hex>.'
+                  ? `Use the same secret in the provider. It signs the body and sends ${signatureHeader || DEFAULT_SIGNATURE_HEADER}: sha256=<hex>.`
                   : 'Use the same secret in the provider as Authorization: Bearer <secret>.'}
               </small>
             </label>
@@ -438,6 +444,22 @@ function TaskForm({ instanceId, taskName }) {
               </span>
             </label>
           )}
+          {usesHmac ? (
+            <label className="field">
+              <span>signature header</span>
+              <input
+                aria-label="signature header"
+                value={signatureHeader}
+                onChange={e => setSignatureHeader(e.target.value.toLowerCase())}
+                placeholder={DEFAULT_SIGNATURE_HEADER}
+                disabled={submitting}
+                autoComplete="off"
+              />
+              <small className="muted">
+                Use the provider's header name, for example x-hub-signature-256 or x-swarm-signature.
+              </small>
+            </label>
+          ) : null}
         </section>
 
         <section className="page-section">

@@ -559,6 +559,9 @@ pub struct WebhookRow {
     pub name: String,
     pub description: String,
     pub auth_scheme: WebhookAuthScheme,
+    /// Header name used by HMAC-SHA256 signed webhooks.  Stored
+    /// lower-case so lookup is stable across HTTP clients.
+    pub signature_header: String,
     pub secret_name: Option<String>,
     pub enabled: bool,
     pub created_at: i64,

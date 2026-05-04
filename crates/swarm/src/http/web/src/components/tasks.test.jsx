@@ -116,4 +116,43 @@ describe('TaskFormPage', () => {
     expect(screen.getByText('Research each company')).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'SEC' })).toHaveAttribute('target', '_blank');
   });
+
+  test('sends the configured HMAC signature header when creating', async () => {
+    const createWebhook = vi.fn().mockResolvedValue({
+      name: 'github',
+      description: '',
+      auth_scheme: 'hmac_sha256',
+      signature_header: 'x-hub-signature-256',
+      enabled: true,
+      path: '/webhooks/inst-a/github',
+    });
+
+    render(
+      <ApiProvider
+        client={{ createWebhook }}
+        auth={{ mode: 'none' }}
+      >
+        <TaskFormPage instanceId="inst-a" taskName={null} embedded/>
+      </ApiProvider>,
+    );
+
+    fireEvent.change(screen.getByLabelText('name'), {
+      target: { value: 'github' },
+    });
+    fireEvent.change(screen.getByPlaceholderText('paste or generate a strong random string'), {
+      target: { value: 'super-secret' },
+    });
+    fireEvent.change(screen.getByLabelText('signature header'), {
+      target: { value: 'X-Hub-Signature-256' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'create webhook' }));
+
+    await waitFor(() => expect(createWebhook).toHaveBeenCalledTimes(1));
+    expect(createWebhook.mock.calls[0][1]).toMatchObject({
+      name: 'github',
+      auth_scheme: 'hmac_sha256',
+      signature_header: 'x-hub-signature-256',
+      secret: 'super-secret',
+    });
+  });
 });

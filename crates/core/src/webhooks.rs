@@ -25,6 +25,7 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use hmac::{Hmac, Mac};
+use http::header::HeaderName;
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 use uuid::Uuid;
@@ -64,6 +65,7 @@ pub const WEBHOOK_CHAT_TITLE_PREFIX: &str = "Webhook: ";
 /// query the table directly.
 pub const DEFAULT_DELIVERY_LIMIT: u32 = 50;
 pub const MAX_DELIVERY_LIMIT: u32 = 200;
+pub const DEFAULT_SIGNATURE_HEADER: &str = "x-swarm-signature";
 
 /// Legacy convention for webhook signing keys when they lived in
 /// `instance_secrets`.  Anything with this prefix is managed
@@ -133,6 +135,9 @@ pub struct WebhookSpec {
     pub name: String,
     pub description: String,
     pub auth_scheme: WebhookAuthScheme,
+    /// Header to read for HMAC signatures. `None` keeps the existing
+    /// value on update, or defaults to `x-swarm-signature` on create.
+    pub signature_header: Option<String>,
     /// `Some(plaintext)` to (re)set the signing key, `None` to leave
     /// the existing secret in place (only meaningful on update).
     pub secret_plaintext: Option<String>,
@@ -462,6 +467,14 @@ impl WebhookService {
 
         let now = crate::now_secs();
         let existing = self.webhooks.get(&spec.instance_id, &spec.name).await?;
+        let signature_header = match spec.signature_header.as_deref() {
+            Some(raw) => validate_signature_header(raw)
+                .map_err(|m| WebhookError::BadRequest(m.to_string()))?,
+            None => existing
+                .as_ref()
+                .map(|r| r.signature_header.clone())
+                .unwrap_or_else(|| DEFAULT_SIGNATURE_HEADER.to_string()),
+        };
 
         // Resolve the secret pointer.  When the scheme needs a key,
         // we either (a) reuse the existing secret_name when no new
@@ -500,6 +513,7 @@ impl WebhookService {
             name: spec.name,
             description: spec.description,
             auth_scheme: spec.auth_scheme,
+            signature_header,
             secret_name,
             enabled: spec.enabled,
             created_at: existing.as_ref().map(|r| r.created_at).unwrap_or(now),
@@ -661,7 +675,7 @@ impl WebhookService {
         &self,
         instance_id: &str,
         name: &str,
-        sig_header: Option<&str>,
+        signature_headers: &[(String, String)],
         bearer_header: Option<&str>,
         request_id: Option<&str>,
         forward_headers: Vec<(String, String)>,
@@ -673,7 +687,7 @@ impl WebhookService {
             .verify_and_dispatch_inner(
                 instance_id,
                 name,
-                sig_header,
+                signature_headers,
                 bearer_header,
                 &forward_headers,
                 body,
@@ -776,7 +790,7 @@ impl WebhookService {
         &self,
         instance_id: &str,
         name: &str,
-        sig_header: Option<&str>,
+        signature_headers: &[(String, String)],
         bearer_header: Option<&str>,
         forward_headers: &[(String, String)],
         body: &[u8],
@@ -815,7 +829,8 @@ impl WebhookService {
                 }
             }
             WebhookAuthScheme::HmacSha256 => {
-                let header = sig_header.ok_or(WebhookError::SignatureMismatch)?;
+                let header = signature_header_value(signature_headers, &row.signature_header)
+                    .ok_or(WebhookError::SignatureMismatch)?;
                 let provided_hex = header.strip_prefix("sha256=").unwrap_or(header).trim();
                 let provided =
                     hex::decode(provided_hex).map_err(|_| WebhookError::SignatureMismatch)?;
@@ -871,6 +886,23 @@ fn strip_bearer(h: &str) -> Option<&str> {
         .strip_prefix("Bearer ")
         .or_else(|| trimmed.strip_prefix("bearer "))
         .map(str::trim)
+}
+
+fn validate_signature_header(raw: &str) -> Result<String, &'static str> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("signature header is required");
+    }
+    let name = HeaderName::from_bytes(trimmed.as_bytes())
+        .map_err(|_| "signature header is not a valid HTTP header name")?;
+    Ok(name.as_str().to_ascii_lowercase())
+}
+
+fn signature_header_value<'a>(headers: &'a [(String, String)], wanted: &str) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(wanted))
+        .map(|(_, value)| value.as_str())
 }
 
 fn ct_eq(a: &[u8], b: &[u8]) -> bool {
@@ -1028,6 +1060,7 @@ mod tests {
                     name: "ping".into(),
                     description: "verify me".into(),
                     auth_scheme: WebhookAuthScheme::HmacSha256,
+                    signature_header: None,
                     secret_plaintext: Some("super-secret".into()),
                     enabled: true,
                 },
@@ -1046,6 +1079,130 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(String::from_utf8(stored).unwrap(), "super-secret");
+    }
+
+    #[tokio::test]
+    async fn hmac_verify_uses_configured_signature_header() {
+        let pool = crate::db::open_in_memory().await.unwrap();
+        let owner = "00000000000000a100000000000000a1";
+        sqlx::query(
+            "INSERT INTO users (id, subject, email, display_name, status, created_at, activated_at) \
+             VALUES (?, ?, NULL, 'Webhook Owner', 'active', 0, 0)",
+        )
+        .bind(owner)
+        .bind(owner)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let keys_tmp = tempfile::tempdir().unwrap();
+        let cipher_dir: Arc<dyn crate::envelope::CipherDirectory> =
+            Arc::new(crate::envelope::AgeCipherDirectory::new(keys_tmp.path()).unwrap());
+        let system_cipher = cipher_dir.system().unwrap();
+        let instances_store: Arc<dyn InstanceStore> = Arc::new(
+            crate::db::instances::SqlxInstanceStore::new(pool.clone(), system_cipher.clone()),
+        );
+        let secret_store: Arc<dyn SecretStore> =
+            Arc::new(crate::db::secrets::SqlxSecretStore::new(pool.clone()));
+        let token_store: Arc<dyn TokenStore> = Arc::new(crate::db::tokens::SqlxTokenStore::new(
+            pool.clone(),
+            system_cipher,
+        ));
+        instances_store
+            .create(InstanceRow {
+                id: "i1".into(),
+                owner_id: owner.into(),
+                name: String::new(),
+                task: String::new(),
+                cube_sandbox_id: Some("sb1".into()),
+                template_id: "tpl".into(),
+                status: InstanceStatus::Live,
+                bearer_token: "bt".into(),
+                pinned: false,
+                expires_at: None,
+                last_active_at: crate::now_secs(),
+                last_probe_at: None,
+                last_probe_status: None,
+                created_at: crate::now_secs(),
+                destroyed_at: None,
+                rotated_to: None,
+                network_policy: NetworkPolicy::Open,
+                network_policy_cidrs: Vec::new(),
+                models: Vec::new(),
+                tools: Vec::new(),
+            })
+            .await
+            .unwrap();
+        let instance_svc = Arc::new(InstanceService::new(
+            Arc::new(StubCube),
+            instances_store,
+            secret_store,
+            token_store,
+            "http://swarm.test/llm",
+        ));
+        let user_secrets = Arc::new(UserSecretsService::new(
+            Arc::new(crate::db::secrets::SqlxUserSecretStore::new(pool.clone())),
+            cipher_dir.clone(),
+        ));
+        let svc = WebhookService::new(
+            Arc::new(crate::db::webhooks::SqlxWebhookStore::new(pool.clone())),
+            Arc::new(crate::db::webhooks::SqlxDeliveryStore::new(pool.clone())),
+            user_secrets,
+            instance_svc,
+            Arc::new(NullWebhookDispatcher),
+            cipher_dir,
+        );
+
+        let row = svc
+            .put(
+                owner,
+                WebhookSpec {
+                    instance_id: "i1".into(),
+                    name: "github".into(),
+                    description: "handle github".into(),
+                    auth_scheme: WebhookAuthScheme::HmacSha256,
+                    signature_header: Some("X-Hub-Signature-256".into()),
+                    secret_plaintext: Some("super-secret".into()),
+                    enabled: true,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(row.signature_header, "x-hub-signature-256");
+
+        let body = br#"{"zen":"keep it logically awesome"}"#;
+        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(b"super-secret").unwrap();
+        mac.update(body);
+        let signature = format!("sha256={}", hex::encode(mac.finalize().into_bytes()));
+
+        let wrong_header = svc
+            .verify_and_dispatch(
+                "i1",
+                "github",
+                &[(DEFAULT_SIGNATURE_HEADER.into(), signature.clone())],
+                None,
+                None,
+                Vec::new(),
+                Some("application/json".into()),
+                body,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(wrong_header, WebhookError::SignatureMismatch));
+
+        let status = svc
+            .verify_and_dispatch(
+                "i1",
+                "github",
+                &[("X-Hub-Signature-256".into(), signature)],
+                None,
+                Some("req-1"),
+                Vec::new(),
+                Some("application/json".into()),
+                body,
+            )
+            .await
+            .unwrap();
+        assert_eq!(status, 204);
     }
 
     #[test]

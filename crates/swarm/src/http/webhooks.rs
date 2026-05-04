@@ -71,6 +71,7 @@ pub struct WebhookView {
     pub name: String,
     pub description: String,
     pub auth_scheme: String,
+    pub signature_header: String,
     pub enabled: bool,
     pub created_at: i64,
     pub updated_at: i64,
@@ -89,6 +90,7 @@ impl WebhookView {
             name: r.name,
             description: r.description,
             auth_scheme: r.auth_scheme.as_str().to_string(),
+            signature_header: r.signature_header,
             enabled: r.enabled,
             created_at: r.created_at,
             updated_at: r.updated_at,
@@ -255,6 +257,8 @@ pub struct CreateWebhookBody {
     #[serde(default)]
     pub description: String,
     pub auth_scheme: String,
+    #[serde(default)]
+    pub signature_header: Option<String>,
     /// Required when `auth_scheme` requires a key (hmac_sha256, bearer).
     #[serde(default)]
     pub secret: Option<String>,
@@ -268,6 +272,8 @@ pub struct UpdateWebhookBody {
     pub description: Option<String>,
     #[serde(default)]
     pub auth_scheme: Option<String>,
+    #[serde(default)]
+    pub signature_header: Option<String>,
     /// `Some(plaintext)` rotates the signing key; `None` leaves it.
     #[serde(default)]
     pub secret: Option<String>,
@@ -350,6 +356,7 @@ async fn create_webhook(
         name: body.name,
         description: body.description,
         auth_scheme: scheme,
+        signature_header: body.signature_header,
         secret_plaintext: body.secret.filter(|s| !s.is_empty()),
         enabled: body.enabled,
     };
@@ -390,6 +397,7 @@ async fn update_webhook(
         name: existing.name.clone(),
         description: body.description.unwrap_or(existing.description.clone()),
         auth_scheme: scheme,
+        signature_header: body.signature_header,
         secret_plaintext,
         enabled: body.enabled.unwrap_or(existing.enabled),
     };
@@ -543,9 +551,7 @@ async fn fire_webhook(
     if body.len() > MAX_WEBHOOK_BODY {
         return StatusCode::PAYLOAD_TOO_LARGE;
     }
-    let sig_header = headers
-        .get("x-swarm-signature")
-        .and_then(|v| v.to_str().ok());
+    let signature_headers = readable_header_values(&headers);
     let bearer_header = headers.get("authorization").and_then(|v| v.to_str().ok());
     let request_id = headers
         .get("x-request-id")
@@ -563,7 +569,7 @@ async fn fire_webhook(
         .verify_and_dispatch(
             &instance_id,
             &name,
-            sig_header,
+            &signature_headers,
             bearer_header,
             request_id.as_deref(),
             forward,
@@ -575,6 +581,16 @@ async fn fire_webhook(
         Ok(_) => StatusCode::NO_CONTENT,
         Err(e) => err_to_status(&e),
     }
+}
+
+fn readable_header_values(h: &HeaderMap) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for (k, v) in h {
+        if let Ok(val) = v.to_str() {
+            out.push((k.as_str().to_ascii_lowercase(), val.to_string()));
+        }
+    }
+    out
 }
 
 /// Allowlist of headers we forward into the agent prompt.  Avoids

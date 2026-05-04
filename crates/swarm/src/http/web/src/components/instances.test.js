@@ -21,6 +21,7 @@ import {
   initialTools,
   nextToolsForPolicyChange,
   DEFAULT_POLICY_KIND,
+  DEFAULT_IMAGE_GENERATION_MODEL,
   POLICY_OPTIONS,
   CubeProfilePicker,
   McpServersPanel,
@@ -1011,6 +1012,17 @@ describe('NewInstanceForm MCP setup', () => {
       React.createElement(NewInstanceForm),
     ));
 
+    fireEvent.change(screen.getByPlaceholderText('PR reviewer for foo/bar'), {
+      target: { value: 'MCP agent' },
+    });
+    fireEvent.change(screen.getByPlaceholderText(/What this agent should do/i), {
+      target: { value: 'Run the attached MCP server when asked.' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'next' }));
+    fireEvent.click(screen.getByRole('button', { name: 'next' }));
+    fireEvent.click(screen.getByRole('button', { name: 'next' }));
+    fireEvent.click(screen.getByRole('button', { name: 'next' }));
+
     fireEvent.click(screen.getByRole('button', { name: /add MCP server/i }));
     await screen.findByRole('option', { name: 'Docker JSON' });
     fireEvent.change(screen.getByLabelText('MCP server type'), { target: { value: 'docker' } });
@@ -1026,6 +1038,54 @@ describe('NewInstanceForm MCP setup', () => {
     expect(client.createInstance.mock.calls[0][0]).not.toHaveProperty('mcp_servers');
     await waitFor(() => expect(client.putMcpJsonConfig).toHaveBeenCalledWith('inst-1', dockerConfig));
     expect(client.probeInstance).toHaveBeenCalledWith('inst-1');
+  });
+
+  test('sends a custom image model when image_generate is selected', async () => {
+    const client = {
+      createInstance: vi.fn().mockResolvedValue({
+        id: 'inst-2',
+        url: 'https://inst-2.swarm.example',
+      }),
+      probeInstance: vi.fn().mockResolvedValue({ status: 'healthy' }),
+      listMcpDockerCatalog: vi.fn().mockResolvedValue({ allow_raw_json: true, servers: [] }),
+    };
+
+    render(React.createElement(
+      ApiProvider,
+      {
+        client,
+        auth: {
+          config: {
+            default_models: ['openai/gpt-5.1'],
+            default_template_id: 'tpl-default',
+            cube_profiles: [],
+          },
+        },
+      },
+      React.createElement(NewInstanceForm),
+    ));
+
+    fireEvent.change(screen.getByPlaceholderText('PR reviewer for foo/bar'), {
+      target: { value: 'Image agent' },
+    });
+    fireEvent.change(screen.getByPlaceholderText(/What this agent should do/i), {
+      target: { value: 'Create images on request.' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'next' }));
+    fireEvent.click(screen.getByRole('button', { name: 'next' }));
+    fireEvent.click(screen.getByRole('button', { name: 'next' }));
+
+    fireEvent.click(screen.getByLabelText('image_generate'));
+    expect(screen.getByLabelText('image generation model')).toHaveValue(DEFAULT_IMAGE_GENERATION_MODEL);
+    fireEvent.change(screen.getByLabelText('image generation model'), {
+      target: { value: 'google/custom-image-model' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'create agent' }));
+
+    await waitFor(() => expect(client.createInstance).toHaveBeenCalledTimes(1));
+    const req = client.createInstance.mock.calls[0][0];
+    expect(req.env.SWARM_TOOLS.split(',')).toContain('image_generate');
+    expect(req.env.SWARM_IMAGE_GENERATION_MODEL).toBe('google/custom-image-model');
   });
 });
 

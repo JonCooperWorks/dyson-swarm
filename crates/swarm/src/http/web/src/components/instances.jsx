@@ -406,6 +406,15 @@ const ALL_TOOL_NAMES = TOOL_CATALOGUE.map(t => t.name);
 export const NETWORK_REQUIRED_TOOL_NAMES = TOOL_CATALOGUE
   .filter(t => t.requiresNetwork)
   .map(t => t.name);
+export const DEFAULT_IMAGE_GENERATION_MODEL = 'google/gemini-3-pro-image-preview';
+const NEW_INSTANCE_STEPS = [
+  { key: 'brief', label: 'brief' },
+  { key: 'model', label: 'model' },
+  { key: 'network', label: 'network' },
+  { key: 'tools', label: 'tools' },
+  { key: 'optional', label: 'extras' },
+  { key: 'review', label: 'review' },
+];
 
 /// True when the policy kind blocks public-internet egress.
 /// (Allowlist / denylist still let some traffic through, so we
@@ -682,8 +691,22 @@ export function NewInstanceForm() {
   // operator opts in tool-by-tool.  initialTools handles both
   // halves (airgap = [], everything else = ALL).
   const [tools, setTools] = React.useState(() => initialTools(null, DEFAULT_POLICY_KIND));
+  const [imageModel, setImageModel] = React.useState(DEFAULT_IMAGE_GENERATION_MODEL);
+  const [wizardStep, setWizardStep] = React.useState('brief');
+  const [visitedSteps, setVisitedSteps] = React.useState(['brief']);
   const [submitting, setSubmitting] = React.useState(false);
   const [error, setError] = React.useState(null);
+
+  const visitStep = React.useCallback((key) => {
+    setWizardStep(key);
+    setVisitedSteps(curr => (curr.includes(key) ? curr : [...curr, key]));
+  }, []);
+
+  React.useEffect(() => {
+    if (wizardStep === 'tools') {
+      setVisitedSteps(curr => (curr.includes('tools') ? curr : [...curr, 'tools']));
+    }
+  }, [wizardStep]);
 
   // Airgap rule: when the user transitions INTO airgap, drop the
   // tool picker to zero — operators have to opt in tool by tool,
@@ -708,10 +731,29 @@ export function NewInstanceForm() {
   // on the server, which now also pre-warms Caddy's on_demand TLS
   // before returning so the user's first "open ↗" click works).
   const [phase, setPhase] = React.useState('form');
+  const hasImageTool = tools.includes('image_generate');
+  const review = newInstanceReview({
+    name,
+    task,
+    models,
+    networkPolicy,
+    tools,
+    mcpServers,
+    templateId,
+    cubeProfiles,
+    visitedSteps,
+    imageModel,
+    hasImageTool,
+  });
+  const canCreate = review.required.every(item => item.ok);
+  const stepIndex = NEW_INSTANCE_STEPS.findIndex(s => s.key === wizardStep);
+  const activeStepIndex = stepIndex >= 0 ? stepIndex : 0;
+  const prevStep = NEW_INSTANCE_STEPS[activeStepIndex - 1]?.key || null;
+  const nextStep = NEW_INSTANCE_STEPS[activeStepIndex + 1]?.key || null;
 
   const submit = async (e) => {
     e.preventDefault();
-    if (!templateId.trim() || models.length === 0) return;
+    if (!canCreate) return;
     setSubmitting(true);
     setError(null);
     try {
@@ -744,6 +786,10 @@ export function NewInstanceForm() {
       // builtin in it cluttering the env block.
       if (tools.length !== ALL_TOOL_NAMES.length || networkPolicy.kind === 'airgap') {
         req.env.SWARM_TOOLS = tools.join(',');
+      }
+      if (hasImageTool) {
+        req.env.SWARM_IMAGE_GENERATION_MODEL =
+          imageModel.trim() || DEFAULT_IMAGE_GENERATION_MODEL;
       }
 
       setPhase('provisioning');
@@ -794,92 +840,126 @@ export function NewInstanceForm() {
   }
 
   return (
-    <form onSubmit={submit} className="form page-form">
-      <section className="page-section">
-        <h2 className="section-title">agent</h2>
-        <label className="field">
-          <span>name</span>
-          <input
-            value={name}
-            onChange={e => setName(e.target.value)}
-            placeholder="PR reviewer for foo/bar"
-            autoFocus
-          />
-        </label>
-        <label className="field">
-          <span>brief</span>
-          <textarea
-            className="textarea"
-            value={task}
-            onChange={e => setTask(e.target.value)}
-            placeholder={`What this agent should do.\n\nExample: Watch for new PRs in github.com/foo/bar. Comment with style-guide violations and link to the relevant section. Don't approve or merge.`}
-            rows={6}
-          />
-          <span className="hint muted small">
-            This is the agent's working brief. You can edit it later.
-          </span>
-        </label>
-      </section>
-
-      <section className="page-section">
-        <h2 className="section-title">model</h2>
-        <ModelMultiPicker
-          defaultModels={defaultModels}
-          selected={models}
-          onChange={setModels}
-        />
-      </section>
-
-      <section className="page-section">
-        <h2 className="section-title">network</h2>
-        <NetworkPolicyPicker value={networkPolicy} onChange={setNetworkPolicy}/>
-      </section>
-
-      <ToolsPicker
-        value={tools}
-        onChange={setTools}
-        policyKind={networkPolicy.kind}
+    <form onSubmit={submit} className="form page-form wizard-form">
+      <WizardStepper
+        steps={NEW_INSTANCE_STEPS}
+        active={wizardStep}
+        review={review}
+        visitedSteps={visitedSteps}
+        onSelect={visitStep}
       />
 
-      <section className="page-section">
-        <h2 className="section-title">connected tools</h2>
-        <McpServersEditor
-          value={mcpServers}
-          onChange={setMcpServers}
-          dockerCatalog={mcpDockerCatalog}
-        />
-        <span className="hint muted small">
-          Add remote MCP servers or admin-curated Docker. Swarm
-          seals upstream URLs and secrets; the agent only sees a
-          swarm proxy URL.
-        </span>
-      </section>
+      <div className="wizard-body">
+        {wizardStep === 'brief' ? (
+          <section className="page-section wizard-step wizard-step-brief">
+            <h2 className="section-title">brief</h2>
+            <label className="field">
+              <span>name</span>
+              <input
+                value={name}
+                onChange={e => setName(e.target.value)}
+                placeholder="PR reviewer for foo/bar"
+                autoFocus
+              />
+            </label>
+            <label className="field identity-brief-field">
+              <span>brief</span>
+              <textarea
+                className="textarea identity-brief-textarea"
+                value={task}
+                onChange={e => setTask(e.target.value)}
+                placeholder={`What this agent should do.\n\nExample: Watch for new PRs in github.com/foo/bar. Comment with style-guide violations and link to the relevant section. Don't approve or merge.`}
+                rows={14}
+              />
+              <span className="hint muted small">
+                This becomes the agent's working brief. You can edit it later.
+              </span>
+            </label>
+          </section>
+        ) : null}
 
-      <section className="page-section">
-        <h2 className="section-title">runtime</h2>
-        {cubeProfiles.length >= 1 ? (
-          <CubeProfilePicker
-            profiles={cubeProfiles}
-            value={templateId}
-            onChange={setTemplateId}
-          />
-        ) : null /* No profiles surfaced — the form's templateId is
-                    seeded from default_template_id and the operator
-                    falls back to the legacy ttl-only flow. */}
-        <label className="field">
-          <span>ttl (seconds, optional)</span>
-          <input
-            value={ttlSeconds}
-            onChange={e => setTtlSeconds(e.target.value)}
-            placeholder="86400"
-            inputMode="numeric"
-          />
-          <span className="hint muted small">
-            Auto-destroyed by the TTL sweeper after this many seconds.
-            Leave blank for a long-lived agent.
-          </span>
-        </label>
-      </section>
+        {wizardStep === 'model' ? (
+          <section className="page-section wizard-step">
+            <h2 className="section-title">model</h2>
+            <ModelMultiPicker
+              defaultModels={defaultModels}
+              selected={models}
+              onChange={setModels}
+            />
+          </section>
+        ) : null}
+
+        {wizardStep === 'network' ? (
+          <section className="page-section wizard-step">
+            <h2 className="section-title">network</h2>
+            <NetworkPolicyPicker value={networkPolicy} onChange={setNetworkPolicy}/>
+          </section>
+        ) : null}
+
+        {wizardStep === 'tools' ? (
+          <div className="wizard-step">
+            <ToolsPicker
+              value={tools}
+              onChange={setTools}
+              policyKind={networkPolicy.kind}
+            />
+            {hasImageTool ? (
+              <ImageGenerationModelField
+                value={imageModel}
+                onChange={setImageModel}
+              />
+            ) : null}
+          </div>
+        ) : null}
+
+        {wizardStep === 'optional' ? (
+          <section className="page-section wizard-step">
+            <h2 className="section-title">extras</h2>
+            <McpServersEditor
+              value={mcpServers}
+              onChange={setMcpServers}
+              dockerCatalog={mcpDockerCatalog}
+            />
+            <span className="hint muted small">
+              Add remote MCP servers or admin-curated Docker. Swarm
+              seals upstream URLs and secrets; the agent only sees a
+              swarm proxy URL.
+            </span>
+            <div className="wizard-runtime-block">
+              {cubeProfiles.length >= 1 ? (
+                <CubeProfilePicker
+                  profiles={cubeProfiles}
+                  value={templateId}
+                  onChange={setTemplateId}
+                />
+              ) : null}
+              <label className="field">
+                <span>ttl (seconds, optional)</span>
+                <input
+                  value={ttlSeconds}
+                  onChange={e => setTtlSeconds(e.target.value)}
+                  placeholder="86400"
+                  inputMode="numeric"
+                />
+                <span className="hint muted small">
+                  Auto-destroyed by the TTL sweeper after this many seconds.
+                  Leave blank for a long-lived agent.
+                </span>
+              </label>
+            </div>
+          </section>
+        ) : null}
+
+        {wizardStep === 'review' ? (
+          <section className="page-section wizard-step">
+            <h2 className="section-title">review</h2>
+            <p className="muted small">
+              Everything marked valid is ready to send. Anything marked
+              required needs attention before create unlocks.
+            </p>
+          </section>
+        ) : null}
+      </div>
 
       <SetupSummary
         name={name}
@@ -889,15 +969,34 @@ export function NewInstanceForm() {
         mcpServers={mcpServers}
         templateId={templateId}
         cubeProfiles={cubeProfiles}
+        imageModel={hasImageTool ? imageModel : null}
+        review={review}
+        canCreate={canCreate}
       />
 
       {error ? <div className="error">{error}</div> : null}
-      <div className="page-actions">
+      <div className="page-actions wizard-actions">
+        <button
+          type="button"
+          className="btn btn-ghost"
+          onClick={() => prevStep && visitStep(prevStep)}
+          disabled={!prevStep || submitting}
+        >
+          back
+        </button>
+        <button
+          type="button"
+          className="btn"
+          onClick={() => nextStep && visitStep(nextStep)}
+          disabled={!nextStep || submitting}
+        >
+          next
+        </button>
         <button
           type="submit"
           className="btn btn-primary"
-          disabled={submitting || models.length === 0 || !templateId.trim()}
-          title={models.length === 0 ? 'pick at least one model' : ''}
+          disabled={submitting || !canCreate}
+          title={canCreate ? 'create now' : 'complete the required review items first'}
         >
           {submitting ? 'creating…' : 'create agent'}
         </button>
@@ -915,6 +1014,9 @@ function SetupSummary({
   mcpServers,
   templateId,
   cubeProfiles,
+  imageModel,
+  review,
+  canCreate,
 }) {
   const profile = findCubeProfile(templateId, cubeProfiles);
   const agentLabel = name.trim() || 'Unnamed agent';
@@ -924,6 +1026,8 @@ function SetupSummary({
   const mcpCount = dockerCount + remoteCount;
   const toolCount = tools.length;
   const lockedDown = networkPolicy.kind === 'airgap' && toolCount === 0 && mcpCount === 0;
+  const statusLabel = !canCreate ? 'needs input' : lockedDown ? 'locked down' : 'ready';
+  const statusClass = !canCreate ? 'badge-warn' : lockedDown ? 'badge-warn' : 'badge-info';
 
   return (
     <section className={`setup-summary ${lockedDown ? 'setup-summary-warn' : ''}`}>
@@ -932,9 +1036,7 @@ function SetupSummary({
           <h2 className="section-title">review</h2>
           <p className="setup-summary-title">{agentLabel}</p>
         </div>
-        <span className={`badge ${lockedDown ? 'badge-warn' : 'badge-info'}`}>
-          {lockedDown ? 'locked down' : 'ready'}
-        </span>
+        <span className={`badge ${statusClass}`}>{statusLabel}</span>
       </div>
       <div className="setup-summary-grid">
         <SummaryFact label="model" value={models[0] || 'pick one'}/>
@@ -945,7 +1047,22 @@ function SetupSummary({
           value={mcpCount === 0 ? 'none' : `${mcpCount} server${mcpCount === 1 ? '' : 's'}`}
         />
         <SummaryFact label="runtime" value={profile ? profile.name : (templateId || 'default')}/>
+        {imageModel ? <SummaryFact label="image model" value={imageModel}/> : null}
       </div>
+      {review ? (
+        <div className="setup-validity-list">
+          {[...review.required, ...review.optional].map(item => (
+            <div
+              key={item.key}
+              className={`setup-validity-row ${item.ok ? 'ok' : 'bad'} ${item.required ? 'required' : ''}`}
+            >
+              <span className="setup-validity-dot" aria-hidden="true"/>
+              <span className="setup-validity-label">{item.label}</span>
+              <strong>{item.message}</strong>
+            </div>
+          ))}
+        </div>
+      ) : null}
       {lockedDown ? (
         <p className="setup-summary-note">
           This agent will start with no network, no built-in tools, and no MCP servers.
@@ -954,6 +1071,128 @@ function SetupSummary({
       ) : null}
     </section>
   );
+}
+
+function WizardStepper({ steps, active, review, visitedSteps, onSelect }) {
+  const byStep = new Map([...review.required, ...review.optional].map(item => [item.key, item]));
+  return (
+    <nav className="wizard-stepper" aria-label="create agent steps">
+      {steps.map(step => {
+        const item = byStep.get(step.key);
+        const visited = visitedSteps.includes(step.key);
+        const state = item ? (item.ok ? 'ok' : 'bad') : visited ? 'ok' : 'idle';
+        return (
+          <button
+            key={step.key}
+            type="button"
+            className={`wizard-step-tab ${active === step.key ? 'active' : ''} ${state}`}
+            onClick={() => onSelect(step.key)}
+          >
+            <span className="wizard-step-dot" aria-hidden="true"/>
+            <span>{step.label}</span>
+          </button>
+        );
+      })}
+    </nav>
+  );
+}
+
+function ImageGenerationModelField({ value, onChange }) {
+  return (
+    <section className="page-section image-model-section">
+      <h2 className="section-title">image generation</h2>
+      <label className="field">
+        <span>image model</span>
+        <input
+          aria-label="image generation model"
+          value={value}
+          onChange={e => onChange(e.target.value)}
+          placeholder={DEFAULT_IMAGE_GENERATION_MODEL}
+        />
+        <span className="hint muted small">
+          Used by image_generate. Leave the Gemini default unless this
+          agent needs a different OpenRouter image model.
+        </span>
+      </label>
+    </section>
+  );
+}
+
+function newInstanceReview({
+  name,
+  task,
+  models,
+  networkPolicy,
+  tools,
+  mcpServers,
+  templateId,
+  visitedSteps,
+  imageModel,
+  hasImageTool,
+}) {
+  const hasName = Boolean(name.trim());
+  const hasBrief = Boolean(task.trim());
+  const networkReviewed = visitedSteps.includes('network');
+  const toolsReviewed = visitedSteps.includes('tools');
+  const networkOk = networkPolicyIsValid(networkPolicy);
+  const imageOk = !hasImageTool || Boolean((imageModel || '').trim());
+  const required = [
+    {
+      key: 'brief',
+      label: 'brief',
+      required: true,
+      ok: hasName && hasBrief,
+      message: hasName && hasBrief ? 'valid' : 'name and brief required',
+    },
+    {
+      key: 'model',
+      label: 'model',
+      required: true,
+      ok: models.length > 0,
+      message: models.length > 0 ? models[0] : 'pick at least one model',
+    },
+    {
+      key: 'network',
+      label: 'network',
+      required: true,
+      ok: networkReviewed && networkOk,
+      message: !networkOk ? 'fix network entries' : networkReviewed ? 'reviewed' : 'review required',
+    },
+    {
+      key: 'tools',
+      label: 'tools',
+      required: true,
+      ok: toolsReviewed && imageOk,
+      message: !imageOk
+        ? 'image model required'
+        : toolsReviewed
+          ? `${tools.length} enabled`
+          : 'review required',
+    },
+    {
+      key: 'optional',
+      label: 'runtime',
+      required: true,
+      ok: Boolean(templateId.trim()),
+      message: templateId.trim() ? 'valid' : 'missing template',
+    },
+  ];
+  const optional = [
+    {
+      key: 'mcp',
+      label: 'MCP',
+      required: false,
+      ok: true,
+      message: `${(mcpServers || []).length} configured`,
+    },
+  ];
+  return { required, optional };
+}
+
+function networkPolicyIsValid(policy) {
+  if (!policy) return false;
+  if (policy.kind === 'allowlist') return (policy.entries || []).length > 0;
+  return Boolean(policy.kind);
 }
 
 function SummaryFact({ label, value }) {
@@ -1976,7 +2215,10 @@ function DetailHeader({ row, activeSection, onError }) {
             <IdChip id={row.id} openUrl={row.open_url}/>
           </div>
         </div>
-        <DetailOverflowMenu row={row} onError={onError}/>
+        <div className="detail-header-actions">
+          <DetailOpenButton row={row}/>
+          <DetailOverflowMenu row={row} onError={onError}/>
+        </div>
       </div>
       <DetailSectionNav row={row} activeSection={activeSection}/>
     </header>
@@ -2039,14 +2281,36 @@ function DetailSectionNav({ row, activeSection }) {
   );
 }
 
+function DetailOpenButton({ row }) {
+  const canOpen = !!row.open_url;
+  const isWarmingUp = canOpen && (row.status !== 'live' || !row.cube_sandbox_id);
+  return (
+    <a
+      className={`btn btn-sm detail-open-button ${canOpen ? '' : 'disabled'}`}
+      href={canOpen ? row.open_url : undefined}
+      target="_blank"
+      rel="noopener noreferrer"
+      aria-disabled={!canOpen}
+      onClick={(e) => { if (!canOpen) e.preventDefault(); }}
+      title={
+        !canOpen
+          ? 'swarm hostname is not configured — set [server] hostname in config.toml'
+          : isWarmingUp
+            ? 'sandbox is still warming up — opening anyway'
+            : 'open this agent in a new tab'
+      }
+    >
+      open ↗
+    </a>
+  );
+}
+
 function DetailOverflowMenu({ row, onError }) {
   const { client } = useApi();
   const ref = React.useRef(null);
   const [busy, setBusy] = React.useState(false);
   const id = row.id;
   const displayName = row.name && row.name.trim() ? row.name : '(unnamed)';
-  const canOpen = !!row.open_url;
-  const isWarmingUp = canOpen && (row.status !== 'live' || !row.cube_sandbox_id);
   const close = () => { if (ref.current) ref.current.removeAttribute('open'); };
 
   React.useEffect(() => {
@@ -2108,32 +2372,11 @@ function DetailOverflowMenu({ row, onError }) {
       <summary
         className="btn btn-ghost detail-overflow-trigger"
         aria-label="agent operations"
-        title="open, reset, destroy"
+        title="reset or destroy"
       >
         ⋯
       </summary>
       <div className="detail-overflow-menu" role="menu">
-        <a
-          role="menuitem"
-          className={`detail-overflow-item ${canOpen ? '' : 'disabled'}`}
-          href={canOpen ? row.open_url : undefined}
-          target="_blank"
-          rel="noopener noreferrer"
-          aria-disabled={!canOpen}
-          onClick={(e) => {
-            if (!canOpen) { e.preventDefault(); return; }
-            close();
-          }}
-          title={
-            !canOpen
-              ? 'swarm hostname is not configured — set [server] hostname in config.toml'
-              : isWarmingUp
-                ? 'sandbox is still warming up — opening anyway'
-                : 'open this agent in a new tab'
-          }
-        >
-          open ↗
-        </a>
         <button
           type="button"
           role="menuitem"
@@ -2302,7 +2545,7 @@ function IdentitySection({ instance }) {
   };
 
   return (
-    <section className="panel">
+    <section className="panel identity-panel">
       <div className="panel-header">
         <div className="panel-title">identity</div>
       </div>
@@ -2319,13 +2562,13 @@ function IdentitySection({ instance }) {
           disabled={disabled}
         />
       </label>
-      <label className="field">
+      <label className="field identity-brief-field">
         <span>brief</span>
         <textarea
-          className="textarea"
+          className="textarea identity-brief-textarea"
           value={task}
           onChange={e => setTask(e.target.value)}
-          rows={6}
+          rows={18}
           disabled={disabled}
         />
       </label>

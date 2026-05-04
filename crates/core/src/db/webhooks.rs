@@ -44,6 +44,7 @@ fn row_to_webhook(r: sqlx::sqlite::SqliteRow) -> Result<WebhookRow, StoreError> 
         name: r.try_get("name").map_err(map_sqlx)?,
         description: r.try_get("description").map_err(map_sqlx)?,
         auth_scheme,
+        signature_header: r.try_get("signature_header").map_err(map_sqlx)?,
         secret_name: r.try_get("secret_name").map_err(map_sqlx)?,
         enabled: r.try_get::<i64, _>("enabled").map_err(map_sqlx)? != 0,
         created_at: r.try_get("created_at").map_err(map_sqlx)?,
@@ -56,12 +57,13 @@ impl WebhookStore for SqlxWebhookStore {
     async fn put(&self, row: &WebhookRow) -> Result<(), StoreError> {
         sqlx::query(
             "INSERT INTO instance_webhooks \
-                (instance_id, name, description, auth_scheme, secret_name, \
+                (instance_id, name, description, auth_scheme, signature_header, secret_name, \
                  enabled, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT(instance_id, name) DO UPDATE SET \
                 description = excluded.description, \
                 auth_scheme = excluded.auth_scheme, \
+                signature_header = excluded.signature_header, \
                 secret_name = excluded.secret_name, \
                 enabled     = excluded.enabled, \
                 updated_at  = excluded.updated_at",
@@ -70,6 +72,7 @@ impl WebhookStore for SqlxWebhookStore {
         .bind(&row.name)
         .bind(&row.description)
         .bind(row.auth_scheme.as_str())
+        .bind(&row.signature_header)
         .bind(&row.secret_name)
         .bind(i64::from(row.enabled))
         .bind(row.created_at)
@@ -82,7 +85,7 @@ impl WebhookStore for SqlxWebhookStore {
 
     async fn get(&self, instance_id: &str, name: &str) -> Result<Option<WebhookRow>, StoreError> {
         let row = sqlx::query(
-            "SELECT instance_id, name, description, auth_scheme, secret_name, \
+            "SELECT instance_id, name, description, auth_scheme, signature_header, secret_name, \
                     enabled, created_at, updated_at \
              FROM instance_webhooks \
              WHERE instance_id = ? AND name = ?",
@@ -100,7 +103,7 @@ impl WebhookStore for SqlxWebhookStore {
 
     async fn list_for_instance(&self, instance_id: &str) -> Result<Vec<WebhookRow>, StoreError> {
         let rows = sqlx::query(
-            "SELECT instance_id, name, description, auth_scheme, secret_name, \
+            "SELECT instance_id, name, description, auth_scheme, signature_header, secret_name, \
                     enabled, created_at, updated_at \
              FROM instance_webhooks \
              WHERE instance_id = ? \
@@ -167,6 +170,7 @@ impl WebhookStore for SqlxWebhookStore {
                 .map(str::to_owned)
                 .unwrap_or(existing.description),
             auth_scheme: auth_scheme.unwrap_or(existing.auth_scheme),
+            signature_header: existing.signature_header,
             secret_name: match secret_name {
                 Some(v) => v.map(str::to_owned),
                 None => existing.secret_name,
@@ -389,6 +393,7 @@ mod tests {
             name: name.into(),
             description: "do the thing".into(),
             auth_scheme: WebhookAuthScheme::HmacSha256,
+            signature_header: "x-swarm-signature".into(),
             secret_name: Some(format!("webhook:{instance}:{name}")),
             enabled: true,
             created_at: 100,

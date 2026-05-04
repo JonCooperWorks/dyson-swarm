@@ -127,6 +127,11 @@ pub const ENV_MODEL: &str = "SWARM_MODEL";
 /// `/api/admin/configure` on edit (future) so the running dyson
 /// can rewrite `skills.builtin.tools` accordingly.
 pub const ENV_TOOLS: &str = "SWARM_TOOLS";
+/// Optional image-generation model id for the dedicated image provider
+/// configured at create time.  The SPA only sends this when
+/// `image_generate` is enabled; unset falls back to the operator's
+/// existing Gemini default.
+pub const ENV_IMAGE_GENERATION_MODEL: &str = "SWARM_IMAGE_GENERATION_MODEL";
 
 #[derive(Debug, Clone)]
 pub struct DeletedMcpServer {
@@ -453,7 +458,10 @@ fn managed_env(
 }
 
 fn is_reserved_env_name(name: &str) -> bool {
-    if matches!(name, ENV_MODEL | ENV_MODELS | ENV_TOOLS) {
+    if matches!(
+        name,
+        ENV_MODEL | ENV_MODELS | ENV_TOOLS | ENV_IMAGE_GENERATION_MODEL
+    ) {
         return false;
     }
     let upper = name.to_ascii_uppercase();
@@ -2740,6 +2748,18 @@ impl InstanceService {
         // sandbox is Live by here but the dyson HTTP server inside
         // can take a beat to settle, especially on cold cubeproxy.
         if let Some(reconfigurer) = self.reconfigurer.as_ref() {
+            let image_gen_defaults = self.image_gen_defaults.as_ref().map(|defaults| {
+                let mut defaults = defaults.clone();
+                if let Some(model) = req
+                    .env
+                    .get(ENV_IMAGE_GENERATION_MODEL)
+                    .map(|m| m.trim())
+                    .filter(|m| !m.is_empty())
+                {
+                    defaults.model = model.to_owned();
+                }
+                defaults
+            });
             let body = ReconfigureBody {
                 name: req.name.clone().filter(|s| !s.is_empty()),
                 task: req.task.clone().filter(|s| !s.is_empty()),
@@ -2790,19 +2810,14 @@ impl InstanceService {
                 // `image_gen_defaults` is None on InstanceService all
                 // four fields stay None and the dyson handler skips
                 // the patch.
-                image_provider_name: self
-                    .image_gen_defaults
-                    .as_ref()
-                    .map(|d| d.provider_name.clone()),
-                image_provider_block: self
-                    .image_gen_defaults
+                image_provider_name: image_gen_defaults.as_ref().map(|d| d.provider_name.clone()),
+                image_provider_block: image_gen_defaults
                     .as_ref()
                     .map(|d| d.provider_block(&self.image_proxy_base(), &proxy_token)),
-                image_generation_provider: self
-                    .image_gen_defaults
+                image_generation_provider: image_gen_defaults
                     .as_ref()
                     .map(|d| d.provider_name.clone()),
-                image_generation_model: self.image_gen_defaults.as_ref().map(|d| d.model.clone()),
+                image_generation_model: image_gen_defaults.as_ref().map(|d| d.model.clone()),
                 // Belt-and-braces: the new dyson swarm boot writer
                 // already honors SWARM_TOOLS, but creates that ride an
                 // older binary template ship a stale skills block.
@@ -4999,6 +5014,44 @@ mod tests {
         // template whose dyson swarm writer wrote
         // `skills.builtin.tools = []`.
         assert!(body.reset_skills, "create push must flip reset_skills");
+    }
+
+    #[tokio::test]
+    async fn create_push_uses_requested_image_generation_model() {
+        let (svc, _cube, _tokens, _instances, recorder) = build_with_recorder().await;
+        let mut env = env_with_model();
+        env.insert(
+            ENV_IMAGE_GENERATION_MODEL.into(),
+            "google/gemini-custom-image".into(),
+        );
+
+        svc.create(
+            "legacy",
+            CreateRequest {
+                template_id: "tpl".into(),
+                name: Some("alice".into()),
+                task: Some("draw things".into()),
+                env,
+                ttl_seconds: None,
+                network_policy: NetworkPolicy::default(),
+                mcp_servers: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+        wait_for_pushes(&recorder, 1).await;
+        let pushed = recorder.pushed.lock().unwrap();
+        let (_, _, body) = &pushed[0];
+
+        assert_eq!(
+            body.image_generation_model.as_deref(),
+            Some("google/gemini-custom-image"),
+        );
+        let block = body
+            .image_provider_block
+            .as_ref()
+            .expect("image provider block must be present");
+        assert_eq!(block["models"][0], "google/gemini-custom-image");
     }
 
     #[tokio::test]

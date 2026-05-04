@@ -3437,6 +3437,115 @@ impl InstanceService {
         Ok(())
     }
 
+    /// Remove every provisioned MCP server that came from one Docker
+    /// catalog template. Used when an admin deletes a template so user
+    /// instances do not keep running an orphaned Docker MCP entry.
+    pub async fn delete_mcp_servers_for_docker_catalog(
+        &self,
+        catalog_id: &str,
+    ) -> Result<usize, SwarmError> {
+        let secrets = self
+            .mcp_secrets
+            .as_ref()
+            .ok_or_else(|| SwarmError::PolicyDenied("mcp secrets store not configured".into()))?;
+        let instances = self
+            .instances
+            .list(
+                "*",
+                ListFilter {
+                    status: None,
+                    include_destroyed: true,
+                },
+            )
+            .await?;
+        let mut removed = 0usize;
+        for row in instances {
+            let names = match mcp_servers::list_names(secrets, &row.owner_id, &row.id).await {
+                Ok(names) => names,
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        instance = %row.id,
+                        "mcp catalog delete: list failed"
+                    );
+                    continue;
+                }
+            };
+            if names.is_empty() {
+                continue;
+            }
+
+            let mut next_names = Vec::with_capacity(names.len());
+            let mut removed_for_instance = 0usize;
+            for name in names {
+                let entry = match mcp_servers::get(secrets, &row.owner_id, &row.id, &name).await {
+                    Ok(entry) => entry,
+                    Err(err) => {
+                        tracing::warn!(
+                            error = %err,
+                            instance = %row.id,
+                            server = %name,
+                            "mcp catalog delete: entry read failed"
+                        );
+                        next_names.push(name);
+                        continue;
+                    }
+                };
+                let should_delete = matches!(
+                    entry.as_ref().and_then(|entry| entry.docker_catalog.as_ref()),
+                    Some(binding) if binding.id == catalog_id
+                );
+                if !should_delete {
+                    next_names.push(name);
+                    continue;
+                }
+
+                if let Err(err) = secrets
+                    .delete(&row.owner_id, &mcp_servers::entry_key(&row.id, &name))
+                    .await
+                {
+                    tracing::warn!(
+                        error = %err,
+                        instance = %row.id,
+                        server = %name,
+                        catalog = %catalog_id,
+                        "mcp catalog delete: row delete failed"
+                    );
+                }
+                removed_for_instance += 1;
+            }
+
+            if removed_for_instance == 0 {
+                continue;
+            }
+            removed += removed_for_instance;
+            if next_names.is_empty() {
+                let _ = secrets
+                    .delete(&row.owner_id, &mcp_servers::index_key(&row.id))
+                    .await;
+            } else {
+                let idx = serde_json::to_vec(&next_names)
+                    .map_err(|e| SwarmError::Internal(format!("mcp index serialise: {e}")))?;
+                secrets
+                    .put(&row.owner_id, &mcp_servers::index_key(&row.id), &idx)
+                    .await
+                    .map_err(|e| SwarmError::Internal(format!("mcp index put: {e}")))?;
+            }
+
+            if row.status != InstanceStatus::Destroyed {
+                if let Err(err) = self.sync_mcp_to_dyson(&row.owner_id, &row.id).await {
+                    tracing::warn!(
+                        error = %err,
+                        instance = %row.id,
+                        catalog = %catalog_id,
+                        "mcp catalog delete: sync_mcp_to_dyson failed"
+                    );
+                }
+            }
+        }
+        Ok(removed)
+    }
+
     /// Clear OAuth tokens from one server entry.  The next request
     /// through the proxy will 428 with "oauth not authorised yet" until
     /// the user reconnects via /mcp/oauth/start.  Used by the SPA's
@@ -5189,6 +5298,89 @@ mod tests {
             }
             other => panic!("expected docker stdio runtime, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn delete_docker_catalog_mcp_servers_removes_bound_entries_and_resyncs() {
+        let (svc, _cube, _tokens, _instances, recorder, user_secrets, owner) =
+            build_with_mcp_secrets().await;
+        let created = hire_minimal(&svc, &owner).await;
+        wait_for_pushes(&recorder, 1).await;
+        recorder.pushed.lock().unwrap().clear();
+
+        let catalog = crate::mcp_servers::McpDockerCatalogServer {
+            id: "github".into(),
+            label: "GitHub".into(),
+            description: None,
+            template: serde_json::json!({
+                "servers": {
+                    "github": {
+                        "type": "stdio",
+                        "command": "docker",
+                        "args": ["run", "--rm", "-i", "-e", "GITHUB_TOKEN", "ghcr.io/example/github-mcp"],
+                        "env": { "GITHUB_TOKEN": "{{placeholder.github_token}}" }
+                    }
+                }
+            })
+            .to_string(),
+            credentials: vec![crate::mcp_servers::McpDockerCredentialSpec {
+                id: "github_token".into(),
+                label: "GitHub token".into(),
+                description: None,
+                required: true,
+                secret: true,
+                placeholder: None,
+            }],
+        };
+        svc.put_docker_catalog_mcp_server(
+            &owner,
+            &created.id,
+            &catalog,
+            BTreeMap::from([("github_token".into(), "ghp_secret".into())]),
+        )
+        .await
+        .unwrap();
+        svc.put_mcp_server(
+            &owner,
+            &created.id,
+            McpServerSpec {
+                name: "linear".into(),
+                url: "https://linear.example.com/mcp".into(),
+                auth: crate::mcp_servers::McpAuthSpec::None,
+                enabled_tools: None,
+            },
+        )
+        .await
+        .unwrap();
+        wait_for_pushes(&recorder, 2).await;
+        recorder.pushed.lock().unwrap().clear();
+
+        let removed = svc
+            .delete_mcp_servers_for_docker_catalog("github")
+            .await
+            .unwrap();
+        assert_eq!(removed, 1);
+
+        assert!(
+            crate::mcp_servers::get(&user_secrets, &owner, &created.id, "github")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let names = crate::mcp_servers::list_names(&user_secrets, &owner, &created.id)
+            .await
+            .unwrap();
+        assert_eq!(names, vec!["linear"]);
+
+        wait_for_pushes(&recorder, 1).await;
+        let pushed = recorder.pushed.lock().unwrap();
+        let (_, _, body) = pushed.last().unwrap();
+        let block = body
+            .mcp_servers
+            .as_ref()
+            .expect("catalog delete must push mcp_servers");
+        assert!(!block.contains_key("github"));
+        assert!(block.contains_key("linear"));
     }
 
     #[tokio::test]

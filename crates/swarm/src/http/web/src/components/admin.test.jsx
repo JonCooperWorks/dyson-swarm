@@ -108,6 +108,9 @@ describe('AdminView Docker MCP catalog', () => {
     expect(screen.getByText('github_token')).toBeInTheDocument();
     expect(screen.getByText('GitHub token')).toBeInTheDocument();
     expect(screen.getAllByText('servers.github.env.GITHUB_TOKEN').length).toBeGreaterThan(0);
+    const bodyText = document.body.textContent;
+    expect(bodyText.indexOf('saved placeholders')).toBeLessThan(bodyText.indexOf('payload path'));
+    expect(bodyText.indexOf('GitHub token')).toBeLessThan(bodyText.indexOf('payload path'));
     fireEvent.click(screen.getByRole('button', { name: 'save' }));
 
     await waitFor(() => expect(client.adminPutMcpDockerCatalogServer).toHaveBeenCalledTimes(1));

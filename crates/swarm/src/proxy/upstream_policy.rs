@@ -125,7 +125,9 @@ fn is_localhost_target(url: &reqwest::Url, resolved_addrs: &[SocketAddr]) -> boo
     };
     let literal_host = host.trim_start_matches('[').trim_end_matches(']');
     let host_ok = literal_host.eq_ignore_ascii_case("localhost")
-        || literal_host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback());
+        || literal_host
+            .parse::<IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback());
     host_ok
         && !resolved_addrs.is_empty()
         && resolved_addrs.iter().all(|addr| addr.ip().is_loopback())

@@ -1129,8 +1129,25 @@ async fn admin_delete_docker_catalog_server(
             "mcp docker catalog store not configured",
         )
     })?;
+    let isvc = svc.instance_svc.as_ref().ok_or_else(|| {
+        error_resp(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "mcp management not configured",
+        )
+    })?;
     let deleted = store.delete(&catalog_id).await.map_err(store_err_to_resp)?;
-    Ok(Json(serde_json::json!({ "ok": true, "deleted": deleted })))
+    let removed_mcp_servers = if deleted {
+        isvc.delete_mcp_servers_for_docker_catalog(&catalog_id)
+            .await
+            .map_err(swarm_err_to_resp)?
+    } else {
+        0
+    };
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "deleted": deleted,
+        "removed_mcp_servers": removed_mcp_servers,
+    })))
 }
 
 fn docker_catalog_summary(

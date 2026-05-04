@@ -400,6 +400,44 @@ function DockerCatalogForm({ mode, initial, busy, onCancel, onSave }) {
                 </div>
               </div>
               <div className="mcp-card-body">
+                <div className="admin-catalog-saved-placeholders">
+                  <div className="admin-catalog-saved-placeholders-title">saved placeholders</div>
+                  {bindings.length === 0 ? (
+                    <div className="admin-catalog-placeholder-empty">
+                      <p className="muted small">no template placeholders</p>
+                    </div>
+                  ) : (
+                    <div className="admin-catalog-placeholder-list" aria-label="template placeholders">
+                      {bindings.map(binding => (
+                        <div className="admin-catalog-placeholder-row" key={`${binding.id}:${binding.path || ''}`}>
+                          <div className="admin-catalog-placeholder-row-head">
+                            <div className="admin-catalog-placeholder-title">
+                              <span className="muted small">placeholder</span>
+                              <code className="mono-sm">{binding.id}</code>
+                            </div>
+                            <button
+                              type="button"
+                              className="btn btn-ghost btn-sm"
+                              onClick={() => {
+                                setPayloadPath(binding.path || '');
+                                setPlaceholderName(binding.id);
+                                setFriendlyName(placeholderLabels[binding.id] || binding.id);
+                              }}
+                              disabled={busy}
+                            >
+                              reuse
+                            </button>
+                          </div>
+                          {binding.path ? (
+                            <code className="admin-catalog-token">{binding.path}</code>
+                          ) : null}
+                          <code className="admin-catalog-token">{placeholderLabels[binding.id] || binding.id}</code>
+                          <code className="admin-catalog-token">{binding.token}</code>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
                 <label className="field admin-catalog-placeholder-name">
                   <span>payload path</span>
                   <input
@@ -496,41 +534,6 @@ function DockerCatalogForm({ mode, initial, busy, onCancel, onSave }) {
                     ))}
                   </div>
                 ) : null}
-                {bindings.length === 0 ? (
-                  <div className="admin-catalog-placeholder-empty">
-                    <p className="muted small">no template placeholders</p>
-                  </div>
-                ) : (
-                  <div className="admin-catalog-placeholder-list" aria-label="template placeholders">
-                    {bindings.map(binding => (
-                      <div className="admin-catalog-placeholder-row" key={`${binding.id}:${binding.path || ''}`}>
-                        <div className="admin-catalog-placeholder-row-head">
-                          <div className="admin-catalog-placeholder-title">
-                            <span className="muted small">placeholder</span>
-                            <code className="mono-sm">{binding.id}</code>
-                          </div>
-                          <button
-                            type="button"
-                            className="btn btn-ghost btn-sm"
-                            onClick={() => {
-                              setPayloadPath(binding.path || '');
-                              setPlaceholderName(binding.id);
-                              setFriendlyName(placeholderLabels[binding.id] || binding.id);
-                            }}
-                            disabled={busy}
-                          >
-                            reuse
-                          </button>
-                        </div>
-                        {binding.path ? (
-                          <code className="admin-catalog-token">{binding.path}</code>
-                        ) : null}
-                        <code className="admin-catalog-token">{placeholderLabels[binding.id] || binding.id}</code>
-                        <code className="admin-catalog-token">{binding.token}</code>
-                      </div>
-                    ))}
-                  </div>
-                )}
               </div>
             </div>
           </div>

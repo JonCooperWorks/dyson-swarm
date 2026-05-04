@@ -165,6 +165,21 @@
   gap: 14px;
 }
 
+.admin-catalog-saved-placeholders {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.admin-catalog-saved-placeholders-title {
+  color: var(--fg-muted);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
 .admin-catalog-bind-placeholder {
   width: 100%;
   min-height: 42px;

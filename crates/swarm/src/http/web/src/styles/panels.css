@@ -494,6 +494,10 @@
   flex-direction: column;
   gap: 16px;
 }
+.detail-pane-section-identity {
+  overflow: hidden;
+  padding-bottom: 8px;
+}
 .instance-subpage {
   display: flex;
   flex-direction: column;
@@ -1192,15 +1196,20 @@
 .wizard-step {
   animation: wizard-step-in 120ms ease-out;
 }
-.wizard-step-brief,
-.identity-panel {
+.wizard-step-brief {
   min-height: clamp(520px, calc(100vh - 260px), 860px);
 }
 .identity-panel {
   display: flex;
   flex-direction: column;
 }
+.detail-pane-section-identity .identity-panel {
+  flex: 1 1 0;
+  min-height: 0;
+}
 .identity-brief-field {
+  display: flex;
+  flex-direction: column;
   flex: 1;
   min-height: 0;
 }
@@ -1208,6 +1217,11 @@
   flex: 1;
   min-height: clamp(360px, 54vh, 720px);
   resize: vertical;
+}
+.detail-pane-section-identity .identity-brief-textarea {
+  min-height: 0;
+  height: auto;
+  resize: none;
 }
 .wizard-runtime-block {
   display: flex;
@@ -1269,9 +1283,11 @@
   .wizard-actions .btn {
     flex: 1;
   }
-  .wizard-step-brief,
-  .identity-panel {
+  .wizard-step-brief {
     min-height: 620px;
+  }
+  .detail-pane-section-identity .identity-panel {
+    min-height: 0;
   }
 }
 

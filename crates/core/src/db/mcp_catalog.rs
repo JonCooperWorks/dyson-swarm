@@ -1,7 +1,7 @@
-//! SQLite-backed store for admin-curated Docker MCP presets.
+//! SQLite-backed store for admin-curated Docker MCP templates.
 //!
 //! The catalog contains templates and placeholder metadata only.  When a
-//! user selects a preset, the rendered MCP server is written into that
+//! user selects a template, the rendered MCP server is written into that
 //! user's encrypted `user_secrets` row by the instance service.
 
 use sqlx::{Row, SqlitePool};
@@ -183,7 +183,7 @@ mod tests {
             "env": {}
         });
         if let Some(id) = credential_id {
-            server["env"] = serde_json::json!({ "API_KEY": format!("{{{{credential.{id}}}}}") });
+            server["env"] = serde_json::json!({ "API_KEY": format!("{{{{placeholder.{id}}}}}") });
         }
         let mut servers = serde_json::Map::new();
         servers.insert(id.into(), server);

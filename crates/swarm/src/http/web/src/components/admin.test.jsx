@@ -36,13 +36,13 @@ describe('AdminView Docker MCP catalog', () => {
       </ApiProvider>,
     );
 
-    expect(await screen.findByRole('link', { name: 'add preset' }))
+    expect(await screen.findByRole('link', { name: 'add template' }))
       .toHaveAttribute('href', '#/admin/mcp-catalog/new');
     expect(await screen.findByRole('link', { name: 'edit' }))
       .toHaveAttribute('href', '#/admin/mcp-catalog/github');
   });
 
-  test('adds an admin Docker MCP preset with credential placeholders on the full page', async () => {
+  test('adds an admin Docker MCP template with payload placeholders on the full page', async () => {
     let rows = [];
     const client = {
       adminListUsers: vi.fn().mockResolvedValue([]),
@@ -76,7 +76,7 @@ describe('AdminView Docker MCP catalog', () => {
           type: 'stdio',
           command: 'docker',
           args: ['run', '--rm', '-i', '-e', 'GITHUB_TOKEN', 'ghcr.io/example/github-mcp'],
-          env: { GITHUB_TOKEN: '' },
+          env: { GITHUB_TOKEN: 'YOUR_API_KEY_HERE' },
         },
       },
     });
@@ -92,13 +92,21 @@ describe('AdminView Docker MCP catalog', () => {
     });
     fireEvent.click(screen.getByRole('button', { name: /servers\.github\.env\.GITHUB_TOKEN/ }));
     expect(screen.getByLabelText('payload path')).toHaveValue('servers.github.env.GITHUB_TOKEN');
-    fireEvent.change(screen.getByLabelText('user field name'), {
+    expect(screen.getByText('selected JSON value')).toBeInTheDocument();
+    expect(screen.getAllByText('YOUR_API_KEY_HERE').length).toBeGreaterThan(0);
+    fireEvent.change(screen.getByLabelText('placeholder name'), {
       target: { value: 'github_token' },
     });
-    fireEvent.click(screen.getByRole('button', { name: 'bind credential' }));
-    await waitFor(() => expect(template.value).toContain('{{credential.github_token}}'));
-    expect(template.value).toContain('"GITHUB_TOKEN": "{{credential.github_token}}"');
+    fireEvent.change(screen.getByLabelText('friendly name'), {
+      target: { value: 'GitHub token' },
+    });
+    expect(screen.getByText('{{placeholder.github_token}}')).toBeInTheDocument();
+    expect(screen.queryByText(/credential/i)).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'bind placeholder' }));
+    await waitFor(() => expect(template.value).toContain('{{placeholder.github_token}}'));
+    expect(template.value).toContain('"GITHUB_TOKEN": "{{placeholder.github_token}}"');
     expect(screen.getByText('github_token')).toBeInTheDocument();
+    expect(screen.getByText('GitHub token')).toBeInTheDocument();
     expect(screen.getAllByText('servers.github.env.GITHUB_TOKEN').length).toBeGreaterThan(0);
     fireEvent.click(screen.getByRole('button', { name: 'save' }));
 
@@ -106,10 +114,10 @@ describe('AdminView Docker MCP catalog', () => {
     expect(client.adminPutMcpDockerCatalogServer).toHaveBeenCalledWith('github', {
       label: 'GitHub',
       description: 'GitHub MCP tools',
-      template: expect.stringContaining('{{credential.github_token}}'),
+      template: expect.stringContaining('{{placeholder.github_token}}'),
       credentials: [{
         id: 'github_token',
-        label: 'github_token',
+        label: 'GitHub token',
         description: null,
         required: true,
         secret: true,

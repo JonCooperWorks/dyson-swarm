@@ -138,8 +138,8 @@ pub struct McpDockerCatalogServer {
     /// Short description shown under the label.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    /// Read-only MCP JSON template.  Credential placeholders use
-    /// `{{credential.<id>}}` or `{{credentials.<id>}}` inside string
+    /// Read-only MCP JSON template.  Placeholders use
+    /// `{{placeholder.<id>}}` or `{{placeholders.<id>}}` inside string
     /// values.  The rendered JSON must contain exactly one Docker
     /// stdio server under `servers` or `mcpServers`.
     pub template: String,
@@ -377,8 +377,8 @@ pub fn entry_from_docker_catalog_template(
     Ok((name, entry))
 }
 
-/// Validate an operator-curated Docker MCP preset without needing real
-/// user credentials.  The same renderer/parser used by the user save
+/// Validate an operator-curated Docker MCP template without needing real
+/// user placeholder values.  The same renderer/parser used by the user save
 /// path does the heavy lifting, so admin UI/API validation and runtime
 /// persistence stay in lockstep.
 pub fn validate_docker_catalog_server(catalog: &McpDockerCatalogServer) -> Result<(), String> {
@@ -443,12 +443,12 @@ fn resolve_catalog_credentials(
         let value = match value {
             Some(v) => v,
             None if field.required => {
-                return Err(format!("credential `{}` is required", field.id));
+                return Err(format!("placeholder `{}` is required", field.id));
             }
             None => String::new(),
         };
         if field.required && value.trim().is_empty() {
-            return Err(format!("credential `{}` is required", field.id));
+            return Err(format!("placeholder `{}` is required", field.id));
         }
         render_values.insert(field.id.clone(), value.clone());
         if !value.is_empty() {
@@ -506,15 +506,15 @@ fn render_catalog_template_string(
         let placeholder = rest[..end].trim();
         rest = &rest[end + 2..];
         let Some(id) = placeholder
-            .strip_prefix("credential.")
-            .or_else(|| placeholder.strip_prefix("credentials."))
+            .strip_prefix("placeholder.")
+            .or_else(|| placeholder.strip_prefix("placeholders."))
         else {
             return Err(format!(
                 "unsupported catalog placeholder `{{{{{placeholder}}}}}`"
             ));
         };
         let Some(value) = credentials.get(id) else {
-            return Err(format!("unknown catalog credential `{id}`"));
+            return Err(format!("unknown catalog placeholder `{id}`"));
         };
         out.push_str(value);
     }
@@ -1810,7 +1810,7 @@ mod tests {
     }
 
     #[test]
-    fn docker_catalog_template_renders_credentials_and_hides_raw_json() {
+    fn docker_catalog_template_renders_placeholders_and_hides_raw_json() {
         let catalog = McpDockerCatalogServer {
             id: "github".into(),
             label: "GitHub".into(),
@@ -1821,7 +1821,7 @@ mod tests {
                         "type": "stdio",
                         "command": "docker",
                         "args": ["run", "--rm", "-i", "-e", "GITHUB_TOKEN", "ghcr.io/example/github-mcp"],
-                        "env": { "GITHUB_TOKEN": "{{credential.github_token}}" }
+                        "env": { "GITHUB_TOKEN": "{{placeholder.github_token}}" }
                     }
                 }
             })
@@ -1856,7 +1856,7 @@ mod tests {
     }
 
     #[test]
-    fn docker_catalog_validation_allows_no_placeholder_presets() {
+    fn docker_catalog_validation_allows_no_placeholder_templates() {
         let catalog = McpDockerCatalogServer {
             id: "memory".into(),
             label: "Memory".into(),
@@ -1889,7 +1889,7 @@ mod tests {
                         "type": "stdio",
                         "command": "docker",
                         "args": ["run", "--rm", "-i", "ghcr.io/example/github-mcp"],
-                        "env": { "GITHUB_TOKEN": "{{credential.github_token}}" }
+                        "env": { "GITHUB_TOKEN": "{{placeholder.github_token}}" }
                     }
                 }
             })
@@ -1898,7 +1898,38 @@ mod tests {
         };
 
         let err = validate_docker_catalog_server(&catalog).unwrap_err();
-        assert!(err.contains("unknown catalog credential"));
+        assert!(err.contains("unknown catalog placeholder"));
+    }
+
+    #[test]
+    fn docker_catalog_validation_rejects_legacy_credential_tokens() {
+        let catalog = McpDockerCatalogServer {
+            id: "github".into(),
+            label: "GitHub".into(),
+            description: None,
+            template: serde_json::json!({
+                "servers": {
+                    "github": {
+                        "type": "stdio",
+                        "command": "docker",
+                        "args": ["run", "--rm", "-i", "ghcr.io/example/github-mcp"],
+                        "env": { "GITHUB_TOKEN": "{{credential.github_token}}" }
+                    }
+                }
+            })
+            .to_string(),
+            credentials: vec![McpDockerCredentialSpec {
+                id: "github_token".into(),
+                label: "GitHub token".into(),
+                description: None,
+                required: true,
+                secret: true,
+                placeholder: None,
+            }],
+        };
+
+        let err = validate_docker_catalog_server(&catalog).unwrap_err();
+        assert!(err.contains("unsupported catalog placeholder"));
     }
 
     #[test]
@@ -1913,7 +1944,7 @@ mod tests {
                         "type": "stdio",
                         "command": "docker",
                         "args": ["run", "--rm", "-i", "-e", "GITHUB_TOKEN", "ghcr.io/example/github-mcp:v2"],
-                        "env": { "GITHUB_TOKEN": "{{credentials.github_token}}" }
+                        "env": { "GITHUB_TOKEN": "{{placeholders.github_token}}" }
                     }
                 }
             })

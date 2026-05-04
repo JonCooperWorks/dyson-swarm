@@ -883,8 +883,8 @@ export function NewInstanceForm() {
           dockerCatalog={mcpDockerCatalog}
         />
         <span className="hint muted small">
-          Add remote MCP servers or admin-curated Docker presets. Swarm
-          seals upstream URLs and credentials; the agent only sees a
+          Add remote MCP servers or admin-curated Docker. Swarm
+          seals upstream URLs and secrets; the agent only sees a
           swarm proxy URL.
         </span>
       </section>
@@ -1308,11 +1308,11 @@ export function splitMcpSetupRows(rows, dockerCatalog = null) {
       const catalogId = row.catalogId || catalogServers[0]?.id || '';
       const server = catalogServers.find(s => s.id === catalogId);
       if (!server) {
-        throw new Error('Choose a Docker MCP preset before saving.');
+        throw new Error('Choose Docker before saving.');
       }
       const serverName = mcpServerNameFromText(server.template || '');
       if (!serverName) {
-        throw new Error(`Docker MCP preset "${server.label || server.id}" has an invalid JSON template.`);
+        throw new Error(`Docker "${server.label || server.id}" has an invalid JSON template.`);
       }
       if (names.has(serverName)) {
         throw new Error(`MCP server "${serverName}" is configured more than once.`);
@@ -1407,7 +1407,7 @@ function McpServerCard({ row, dockerCatalog, onChange, onChangeAuth, onRemove })
   const displayName = serverType === 'docker'
     ? (parsedDockerName || 'docker config')
     : (serverType === 'docker_catalog'
-      ? (parsedCatalogName || selectedCatalog?.label || 'docker preset')
+      ? (parsedCatalogName || selectedCatalog?.label || 'docker')
       : (row.name?.trim() || 'unnamed'));
   const setCredential = (id, value) =>
     onChange({ credentials: { ...(row.credentials || {}), [id]: value } });
@@ -1444,7 +1444,7 @@ function McpServerCard({ row, dockerCatalog, onChange, onChangeAuth, onRemove })
         {serverType === 'docker_catalog' ? (
           <>
             <label className="field">
-              <span>preset</span>
+              <span>Docker</span>
               <select
                 value={selectedCatalog?.id || ''}
                 onChange={e => onChange({ catalogId: e.target.value, credentials: {} })}
@@ -1461,16 +1461,15 @@ function McpServerCard({ row, dockerCatalog, onChange, onChangeAuth, onRemove })
             </label>
             {selectedCatalog ? (
               <>
-                <McpCatalogCredentialFields
+                <McpCatalogPlaceholderFields
                   server={selectedCatalog}
                   values={row.credentials || {}}
                   onChange={setCredential}
                 />
-                <McpDockerTemplatePreview template={selectedCatalog.template}/>
               </>
             ) : (
               <p className="muted small mcp-card-note">
-                No Docker MCP presets are available on this swarm.
+                No Docker entries are available on this swarm.
               </p>
             )}
           </>
@@ -1575,7 +1574,7 @@ function McpServerTypeField({ value, onChange, disabled = false, dockerCatalog =
         aria-label="MCP server type"
       >
         <option value="remote">remote HTTP/SSE</option>
-        {hasCatalog ? <option value="docker_catalog">Docker preset</option> : null}
+        {hasCatalog ? <option value="docker_catalog">Docker</option> : null}
         {catalog.allow_raw_json || value === 'docker' ? (
           <option value="docker">Docker JSON</option>
         ) : null}
@@ -1606,38 +1605,14 @@ function McpDockerJsonField({ value, onChange, disabled = false, autoFocus = fal
   );
 }
 
-function McpDockerTemplatePreview({ template }) {
-  return (
-    <label className="field">
-      <span>JSON</span>
-      <textarea
-        className="mcp-json-textarea mcp-json-preview"
-        value={formatMcpJsonTemplate(template)}
-        readOnly
-        spellCheck={false}
-        aria-label="Read-only MCP JSON template"
-      />
-    </label>
-  );
-}
-
-function formatMcpJsonTemplate(template) {
-  if (!template) return '';
-  try {
-    return JSON.stringify(JSON.parse(template), null, 2);
-  } catch {
-    return template;
-  }
-}
-
-function McpCatalogCredentialFields({ server, values, onChange, keepExisting = false }) {
-  const credentials = server?.credentials || [];
-  if (credentials.length === 0) {
-    return <p className="muted small mcp-card-note">This preset does not need credentials.</p>;
+function McpCatalogPlaceholderFields({ server, values, onChange, keepExisting = false }) {
+  const placeholders = server?.credentials || [];
+  if (placeholders.length === 0) {
+    return <p className="muted small mcp-card-note">No placeholders to fill.</p>;
   }
   return (
     <>
-      {credentials.map(field => (
+      {placeholders.map(field => (
         <label className="field" key={field.id}>
           <span>{field.label || field.id}</span>
           <input
@@ -1651,7 +1626,7 @@ function McpCatalogCredentialFields({ server, values, onChange, keepExisting = f
           <span className="hint muted small">
             {field.description || (keepExisting
               ? `Leave ${MCP_KEEP_TOKEN} to keep the stored value.`
-              : 'Sealed in your user secret store; the agent never sees it directly.')}
+              : 'Saved in your user secret store; the agent never sees it directly.')}
           </span>
         </label>
       ))}
@@ -3207,7 +3182,7 @@ export function McpServersPanel({ instanceId, policyKind, disabled }) {
       {err ? <McpErrorNotice notice={err}/> : null}
       <p className="muted small">
         Swarm proxies every MCP request — the agent only sees a swarm URL,
-        never your upstream URL or its credentials. OAuth tokens land in
+        never your upstream URL or its secrets. OAuth tokens land in
         your encrypted user secret store and refresh transparently.
       </p>
       {rows === null ? (
@@ -3596,16 +3571,16 @@ function McpServerEditModal({
     setErr(null);
     if (isDockerCatalogMode) {
       if (!selectedCatalog) {
-        setErr('Choose a Docker MCP preset before saving.');
+        setErr('Choose Docker before saving.');
         return;
       }
       const serverName = mcpServerNameFromText(selectedCatalog.template || '');
       if (!serverName) {
-        setErr('The selected Docker MCP preset has an invalid JSON template.');
+        setErr('The selected Docker entry has an invalid JSON template.');
         return;
       }
       if (!isNew && serverName !== initial.name) {
-        setErr('Names are immutable — keep the same preset name or remove and re-add.');
+        setErr('Names are immutable — keep the same Docker name or remove and re-add.');
         return;
       }
       if (isNew && existingNames.includes(serverName)) {
@@ -3667,6 +3642,8 @@ function McpServerEditModal({
     }
     onSubmit({ name: trimmed, url: url.trim(), auth });
   };
+  const primaryAction = isDockerCatalogMode ? 'provision' : 'save';
+  const busyAction = isDockerCatalogMode ? 'provisioning…' : 'saving…';
 
   return (
     <div className="modal-scrim" onClick={onCancel}>
@@ -3695,12 +3672,11 @@ function McpServerEditModal({
             <>
               {isNew ? null : (
                 <p className="muted small">
-                  This Docker MCP server comes from an admin preset. The JSON is read-only;
-                  only credential fields are sent back to swarm.
+                  This Docker MCP server comes from an admin template.
                 </p>
               )}
               <label className="field">
-                <span>preset</span>
+                <span>Docker</span>
                 <select
                   value={selectedCatalog?.id || ''}
                   onChange={e => {
@@ -3721,16 +3697,15 @@ function McpServerEditModal({
               </label>
               {selectedCatalog ? (
                 <>
-                  <McpCatalogCredentialFields
+                  <McpCatalogPlaceholderFields
                     server={selectedCatalog}
                     values={catalogCredentials}
                     onChange={(id, value) => setCatalogCredentials(curr => ({ ...curr, [id]: value }))}
                     keepExisting={!isNew}
                   />
-                  <McpDockerTemplatePreview template={selectedCatalog.template}/>
                 </>
               ) : (
-                <p className="muted small">No Docker MCP presets are available on this swarm.</p>
+                <p className="muted small">No Docker entries are available on this swarm.</p>
               )}
             </>
           ) : isDockerJsonMode ? (
@@ -3880,7 +3855,7 @@ function McpServerEditModal({
           {err ? <div className="error">{err}</div> : null}
           <div className="modal-actions">
             <button type="submit" className="btn btn-primary" disabled={busy}>
-              {busy ? 'saving…' : 'save'}
+              {busy ? busyAction : primaryAction}
             </button>
             <button type="button" className="btn btn-ghost" onClick={onCancel} disabled={busy}>
               cancel

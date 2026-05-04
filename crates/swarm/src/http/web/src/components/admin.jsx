@@ -22,7 +22,7 @@ const DOCKER_CATALOG_TEMPLATE_PLACEHOLDER = JSON.stringify({
   },
 }, null, 2);
 
-const CREDENTIAL_TOKEN_RE = /{{\s*credentials?\.([A-Za-z0-9_-]+)\s*}}/g;
+const PLACEHOLDER_TOKEN_RE = /{{\s*placeholders?\.([A-Za-z0-9_-]+)\s*}}/g;
 const SAFE_PLACEHOLDER_NAME_RE = /^[A-Za-z0-9_-]+$/;
 
 export function AdminView({ view = { name: 'admin' } }) {
@@ -104,20 +104,20 @@ function DockerCatalogPanel({ client }) {
       const body = await client.adminListMcpDockerCatalog();
       setRows(Array.isArray(body?.servers) ? body.servers : []);
     } catch (e) {
-      setErr(e?.detail || e?.message || 'list Docker MCP presets failed');
+      setErr(e?.detail || e?.message || 'list Docker MCP templates failed');
     }
   }, [client]);
 
   React.useEffect(() => { refresh(); }, [refresh]);
 
   const remove = async (row) => {
-    if (!confirm(`delete Docker MCP preset ${row.id}?`)) return;
+    if (!confirm(`delete Docker MCP template ${row.id}?`)) return;
     setBusy(true); setErr(null);
     try {
       await client.adminDeleteMcpDockerCatalogServer(row.id);
       await refresh();
     } catch (e) {
-      setErr(e?.detail || e?.message || 'delete Docker MCP preset failed');
+      setErr(e?.detail || e?.message || 'delete Docker MCP template failed');
     } finally {
       setBusy(false);
     }
@@ -126,10 +126,10 @@ function DockerCatalogPanel({ client }) {
   return (
     <section className="panel">
       <div className="panel-header">
-        <div className="panel-title">docker mcp presets</div>
+        <div className="panel-title">docker mcp templates</div>
         <div className="panel-actions">
           <a className={`btn btn-sm ${busy ? 'disabled' : ''}`} href="#/admin/mcp-catalog/new">
-            add preset
+            add template
           </a>
           <button className="btn btn-ghost btn-sm" onClick={refresh} disabled={busy}>
             refresh
@@ -140,7 +140,7 @@ function DockerCatalogPanel({ client }) {
       {rows === null ? (
         <p className="muted small">loading...</p>
       ) : rows.length === 0 ? (
-        <p className="muted small">no Docker MCP presets.</p>
+        <p className="muted small">no Docker MCP templates.</p>
       ) : (
         <table className="rows">
           <thead><tr>
@@ -216,10 +216,10 @@ function DockerCatalogEditorPage({ client, mode, catalogId }) {
         const row = (body?.servers || []).find(server => server.id === catalogId);
         if (!cancelled) {
           setInitial(row || null);
-          if (!row) setErr(`No Docker MCP preset named ${catalogId}.`);
+          if (!row) setErr(`No Docker MCP template named ${catalogId}.`);
         }
       } catch (e) {
-        if (!cancelled) setErr(e?.detail || e?.message || 'load Docker MCP preset failed');
+        if (!cancelled) setErr(e?.detail || e?.message || 'load Docker MCP template failed');
       }
     })();
     return () => { cancelled = true; };
@@ -236,7 +236,7 @@ function DockerCatalogEditorPage({ client, mode, catalogId }) {
       });
       window.location.hash = '#/admin';
     } catch (e) {
-      setErr(e?.detail || e?.message || 'save Docker MCP preset failed');
+      setErr(e?.detail || e?.message || 'save Docker MCP template failed');
     } finally {
       setBusy(false);
     }
@@ -246,9 +246,9 @@ function DockerCatalogEditorPage({ client, mode, catalogId }) {
     <main className="admin-pane admin-catalog-page">
       <header className="admin-header">
         <div>
-          <h2>{isEdit ? `edit ${catalogId}` : 'add Docker MCP preset'}</h2>
+          <h2>{isEdit ? `edit ${catalogId}` : 'add Docker MCP template'}</h2>
           <p className="muted small admin-catalog-page-subtitle">
-            Configure the read-only MCP JSON template and the credential placeholders users may fill.
+            Configure the MCP JSON template and the placeholders users may fill.
           </p>
         </div>
         <a className="btn btn-ghost btn-sm" href="#/admin">back</a>
@@ -277,40 +277,56 @@ function DockerCatalogForm({ mode, initial, busy, onCancel, onSave }) {
   const [description, setDescription] = React.useState(initial?.description || '');
   const [template, setTemplate] = React.useState(initial?.template || '');
   const [payloadPath, setPayloadPath] = React.useState('');
-  const [credentialName, setCredentialName] = React.useState('');
+  const [placeholderName, setPlaceholderName] = React.useState('');
+  const [friendlyName, setFriendlyName] = React.useState('');
+  const [placeholderLabels, setPlaceholderLabels] = React.useState(
+    () => Object.fromEntries((initial?.credentials || []).map(field => [field.id, field.label || field.id])),
+  );
   const [err, setErr] = React.useState(null);
 
   const payloadPaths = React.useMemo(() => listPayloadValuePaths(template), [template]);
-  const bindings = React.useMemo(() => listCredentialBindings(template), [template]);
+  const bindings = React.useMemo(() => listPlaceholderBindings(template), [template]);
   const trimmedPayloadPath = payloadPath.trim();
-  const trimmedCredentialName = credentialName.trim();
-  const canBindCredential = Boolean(trimmedPayloadPath) && SAFE_PLACEHOLDER_NAME_RE.test(trimmedCredentialName);
+  const trimmedPlaceholderName = placeholderName.trim();
+  const canBindPlaceholder = Boolean(trimmedPayloadPath) && SAFE_PLACEHOLDER_NAME_RE.test(trimmedPlaceholderName);
+  const selectedPayloadTarget = React.useMemo(
+    () => describePayloadPathTarget(template, trimmedPayloadPath),
+    [template, trimmedPayloadPath],
+  );
+  const replacementToken = SAFE_PLACEHOLDER_NAME_RE.test(trimmedPlaceholderName)
+    ? `{{placeholder.${trimmedPlaceholderName}}}`
+    : '';
 
-  const bindCredential = () => {
+  const bindPlaceholder = () => {
     if (!trimmedPayloadPath) {
       setErr('payload path is required');
       return;
     }
-    if (!SAFE_PLACEHOLDER_NAME_RE.test(trimmedCredentialName)) {
-      setErr('user field name must match [A-Za-z0-9_-]+');
+    if (!SAFE_PLACEHOLDER_NAME_RE.test(trimmedPlaceholderName)) {
+      setErr('placeholder name must match [A-Za-z0-9_-]+');
       return;
     }
     try {
       const payload = JSON.parse(template);
       const path = parsePayloadPath(trimmedPayloadPath);
-      setJsonPathValue(payload, path, `{{credential.${trimmedCredentialName}}}`);
+      setJsonPathValue(payload, path, `{{placeholder.${trimmedPlaceholderName}}}`);
       setTemplate(JSON.stringify(payload, null, 2));
-      setCredentialName('');
+      setPlaceholderLabels(curr => ({
+        ...curr,
+        [trimmedPlaceholderName]: friendlyName.trim() || trimmedPlaceholderName,
+      }));
+      setPlaceholderName('');
+      setFriendlyName('');
       setErr(null);
     } catch (e) {
-      setErr(e?.message || 'could not bind credential field');
+      setErr(e?.message || 'could not bind placeholder');
     }
   };
 
   const submit = (e) => {
     e.preventDefault();
     setErr(null);
-    const credentials = credentialSpecsFromTemplate(template);
+    const credentials = placeholderSpecsFromTemplate(template, placeholderLabels);
     const preset = {
       id: id.trim(),
       label: label.trim(),
@@ -379,7 +395,7 @@ function DockerCatalogForm({ mode, initial, busy, onCancel, onSave }) {
             <div className="admin-catalog-token-workbench">
               <div className="mcp-card-head">
                 <div className="mcp-card-title">
-                  <code className="mcp-card-name">user credential bindings</code>
+                  <code className="mcp-card-name">template placeholders</code>
                   <span className="mcp-auth-pill mcp-auth-docker">docker</span>
                 </div>
               </div>
@@ -401,30 +417,68 @@ function DockerCatalogForm({ mode, initial, busy, onCancel, onSave }) {
                     ))}
                   </datalist>
                 </label>
+                {selectedPayloadTarget ? (
+                  <div className={`admin-catalog-target-card ${selectedPayloadTarget.ok ? 'admin-catalog-target-ok' : 'admin-catalog-target-error'}`}>
+                    <div className="admin-catalog-target-kicker">
+                      {selectedPayloadTarget.ok ? 'selected JSON value' : 'path needs attention'}
+                    </div>
+                    <code className="admin-catalog-target-path">{trimmedPayloadPath}</code>
+                    {selectedPayloadTarget.ok ? (
+                      <>
+                        <div className="admin-catalog-target-flow">
+                          <div>
+                            <span>current value</span>
+                            <code>{selectedPayloadTarget.preview}</code>
+                          </div>
+                          <div>
+                            <span>will become</span>
+                            <code>{replacementToken || '{{placeholder.name}}'}</code>
+                          </div>
+                        </div>
+                        <p className="muted small admin-catalog-target-note">
+                          This value is where the user's input will go.
+                        </p>
+                      </>
+                    ) : (
+                      <p className="muted small admin-catalog-target-note">{selectedPayloadTarget.error}</p>
+                    )}
+                  </div>
+                ) : null}
                 <label className="field admin-catalog-placeholder-name">
-                  <span>user field name</span>
+                  <span>placeholder name</span>
                   <input
-                    value={credentialName}
-                    onChange={e => setCredentialName(e.target.value)}
+                    value={placeholderName}
+                    onChange={e => setPlaceholderName(e.target.value)}
                     onKeyDown={e => {
                       if (e.key === 'Enter') {
                         e.preventDefault();
-                        bindCredential();
+                        bindPlaceholder();
                       }
                     }}
                     placeholder="github_token"
                     disabled={busy}
                     autoComplete="off"
-                    aria-label="user field name"
+                    aria-label="placeholder name"
+                  />
+                </label>
+                <label className="field admin-catalog-placeholder-name">
+                  <span>friendly name</span>
+                  <input
+                    value={friendlyName}
+                    onChange={e => setFriendlyName(e.target.value)}
+                    placeholder="Brave API key"
+                    disabled={busy}
+                    autoComplete="off"
+                    aria-label="friendly name"
                   />
                 </label>
                 <button
                   type="button"
-                  className="btn btn-primary admin-catalog-bind-credential"
-                  onClick={bindCredential}
-                  disabled={busy || !canBindCredential}
+                  className="btn btn-primary admin-catalog-bind-placeholder"
+                  onClick={bindPlaceholder}
+                  disabled={busy || !canBindPlaceholder}
                 >
-                  bind credential
+                  bind placeholder
                 </button>
                 {payloadPaths.length > 0 ? (
                   <div className="admin-catalog-path-list" aria-label="payload paths">
@@ -432,7 +486,7 @@ function DockerCatalogForm({ mode, initial, busy, onCancel, onSave }) {
                       <button
                         key={path.path}
                         type="button"
-                        className="admin-catalog-path-option"
+                        className={`admin-catalog-path-option ${path.path === trimmedPayloadPath ? 'admin-catalog-path-option-active' : ''}`}
                         onClick={() => setPayloadPath(path.path)}
                         disabled={busy}
                       >
@@ -444,15 +498,15 @@ function DockerCatalogForm({ mode, initial, busy, onCancel, onSave }) {
                 ) : null}
                 {bindings.length === 0 ? (
                   <div className="admin-catalog-placeholder-empty">
-                    <p className="muted small">no user credential bindings</p>
+                    <p className="muted small">no template placeholders</p>
                   </div>
                 ) : (
-                  <div className="admin-catalog-credential-list" aria-label="user credential bindings">
+                  <div className="admin-catalog-placeholder-list" aria-label="template placeholders">
                     {bindings.map(binding => (
-                      <div className="admin-catalog-credential-row" key={`${binding.id}:${binding.path || ''}`}>
-                        <div className="admin-catalog-credential-row-head">
-                          <div className="admin-catalog-credential-title">
-                            <span className="muted small">user field</span>
+                      <div className="admin-catalog-placeholder-row" key={`${binding.id}:${binding.path || ''}`}>
+                        <div className="admin-catalog-placeholder-row-head">
+                          <div className="admin-catalog-placeholder-title">
+                            <span className="muted small">placeholder</span>
                             <code className="mono-sm">{binding.id}</code>
                           </div>
                           <button
@@ -460,7 +514,8 @@ function DockerCatalogForm({ mode, initial, busy, onCancel, onSave }) {
                             className="btn btn-ghost btn-sm"
                             onClick={() => {
                               setPayloadPath(binding.path || '');
-                              setCredentialName(binding.id);
+                              setPlaceholderName(binding.id);
+                              setFriendlyName(placeholderLabels[binding.id] || binding.id);
                             }}
                             disabled={busy}
                           >
@@ -470,6 +525,7 @@ function DockerCatalogForm({ mode, initial, busy, onCancel, onSave }) {
                         {binding.path ? (
                           <code className="admin-catalog-token">{binding.path}</code>
                         ) : null}
+                        <code className="admin-catalog-token">{placeholderLabels[binding.id] || binding.id}</code>
                         <code className="admin-catalog-token">{binding.token}</code>
                       </div>
                     ))}
@@ -509,10 +565,10 @@ function validateCatalogPreset(preset) {
   return null;
 }
 
-function extractCredentialPlaceholders(template) {
+function extractTemplatePlaceholders(template) {
   const seen = new Set();
   const names = [];
-  for (const match of template.matchAll(CREDENTIAL_TOKEN_RE)) {
+  for (const match of template.matchAll(PLACEHOLDER_TOKEN_RE)) {
     const name = match[1];
     if (!seen.has(name)) {
       seen.add(name);
@@ -522,14 +578,14 @@ function extractCredentialPlaceholders(template) {
   return names;
 }
 
-function listCredentialBindings(template) {
+function listPlaceholderBindings(template) {
   try {
     const payload = JSON.parse(template);
     const seen = new Set();
     const bindings = [];
     walkJsonLeaves(payload, [], (value, path) => {
       if (typeof value !== 'string') return;
-      for (const match of value.matchAll(CREDENTIAL_TOKEN_RE)) {
+      for (const match of value.matchAll(PLACEHOLDER_TOKEN_RE)) {
         const id = match[1];
         const displayPath = formatPayloadPath(path);
         const key = `${displayPath}:${id}:${match[0]}`;
@@ -540,10 +596,10 @@ function listCredentialBindings(template) {
     });
     return bindings;
   } catch {
-    return extractCredentialPlaceholders(template).map(id => ({
+    return extractTemplatePlaceholders(template).map(id => ({
       id,
       path: '',
-      token: `{{credential.${id}}}`,
+      token: `{{placeholder.${id}}}`,
     }));
   }
 }
@@ -562,6 +618,24 @@ function listPayloadValuePaths(template) {
     return paths;
   } catch {
     return [];
+  }
+}
+
+function describePayloadPathTarget(template, pathText) {
+  if (!pathText) return null;
+  try {
+    const payload = JSON.parse(template);
+    const path = parsePayloadPath(pathText);
+    const value = getJsonPathValue(payload, path);
+    return {
+      ok: true,
+      preview: previewJsonValue(value),
+    };
+  } catch (e) {
+    return {
+      ok: false,
+      error: e?.message || 'payload path could not be found',
+    };
   }
 }
 
@@ -654,10 +728,22 @@ function setJsonPathValue(root, path, value) {
   cursor[last] = value;
 }
 
-function credentialSpecsFromTemplate(template) {
-  return extractCredentialPlaceholders(template).map(name => ({
+function getJsonPathValue(root, path) {
+  let cursor = root;
+  for (let i = 0; i < path.length; i += 1) {
+    const key = path[i];
+    if (cursor == null || typeof cursor !== 'object' || !(key in cursor)) {
+      throw new Error(`payload path ${formatPayloadPath(path.slice(0, i + 1))} was not found`);
+    }
+    cursor = cursor[key];
+  }
+  return cursor;
+}
+
+function placeholderSpecsFromTemplate(template, labels = {}) {
+  return extractTemplatePlaceholders(template).map(name => ({
     id: name,
-    label: name,
+    label: labels[name] || name,
     description: null,
     required: true,
     secret: true,

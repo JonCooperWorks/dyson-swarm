@@ -5142,7 +5142,7 @@ mod tests {
                         "type": "stdio",
                         "command": "docker",
                         "args": ["run", "--rm", "-i", "-e", "GITHUB_TOKEN", "ghcr.io/example/github-mcp"],
-                        "env": { "GITHUB_TOKEN": "{{credential.github_token}}" }
+                        "env": { "GITHUB_TOKEN": "{{placeholder.github_token}}" }
                     }
                 }
             })

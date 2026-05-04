@@ -471,7 +471,7 @@ describe('McpServersPanel', () => {
     expect(client.putMcpServer).not.toHaveBeenCalled();
   });
 
-  test('Docker catalog presets show read-only JSON and save only credentials', async () => {
+  test('Docker catalog entries show placeholder fields and provision without raw JSON', async () => {
     const catalog = {
       allow_raw_json: false,
       servers: [{
@@ -484,7 +484,7 @@ describe('McpServersPanel', () => {
               type: 'stdio',
               command: 'docker',
               args: ['run', '--rm', '-i', '-e', 'GITHUB_TOKEN', 'ghcr.io/example/github-mcp'],
-              env: { GITHUB_TOKEN: '{{credential.github_token}}' },
+              env: { GITHUB_TOKEN: '{{placeholder.github_token}}' },
             },
           },
         }),
@@ -520,9 +520,11 @@ describe('McpServersPanel', () => {
     fireEvent.click(screen.getByRole('button', { name: 'add' }));
     fireEvent.change(screen.getByLabelText('MCP server type'), { target: { value: 'docker_catalog' } });
 
-    expect(screen.getByDisplayValue(/ghcr\.io\/example\/github-mcp/)).toHaveAttribute('readonly');
+    expect(screen.queryByLabelText('Read-only MCP JSON template')).toBeNull();
+    expect(screen.queryByDisplayValue(/ghcr\.io\/example\/github-mcp/)).toBeNull();
     fireEvent.change(screen.getByLabelText('GitHub token'), { target: { value: 'ghp_secret' } });
-    fireEvent.click(screen.getByRole('button', { name: 'save' }));
+    expect(screen.queryByText(/credential/i)).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'provision' }));
 
     await waitFor(() => expect(client.putMcpDockerCatalogServer).toHaveBeenCalledWith(
       'inst-1',
@@ -819,7 +821,7 @@ describe('splitMcpSetupRows', () => {
     ])).toThrow(/configured more than once/);
   });
 
-  test('collects Docker catalog credentials without sending rendered JSON', () => {
+  test('collects Docker catalog placeholder values without sending rendered JSON', () => {
     const catalog = {
       servers: [{
         id: 'github',
@@ -830,7 +832,7 @@ describe('splitMcpSetupRows', () => {
               type: 'stdio',
               command: 'docker',
               args: ['run', '--rm', '-i', 'ghcr.io/example/github-mcp'],
-              env: { GITHUB_TOKEN: '{{credential.github_token}}' },
+              env: { GITHUB_TOKEN: '{{placeholder.github_token}}' },
             },
           },
         }),

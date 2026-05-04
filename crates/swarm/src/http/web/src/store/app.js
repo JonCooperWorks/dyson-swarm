@@ -193,16 +193,36 @@ export function removeShare(instanceId, jti) {
 //
 // Hash paths the SPA understands (mirrors what Dyson does — keeps a
 // single mount path so the IdP redirect stays one config entry):
-//   #/                 → instances list (default)
-//   #/i/<id>           → instance detail
-//   #/i/<id>/edit      → dedicated edit page (replaces the old EditEmployeeModal)
-//   #/new              → dedicated hire page (replaces the old CreateModal)
-//   #/admin            → admin (users, proxy tokens)
+//   #/                          → instances list (default)
+//   #/i/<id>                    → instance summary
+//   #/i/<id>/identity           → identity (name + brief) editor
+//   #/i/<id>/model              → model picker
+//   #/i/<id>/network            → network policy editor
+//   #/i/<id>/tools              → built-in tools picker
+//   #/i/<id>/secrets            → secrets panel
+//   #/i/<id>/mcp                → MCP servers panel
+//   #/i/<id>/snapshots          → snapshots panel
+//   #/i/<id>/runtime            → runtime KV block
+//   #/i/<id>/tasks…             → webhooks (legacy slug)
+//   #/i/<id>/artifacts…         → artifacts
+//   #/i/<id>/shares…            → shared links
+//   #/new                       → dedicated hire page (replaces the old CreateModal)
+//   #/admin                     → admin (users, proxy tokens)
 //
 // Anything else falls back to the list.  Order matters: every
-// /tasks subroute is a strict prefix of the detail pattern, so all
-// of them must match BEFORE the bare `#/i/<id>` rule.  Same trick the
-// edit pattern uses.
+// subroute is a strict prefix of the detail pattern, so all of them
+// must match BEFORE the bare `#/i/<id>` rule.
+
+const SECTION_VIEW_NAMES = {
+  identity: 'instance-identity',
+  model: 'instance-model',
+  network: 'instance-network',
+  tools: 'instance-tools',
+  secrets: 'instance-secrets',
+  mcp: 'instance-mcp',
+  snapshots: 'instance-snapshots',
+  runtime: 'instance-runtime',
+};
 
 export function parseHashView() {
   if (typeof window === 'undefined') return { name: 'instances', id: null };
@@ -247,8 +267,13 @@ export function parseHashView() {
   };
   const instArtifacts = h.match(/^#\/i\/([^/?#]+)\/artifacts/);
   if (instArtifacts) return { name: 'instance-artifacts', id: decodeURIComponent(instArtifacts[1]) };
-  const edit = h.match(/^#\/i\/([^/?#]+)\/edit/);
-  if (edit) return { name: 'instance-edit', id: decodeURIComponent(edit[1]) };
+  const section = h.match(/^#\/i\/([^/?#]+)\/([^/?#]+)/);
+  if (section) {
+    const id = decodeURIComponent(section[1]);
+    const slug = decodeURIComponent(section[2]);
+    if (SECTION_VIEW_NAMES[slug]) return { name: SECTION_VIEW_NAMES[slug], id };
+    if (slug === 'edit') return { name: 'instance-identity', id };
+  }
   const m = h.match(/^#\/i\/([^/?#]+)/);
   if (m) return { name: 'instance', id: decodeURIComponent(m[1]) };
   if (h.startsWith('#/new')) return { name: 'instance-new', id: null };

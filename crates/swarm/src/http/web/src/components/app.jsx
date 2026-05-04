@@ -41,7 +41,14 @@ function renderView(view) {
   switch (view.name) {
     case 'instances':
     case 'instance':
-    case 'instance-edit':
+    case 'instance-identity':
+    case 'instance-model':
+    case 'instance-network':
+    case 'instance-tools':
+    case 'instance-secrets':
+    case 'instance-mcp':
+    case 'instance-snapshots':
+    case 'instance-runtime':
     case 'instance-tasks':
     case 'instance-task-new':
     case 'instance-task-edit':

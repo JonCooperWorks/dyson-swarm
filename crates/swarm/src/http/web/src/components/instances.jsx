@@ -71,29 +71,52 @@ export function instanceIdFromView(view) {
 }
 
 export function instanceSectionFromView(view) {
-  if (!view) return 'overview';
-  if (view.name === 'instance-edit') return 'edit';
-  if (view.name && view.name.startsWith('instance-task')) return 'tasks';
-  if (view.name === 'instance-tasks') return 'tasks';
-  if (view.name === 'share-access-log') return 'artifacts';
-  if (view.name === 'instance-shares') return 'artifacts';
-  if (view.name === 'instance-artifacts') return 'artifacts';
-  if (view.name === 'instance-artifact') return 'artifacts';
-  return 'overview';
+  if (!view) return 'summary';
+  switch (view.name) {
+    case 'instance-identity': return 'identity';
+    case 'instance-model': return 'model';
+    case 'instance-network': return 'network';
+    case 'instance-tools': return 'tools';
+    case 'instance-secrets': return 'secrets';
+    case 'instance-mcp': return 'mcp';
+    case 'instance-snapshots': return 'snapshots';
+    case 'instance-runtime': return 'runtime';
+    case 'instance-tasks':
+    case 'instance-task-new':
+    case 'instance-task-edit':
+    case 'instance-task-audit':
+    case 'instance-task-audit-detail':
+      return 'tasks';
+    case 'share-access-log':
+    case 'instance-shares':
+    case 'instance-artifacts':
+    case 'instance-artifact':
+      return 'artifacts';
+    default:
+      return 'summary';
+  }
+}
+
+export function sectionHref(id, section) {
+  const enc = encodeURIComponent(id);
+  switch (section) {
+    case 'summary': return `#/i/${enc}`;
+    case 'identity': return `#/i/${enc}/identity`;
+    case 'model': return `#/i/${enc}/model`;
+    case 'network': return `#/i/${enc}/network`;
+    case 'tools': return `#/i/${enc}/tools`;
+    case 'secrets': return `#/i/${enc}/secrets`;
+    case 'mcp': return `#/i/${enc}/mcp`;
+    case 'snapshots': return `#/i/${enc}/snapshots`;
+    case 'runtime': return `#/i/${enc}/runtime`;
+    case 'tasks': return `#/i/${enc}/tasks`;
+    case 'artifacts': return `#/i/${enc}/artifacts`;
+    default: return `#/i/${enc}`;
+  }
 }
 
 export function instanceRailHref(id, view) {
-  const enc = encodeURIComponent(id);
-  switch (instanceSectionFromView(view)) {
-    case 'edit':
-      return `#/i/${enc}/edit`;
-    case 'tasks':
-      return `#/i/${enc}/tasks`;
-    case 'artifacts':
-      return `#/i/${enc}/artifacts`;
-    default:
-      return `#/i/${enc}`;
-  }
+  return sectionHref(id, instanceSectionFromView(view));
 }
 
 // ─── List ─────────────────────────────────────────────────────────
@@ -580,64 +603,6 @@ function ToolsPicker({ value, onChange, policyKind }) {
       cellMeta={cellMeta}
       hint="Pick what the agent can call directly. Air-gapped agents start with nothing enabled, so opt in only the tools the brief needs."
     />
-  );
-}
-
-/// Read-only tools view for the instance-detail page.  Same visual
-/// rhythm as the picker but inputs are disabled so the operator
-/// sees what's enabled at a glance and clicks "edit" to change it.
-/// Empty `tools` on the row means "use dyson defaults" — every
-/// builtin is on.
-function ToolsView({ instance }) {
-  const effective = React.useMemo(() => {
-    if (Array.isArray(instance.tools) && instance.tools.length > 0) {
-      return new Set(instance.tools);
-    }
-    // Empty list: airgap means "no tools", anything else means
-    // "use dyson defaults" which renders as every tool enabled.
-    return instance.network_policy?.kind === 'airgap'
-      ? new Set()
-      : new Set(ALL_TOOL_NAMES);
-  }, [instance.tools, instance.network_policy?.kind]);
-  return (
-    <section className="panel">
-      <div className="panel-header">
-        <div className="panel-title">tools</div>
-        <div className="panel-actions">
-          <span className="muted small">
-            {effective.size} / {ALL_TOOL_NAMES.length} enabled
-          </span>
-        </div>
-      </div>
-      <div className="tools-body tools-body-readonly">
-        {TOOL_GROUPS.map(([group, items]) => (
-          <fieldset key={group} className="tools-group">
-            <legend className="tools-group-label muted small">{group}</legend>
-            <div className="tools-grid">
-              {items.map(t => {
-                const blocked = toolBlockedByNetwork(t.name, instance.network_policy?.kind);
-                return (
-                  <span
-                    key={t.name}
-                    className={`tools-cell ${effective.has(t.name) ? 'on' : 'off'} ${blocked ? 'blocked' : ''}`}
-                    title={blocked ? 'requires network — air-gapped instance can\'t reach upstream' : undefined}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={effective.has(t.name)}
-                      readOnly
-                      disabled
-                      aria-label={t.name}
-                    />
-                    <span className="tools-cell-name mono-sm">{t.name}</span>
-                  </span>
-                );
-              })}
-            </div>
-          </fieldset>
-        ))}
-      </div>
-    </section>
   );
 }
 
@@ -1892,60 +1857,25 @@ function KvField({ label, value }) {
 
 // ─── Detail ───────────────────────────────────────────────────────
 
+const DETAIL_SECTIONS = [
+  { key: 'summary', label: 'summary' },
+  { key: 'identity', label: 'identity' },
+  { key: 'model', label: 'model' },
+  { key: 'network', label: 'network' },
+  { key: 'tools', label: 'tools' },
+  { key: 'secrets', label: 'secrets' },
+  { key: 'mcp', label: 'MCP' },
+  { key: 'snapshots', label: 'snapshots' },
+  { key: 'runtime', label: 'runtime' },
+  { key: 'tasks', label: 'webhooks' },
+  { key: 'artifacts', label: 'artifacts' },
+];
+
 function InstanceDetail({ id, onNew, view }) {
-  const { client, auth } = useApi();
-  const cubeProfiles = auth?.config?.cube_profiles || [];
+  const { client } = useApi();
   const row = useAppState(s => (id ? s.instances.byId[id] : null));
   const totalInstances = useAppState(s => s.instances.order.length);
-  // Enabled-task count for the tasks button badge.  Source of truth is
-  // the per-instance webhooks slot in the store; we hydrate it here so
-  // the count is correct on first paint (rather than 0 → real after
-  // the user opens the tasks page).
-  const enabledTaskCount = useAppState(s => {
-    const slot = id ? s.webhooks.byInstance[id] : null;
-    if (!slot) return null;
-    return slot.rows.filter(r => r.enabled).length;
-  });
-  // Active share count for the artifacts button badge — same
-  // shape as the tasks badge.  Active = not revoked AND not expired.
-  const activeShareCount = useAppState(s => {
-    const slot = id ? s.shares.byInstance[id] : null;
-    if (!slot) return null;
-    return slot.rows.filter(r => r.active).length;
-  });
-  const [busy, setBusy] = React.useState(false);
   const [err, setErr] = React.useState(null);
-  // Hide the sticky action bar while the user is scrolling the detail
-  // pane downward, show it again on any upward gesture or when the
-  // pane is at the top.  Mobile-only — desktop CSS leaves the bar
-  // inline with the title block.  Prevents the 7-button two-row bar
-  // from eating ~25% of the viewport while reading a long subpage.
-  const detailPaneRef = React.useRef(null);
-  const [hideActions, setHideActions] = React.useState(false);
-  React.useEffect(() => { setHideActions(false); }, [id, view]);
-  React.useEffect(() => {
-    const el = detailPaneRef.current;
-    if (!el) return;
-    let lastTop = el.scrollTop;
-    let raf = 0;
-    const onScroll = () => {
-      if (raf) return;
-      raf = requestAnimationFrame(() => {
-        raf = 0;
-        const top = el.scrollTop;
-        const dy = top - lastTop;
-        if (top <= 8) setHideActions(false);
-        else if (dy > 4) setHideActions(true);
-        else if (dy < -4) setHideActions(false);
-        lastTop = top;
-      });
-    };
-    el.addEventListener('scroll', onScroll, { passive: true });
-    return () => {
-      el.removeEventListener('scroll', onScroll);
-      if (raf) cancelAnimationFrame(raf);
-    };
-  }, [row?.id]);
 
   // Pull fresh detail when selection changes (the list view's row is a
   // strict subset of the InstanceView shape, so re-fetching catches
@@ -1961,9 +1891,9 @@ function InstanceDetail({ id, onNew, view }) {
     return () => { cancelled = true; };
   }, [client, id]);
 
-  // Webhooks list — fed into the "webhooks" button's count badge. Quiet
-  // on failure (the badge just stays hidden); the dedicated page
-  // surfaces real errors when the user navigates in.
+  // Webhooks list — fed into the "webhooks" nav badge. Quiet on
+  // failure (the badge just stays hidden); the dedicated page surfaces
+  // real errors when the user navigates in.
   React.useEffect(() => {
     if (!id) return;
     let cancelled = false;
@@ -1973,8 +1903,8 @@ function InstanceDetail({ id, onNew, view }) {
     return () => { cancelled = true; };
   }, [client, id]);
 
-  // Shares list — fed into the artifacts button's count badge.  Same
-  // pattern as webhooks above.
+  // Shares list — fed into the artifacts nav badge.  Same pattern as
+  // webhooks above.
   React.useEffect(() => {
     if (!id) return;
     let cancelled = false;
@@ -1990,16 +1920,6 @@ function InstanceDetail({ id, onNew, view }) {
   // triggers a Let's Encrypt round-trip (~5–15s) — without warming
   // the user's first "open ↗" click races the ACME flow and shows
   // about:blank.
-  //
-  // `<link rel="preconnect">` opens the TCP + TLS connection in the
-  // background.  The TLS handshake's SNI is what triggers Caddy's
-  // on_demand_tls flow, so the preconnect alone is enough — no extra
-  // HTTP request needed.  We deliberately do NOT also fire a no-cors
-  // fetch through the dyson_proxy: that would have been a credentialed
-  // cross-origin roundtrip kicking off via requestIdleCallback right
-  // around the time the user makes their first click on the action
-  // buttons, and the response-stream chatter on the main thread was
-  // intermittently eating those clicks.
   const openUrl = row?.open_url;
   React.useEffect(() => {
     if (!openUrl) return;
@@ -2028,15 +1948,128 @@ function InstanceDetail({ id, onNew, view }) {
     </main>
   );
 
+  const activeSection = instanceSectionFromView(view);
+
+  return (
+    <main className={`detail-pane detail-pane-section-${activeSection}`}>
+      <DetailHeader row={row} activeSection={activeSection} onError={setErr}/>
+      {err ? <div className="error">{err}</div> : null}
+      <DetailSectionBody view={view} instance={row} activeSection={activeSection}/>
+    </main>
+  );
+}
+
+function DetailHeader({ row, activeSection, onError }) {
+  const { auth } = useApi();
+  const cubeProfiles = auth?.config?.cube_profiles || [];
+  const displayName = row.name && row.name.trim() ? row.name : '(unnamed)';
+  return (
+    <header className="detail-header">
+      <div className="detail-header-titlerow">
+        <div className="employee-card">
+          <h2 className="employee-name">{displayName}</h2>
+          <div className="detail-meta">
+            <StatusBadge status={row.status}/>
+            <CubeSizeBadge row={row} cubeProfiles={cubeProfiles}/>
+            <NetworkPolicyBadge instance={row}/>
+            {row.pinned ? <span className="badge badge-info">pinned</span> : null}
+            <IdChip id={row.id} openUrl={row.open_url}/>
+          </div>
+        </div>
+        <DetailOverflowMenu row={row} onError={onError}/>
+      </div>
+      <DetailSectionNav row={row} activeSection={activeSection}/>
+    </header>
+  );
+}
+
+function DetailSectionNav({ row, activeSection }) {
+  const id = row.id;
+  const enabledTaskCount = useAppState(s => {
+    const slot = id ? s.webhooks.byInstance[id] : null;
+    if (!slot) return null;
+    return slot.rows.filter(r => r.enabled).length;
+  });
+  const activeShareCount = useAppState(s => {
+    const slot = id ? s.shares.byInstance[id] : null;
+    if (!slot) return null;
+    return slot.rows.filter(r => r.active).length;
+  });
+  const onSelect = (e) => { window.location.hash = sectionHref(id, e.target.value); };
+  return (
+    <nav className="detail-section-nav" aria-label="agent sections">
+      <select
+        className="detail-section-select"
+        value={activeSection}
+        onChange={onSelect}
+        aria-label="agent section"
+      >
+        {DETAIL_SECTIONS.map(s => {
+          const suffix = s.key === 'tasks' && enabledTaskCount > 0
+            ? ` (${enabledTaskCount})`
+            : s.key === 'artifacts' && activeShareCount > 0
+              ? ` (${activeShareCount})`
+              : '';
+          return <option key={s.key} value={s.key}>{s.label}{suffix}</option>;
+        })}
+      </select>
+      <div className="detail-section-chips" role="tablist">
+        {DETAIL_SECTIONS.map(s => {
+          const isActive = s.key === activeSection;
+          const badge = s.key === 'tasks' && enabledTaskCount > 0
+            ? <span className="btn-count-badge" aria-label={`${enabledTaskCount} enabled`}>{enabledTaskCount}</span>
+            : s.key === 'artifacts' && activeShareCount > 0
+              ? <span className="btn-count-badge" aria-label={`${activeShareCount} active shared`}>{activeShareCount}</span>
+              : null;
+          return (
+            <a
+              key={s.key}
+              role="tab"
+              aria-selected={isActive ? 'true' : 'false'}
+              className={`detail-section-chip${isActive ? ' active' : ''}`}
+              href={sectionHref(id, s.key)}
+            >
+              <span>{s.label}</span>
+              {badge}
+            </a>
+          );
+        })}
+      </div>
+    </nav>
+  );
+}
+
+function DetailOverflowMenu({ row, onError }) {
+  const { client } = useApi();
+  const ref = React.useRef(null);
+  const [busy, setBusy] = React.useState(false);
+  const id = row.id;
+  const displayName = row.name && row.name.trim() ? row.name : '(unnamed)';
+  const canOpen = !!row.open_url;
+  const isWarmingUp = canOpen && (row.status !== 'live' || !row.cube_sandbox_id);
+  const close = () => { if (ref.current) ref.current.removeAttribute('open'); };
+
+  React.useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const onDocClick = (e) => {
+      if (el.open && !el.contains(e.target)) el.removeAttribute('open');
+    };
+    document.addEventListener('click', onDocClick);
+    return () => document.removeEventListener('click', onDocClick);
+  }, []);
+
   const destroy = async () => {
+    close();
     if (!confirm(`destroy agent ${displayName}? this is permanent.`)) return;
-    setBusy(true); setErr(null);
+    setBusy(true); onError(null);
     try {
       await client.destroyInstance(id);
       removeInstance(id);
       window.location.hash = '#/';
     } catch (e) {
-      setErr(e?.message || 'destroy failed');
+      onError(e?.message || 'destroy failed');
+    } finally {
       setBusy(false);
     }
   };
@@ -2047,6 +2080,7 @@ function InstanceDetail({ id, onNew, view }) {
   // and replay the sealed swarm mirror for memory, chats, knowledge
   // base, and learned skills.  In-flight work is still interrupted.
   const reset = async () => {
+    close();
     const label = row.name && row.name.trim() ? row.name : id;
     const warning =
       `RESET ${label} on the latest template?\n\n` +
@@ -2058,175 +2092,107 @@ function InstanceDetail({ id, onNew, view }) {
       `Use this when the agent got into a bad state and you want a ` +
       `clean runtime without losing its durable state.`;
     if (!confirm(warning)) return;
-    setBusy(true); setErr(null);
+    setBusy(true); onError(null);
     try {
       const updated = await client.resetInstance(id);
       if (updated) upsertInstance(updated);
     } catch (e) {
-      setErr(e?.message || 'reset failed');
+      onError(e?.message || 'reset failed');
     } finally {
       setBusy(false);
     }
   };
 
-  const displayName = row.name && row.name.trim() ? row.name : '(unnamed)';
-  const activeSection = instanceSectionFromView(view);
-  // open_url is computed by the backend from `[server] hostname` + the
-  // instance id.  Null when swarm has no hostname configured (the
-  // host-based proxy is a no-op in that case) — that's the only case
-  // we hard-disable the link, since there's literally nowhere to go.
-  //
-  // For status≠live or no sandbox yet we still ship the href: the user
-  // explicitly wants a plain `target="_blank"` to navigate.  Without an
-  // href the browser opens about:blank in the new tab, which is worse
-  // than landing on a 502 / "still warming up" page they can refresh.
-  const canOpen = !!row.open_url;
-  const isWarmingUp = canOpen && (row.status !== 'live' || !row.cube_sandbox_id);
-
   return (
-    <main className="detail-pane" ref={detailPaneRef}>
-      <header className="detail-header">
-        <div className="employee-card">
-          <h2 className="employee-name">{displayName}</h2>
-          <div className="detail-meta">
-            <StatusBadge status={row.status}/>
-            <CubeSizeBadge row={row} cubeProfiles={cubeProfiles}/>
-            <NetworkPolicyBadge instance={row}/>
-            {row.pinned ? <span className="badge badge-info">pinned</span> : null}
-            <IdChip id={row.id} openUrl={row.open_url}/>
-          </div>
-        </div>
-        <div className={`detail-actions${hideActions ? ' detail-actions-hidden' : ''}`}>
-          <a
-            className={`btn btn-primary ${canOpen ? '' : 'btn-disabled'}`}
-            href={canOpen ? row.open_url : undefined}
-            target="_blank"
-            rel="noopener noreferrer"
-            aria-disabled={!canOpen}
-            onClick={(e) => { if (!canOpen) e.preventDefault(); }}
-            title={
-              !canOpen
-                ? 'swarm hostname is not configured — set [server] hostname in config.toml'
-                : isWarmingUp
-                  ? 'sandbox is still warming up — opening anyway'
-                  : 'open this agent in a new tab'
-            }
-          >
-            open ↗
-          </a>
-          <a
-            className={`btn btn-ghost ${activeSection === 'overview' ? 'btn-active' : ''}`}
-            href={`#/i/${encodeURIComponent(id)}`}
-            aria-disabled={busy}
-            onClick={(e) => { if (busy) e.preventDefault(); }}
-            title="runtime, snapshots, network, tools, secrets, MCP, and instructions"
-          >
-            overview
-          </a>
-          <a
-            className={`btn btn-ghost ${activeSection === 'edit' ? 'btn-active' : ''}`}
-            href={`#/i/${encodeURIComponent(id)}/edit`}
-            aria-disabled={busy}
-            onClick={(e) => { if (busy) e.preventDefault(); }}
-          >
-            edit
-          </a>
-          <a
-            className={`btn btn-ghost ${activeSection === 'tasks' ? 'btn-active' : ''}`}
-            href={`#/i/${encodeURIComponent(id)}/tasks`}
-            aria-disabled={busy}
-            onClick={(e) => { if (busy) e.preventDefault(); }}
-            title="webhook triggers for this agent"
-          >
-            webhooks
-            {enabledTaskCount > 0
-              ? <span className="btn-count-badge" aria-label={`${enabledTaskCount} enabled`}>{enabledTaskCount}</span>
-              : null}
-          </a>
-          <a
-            className={`btn btn-ghost ${activeSection === 'artifacts' ? 'btn-active' : ''}`}
-            href={`#/i/${encodeURIComponent(id)}/artifacts`}
-            aria-disabled={busy}
-            onClick={(e) => { if (busy) e.preventDefault(); }}
-            title="agent artifacts cached on swarm, with active shared links counted in the badge"
-          >
-            artifacts
-            {activeShareCount > 0
-              ? <span className="btn-count-badge" aria-label={`${activeShareCount} active shared`}>{activeShareCount}</span>
-              : null}
-          </a>
-          <button
-            className="btn btn-danger"
-            onClick={reset}
-            disabled={busy || row.status === 'destroyed'}
-            title="create a fresh runtime on the latest template, replaying mirrored memory, chats, kb, and skills"
-          >
-            reset
-          </button>
-          <button className="btn btn-danger" onClick={destroy} disabled={busy || row.status === 'destroyed'}>
-            destroy
-          </button>
-        </div>
-      </header>
-
-      {activeSection !== 'overview' ? (
-        <>
-          {err ? <div className="error">{err}</div> : null}
-          <InstanceSubpage view={view} instanceId={id}/>
-        </>
-      ) : (
-        <>
-          <section className="panel">
-            <div className="panel-title">runtime</div>
-            {(() => {
-              const profile = findCubeProfile(row.template_id, cubeProfiles);
-              if (!profile) return null;
-              return <KvRow label="size" value={profileLabel(profile)}/>;
-            })()}
-            <KvRow label="created" value={fmtTime(row.created_at)}/>
-            <KvRow label="last active" value={fmtTime(row.last_active_at)}/>
-            <KvRow label="last probe" value={
-              row.last_probe_at
-                ? `${fmtTime(row.last_probe_at)} · ${probeLabel(row.last_probe_status)}`
-                : 'never'
-            }/>
-            {row.destroyed_at ? <KvRow label="destroyed" value={fmtTime(row.destroyed_at)}/> : null}
-          </section>
-
-          {err ? <div className="error">{err}</div> : null}
-
-          <SnapshotsPanel instanceId={id} disabled={row.status === 'destroyed'}/>
-          <NetworkPolicyPanel instance={row} disabled={row.status === 'destroyed'}/>
-          <ToolsView instance={row}/>
-          <SecretsPanel instanceId={id}/>
-          <McpServersPanel
-            instanceId={id}
-            policyKind={row.network_policy?.kind}
-            disabled={row.status === 'destroyed'}
-          />
-
-          <section className="panel">
-            <div className="panel-title">instructions</div>
-            <div className="employee-task">
-              {row.task && row.task.trim() ? (
-                <TaskProse markdown={row.task}/>
-              ) : (
-                <p className="muted small">
-                  no brief yet — tap <em>edit</em> to write one.
-                </p>
-              )}
-            </div>
-          </section>
-        </>
-      )}
-    </main>
+    <details className="detail-overflow" ref={ref}>
+      <summary
+        className="btn btn-ghost detail-overflow-trigger"
+        aria-label="agent operations"
+        title="open, reset, destroy"
+      >
+        ⋯
+      </summary>
+      <div className="detail-overflow-menu" role="menu">
+        <a
+          role="menuitem"
+          className={`detail-overflow-item ${canOpen ? '' : 'disabled'}`}
+          href={canOpen ? row.open_url : undefined}
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-disabled={!canOpen}
+          onClick={(e) => {
+            if (!canOpen) { e.preventDefault(); return; }
+            close();
+          }}
+          title={
+            !canOpen
+              ? 'swarm hostname is not configured — set [server] hostname in config.toml'
+              : isWarmingUp
+                ? 'sandbox is still warming up — opening anyway'
+                : 'open this agent in a new tab'
+          }
+        >
+          open ↗
+        </a>
+        <button
+          type="button"
+          role="menuitem"
+          className="detail-overflow-item detail-overflow-danger"
+          onClick={reset}
+          disabled={busy || row.status === 'destroyed'}
+          title="create a fresh runtime on the latest template, replaying mirrored memory, chats, kb, and skills"
+        >
+          reset
+        </button>
+        <button
+          type="button"
+          role="menuitem"
+          className="detail-overflow-item detail-overflow-danger"
+          onClick={destroy}
+          disabled={busy || row.status === 'destroyed'}
+        >
+          destroy
+        </button>
+      </div>
+    </details>
   );
 }
 
-function InstanceSubpage({ view, instanceId }) {
+function DetailSectionBody({ view, instance, activeSection }) {
+  switch (activeSection) {
+    case 'identity':
+      return <IdentitySection instance={instance}/>;
+    case 'model':
+      return <ModelSection instance={instance}/>;
+    case 'network':
+      return <NetworkPolicyPanel instance={instance} disabled={instance.status === 'destroyed'}/>;
+    case 'tools':
+      return <ToolsSection instance={instance}/>;
+    case 'secrets':
+      return <SecretsPanel instanceId={instance.id}/>;
+    case 'mcp':
+      return (
+        <McpServersPanel
+          instanceId={instance.id}
+          policyKind={instance.network_policy?.kind}
+          disabled={instance.status === 'destroyed'}
+        />
+      );
+    case 'snapshots':
+      return <SnapshotsPanel instanceId={instance.id} disabled={instance.status === 'destroyed'}/>;
+    case 'runtime':
+      return <RuntimeSection instance={instance}/>;
+    case 'tasks':
+    case 'artifacts':
+      return <InstanceAuxiliaryRoute view={view} instanceId={instance.id}/>;
+    case 'summary':
+    default:
+      return <SummarySection instance={instance}/>;
+  }
+}
+
+function InstanceAuxiliaryRoute({ view, instanceId }) {
   switch (view?.name) {
-    case 'instance-edit':
-      return <EditInstancePage instanceId={instanceId} embedded/>;
     case 'instance-tasks':
       return <TasksListPage instanceId={instanceId} embedded/>;
     case 'instance-task-new':
@@ -2249,206 +2215,85 @@ function InstanceSubpage({ view, instanceId }) {
   }
 }
 
-// ─── Edit instance — dedicated page ───────────────────────────────
-//
-// Promoted from a modal to a dedicated page for parity with the
-// hire flow (#/new) — gives the form room to grow (e.g. a future
-// network-policy editor) and gets the user a direct-linkable URL
-// for the edit screen.
+function SummarySection({ instance }) {
+  const configSections = DETAIL_SECTIONS.filter(s =>
+    !['summary', 'tasks', 'artifacts'].includes(s.key)
+  );
+  return (
+    <>
+      <section className="panel">
+        <div className="panel-title">brief</div>
+        <div className="employee-task">
+          {instance.task && instance.task.trim() ? (
+            <TaskProse markdown={instance.task}/>
+          ) : (
+            <p className="muted small">
+              no brief yet — open <a href={sectionHref(instance.id, 'identity')}>identity</a>.
+            </p>
+          )}
+        </div>
+      </section>
+      <section className="panel">
+        <div className="panel-title">activity</div>
+        <KvRow label="created" value={fmtTime(instance.created_at)}/>
+        <KvRow label="last active" value={fmtTime(instance.last_active_at)}/>
+        <KvRow label="last probe" value={
+          instance.last_probe_at
+            ? `${fmtTime(instance.last_probe_at)} · ${probeLabel(instance.last_probe_status)}`
+            : 'never'
+        }/>
+        {instance.destroyed_at ? <KvRow label="destroyed" value={fmtTime(instance.destroyed_at)}/> : null}
+      </section>
+      <section className="panel">
+        <div className="panel-title">configure</div>
+        <div className="detail-summary-links">
+          {configSections.map(s => (
+            <a key={s.key} className="detail-summary-link" href={sectionHref(instance.id, s.key)}>
+              {s.label}
+            </a>
+          ))}
+        </div>
+      </section>
+    </>
+  );
+}
 
-export function EditInstancePage({ instanceId, embedded = false }) {
+function identityDraftFromInstance(instance) {
+  return {
+    name: instance.name || '',
+    task: instance.task || '',
+  };
+}
+
+function IdentitySection({ instance }) {
   const { client } = useApi();
-  const row = useAppState(s => (instanceId ? s.instances.byId[instanceId] : null));
-  const [err, setErr] = React.useState(null);
-  const backHref = `#/i/${encodeURIComponent(instanceId || '')}`;
-
-  // Hot-fetch the row in case the operator deep-linked into the edit
-  // URL without going through the detail view first (refresh, paste
-  // from chat, etc.).  Same pattern as InstanceDetail.
-  React.useEffect(() => {
-    if (!instanceId) return;
-    let cancelled = false;
-    client.getInstance(instanceId).then(detail => {
-      if (!cancelled && detail) upsertInstance(detail);
-    }).catch(e => {
-      if (!cancelled) setErr(e?.message || 'fetch failed');
-    });
-    return () => { cancelled = true; };
-  }, [client, instanceId]);
-
-  // ESC navigates back to the detail view — same affordance the
-  // modal had, preserved on the page so muscle memory still works.
-  React.useEffect(() => {
-    const onKey = (e) => {
-      if (e.key === 'Escape') window.location.hash = backHref;
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [backHref]);
-
-  const Shell = embedded ? 'div' : 'main';
-  return (
-    <Shell className={embedded ? 'instance-subpage' : 'page page-edit'}>
-      <header className={embedded ? 'subpage-header' : 'page-header'}>
-        {embedded ? null : <a className="btn btn-ghost btn-sm" href={backHref}>← back</a>}
-        <h1 className={embedded ? 'subpage-title' : 'page-title'}>edit agent</h1>
-        <p className="page-sub muted">
-          Change the agent's identity, model, toolbox, or network access.
-          Network changes restart the sandbox briefly; everything else
-          saves in place.
-        </p>
-      </header>
-      {err ? <div className="error">{err}</div> : null}
-      {row ? (
-        <EditInstanceForm
-          instance={row}
-          backHref={backHref}
-          formId="edit-instance-form"
-        />
-      ) : (
-        <div className="muted">loading…</div>
-      )}
-    </Shell>
-  );
-}
-
-/// Bottom action bar for the edit page.  Lives at the END of the
-/// page so the user sees every editable surface first; the submit
-/// button is wired to the form via `form="<id>"` so a click here
-/// triggers the same handler as a button-inside-form submit.
-/// MCP changes save through their own panel buttons; identity /
-/// model / tools / network all flow through this single save.
-function EditInstanceActionBar({ formId, backHref, policyChanged }) {
-  // The submit-state lives inside EditInstanceForm; we mirror busy
-  // state via a custom event so the bottom button can disable while
-  // the underlying form is in-flight.  Tiny, dependency-free, and
-  // keeps the form local to its own state tree.
-  const [submitting, setSubmitting] = React.useState(false);
-  React.useEffect(() => {
-    const onState = (e) => {
-      if (e.detail?.formId === formId) setSubmitting(Boolean(e.detail.submitting));
-    };
-    window.addEventListener('edit-form-state', onState);
-    return () => window.removeEventListener('edit-form-state', onState);
-  }, [formId]);
-  const label = submitting
-    ? (policyChanged ? 'restarting sandbox…' : 'saving…')
-    : 'save';
-  return (
-    <div className="edit-action-bar">
-      <button
-        type="submit"
-        form={formId}
-        className="btn btn-primary btn-lg"
-        disabled={submitting}
-      >
-        {label}
-      </button>
-      <a className="btn btn-ghost" href={backHref}>cancel</a>
-    </div>
-  );
-}
-
-function EditInstanceForm({ instance, backHref, formId }) {
-  const { client, auth } = useApi();
   const disabled = instance.status === 'destroyed';
-  const [name, setName] = React.useState(instance.name || '');
-  const [task, setTask] = React.useState(instance.task || '');
-  // Models picker reuses the same component as the create form.
-  // Pre-fills with the current primary model when available; the
-  // agent will also accept any other model id the user types.
-  const initialModelsList = (instance.models && instance.models.length)
-    ? instance.models
-    : (instance.model ? [instance.model] : []);
-  const [models, setModels] = React.useState(initialModelsList);
-  const defaultModels = auth?.config?.default_models || [];
-
-  // Tool include list — pre-fill with the row's persisted positive
-  // list when present.  Empty `instance.tools` means "use defaults"
-  // which the picker renders as everything ticked, except on
-  // air-gapped rows where empty stays empty (operator opts in).
-  const [tools, setTools] = React.useState(() =>
-    initialTools(instance, instance.network_policy?.kind)
-  );
-  const [toolsDirty, setToolsDirty] = React.useState(false);
-  const setToolsTracked = (next) => { setToolsDirty(true); setTools(next); };
-
-  // Network policy state shared with the picker so transitioning
-  // INTO airgap immediately clears the tool checkboxes — same
-  // ergonomic guard the hire form has.  Initialised from the row.
-  const [networkPolicy, setNetworkPolicy] = React.useState(
-    () => normaliseInstancePolicy(instance.network_policy),
-  );
-  // Same transition rule as the hire form (snapshot ref BEFORE
-  // queuing setTools so the closure sees the right `prev`).
-  const prevPolicyKindRef = React.useRef(networkPolicy.kind);
-  React.useEffect(() => {
-    const prevKind = prevPolicyKindRef.current;
-    prevPolicyKindRef.current = networkPolicy.kind;
-    setTools(curr => {
-      const next = nextToolsForPolicyChange(prevKind, networkPolicy.kind, curr);
-      // Mark dirty if the rule mutated the picker, so the new
-      // selection flows through on save (otherwise we'd silently
-      // keep the row's pre-fill in the patch payload).
-      if (next !== curr) setToolsDirty(true);
-      return next;
-    });
-  }, [networkPolicy.kind]);
-
+  const [baseline, setBaseline] = React.useState(() => identityDraftFromInstance(instance));
+  const [name, setName] = React.useState(baseline.name);
+  const [task, setTask] = React.useState(baseline.task);
   const [submitting, setSubmitting] = React.useState(false);
   const [error, setError] = React.useState(null);
 
-  // Mirror submitting state to the bottom action bar via a small
-  // custom event.  Beats lifting the state up purely to wire one
-  // button — the form stays self-contained and the page-level
-  // composition (sibling panels) stays flat.
   React.useEffect(() => {
-    window.dispatchEvent(new CustomEvent('edit-form-state', {
-      detail: { formId, submitting },
-    }));
-  }, [formId, submitting]);
+    const next = identityDraftFromInstance(instance);
+    setBaseline(next);
+    setName(next.name);
+    setTask(next.task);
+    setError(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [instance.id]);
 
-  const policyChanged = !samePolicy(
-    normaliseInstancePolicy(instance.network_policy),
-    networkPolicy,
-  );
+  const dirty = name !== baseline.name || task !== baseline.task;
 
-  const submit = async (e) => {
-    e.preventDefault();
+  const submit = async () => {
     setSubmitting(true); setError(null);
     try {
-      // Step 1: identity / models / tools — live PATCH on the
-      // existing id (no sandbox churn).  Skip the request entirely
-      // when nothing in this group changed.
-      const patch = {};
-      if (name !== (instance.name || '')) patch.name = name;
-      if (task !== (instance.task || '')) patch.task = task;
-      if (models.length > 0
-          && JSON.stringify(models) !== JSON.stringify(initialModelsList)) {
-        patch.models = models;
-      }
-      if (toolsDirty) patch.tools = tools;
-      if (Object.keys(patch).length > 0) {
-        // Backend rejects an empty PATCH; only send when there's a
-        // delta.  Always include name + task when sending so the
-        // backend's "missing means unchanged" semantic still
-        // produces an updated row in the response.
-        const payload = { name, task, ...patch };
-        const updated = await client.updateInstance(instance.id, payload);
-        upsertInstance(updated);
-      }
-
-      // Step 2: network policy — restarts the sandbox under the same
-      // id (in-place rotation), so DNS, bearer tokens and webhook
-      // URLs all survive.  Skipped when the policy is untouched.
-      if (policyChanged) {
-        const updated = await client.changeInstanceNetwork(
-          instance.id,
-          serializeNetworkPolicy(networkPolicy),
-        );
-        if (updated) upsertInstance(updated);
-      }
-      window.location.hash = backHref;
+      const updated = await client.updateInstance(instance.id, { name, task });
+      if (updated) upsertInstance(updated);
+      const next = updated ? identityDraftFromInstance(updated) : { name, task };
+      setBaseline(next);
+      setName(next.name);
+      setTask(next.task);
     } catch (err) {
       setError(err?.detail || err?.message || 'save failed');
     } finally {
@@ -2457,81 +2302,236 @@ function EditInstanceForm({ instance, backHref, formId }) {
   };
 
   return (
-    <div className="edit-stack">
-      <form id={formId} onSubmit={submit} className="form page-form">
-        <section className="page-section">
-          <h2 className="section-title">identity</h2>
-          <label className="field">
-            <span>name</span>
-            <input
-              value={name}
-              onChange={e => setName(e.target.value)}
-              placeholder="PR reviewer for foo/bar"
-              autoFocus
-            />
-          </label>
-          <label className="field">
-            <span>brief</span>
-            <textarea
-              className="textarea"
-              value={task}
-              onChange={e => setTask(e.target.value)}
-              rows={6}
-            />
-            <span className="hint muted small">
-              Saving rewrites IDENTITY.md via /api/admin/configure —
-              the running agent picks it up on its next turn
-              (no restart).
-            </span>
-          </label>
-        </section>
-
-        <section className="page-section">
-          <h2 className="section-title">model</h2>
-          <ModelMultiPicker
-            defaultModels={defaultModels}
-            selected={models}
-            onChange={setModels}
-          />
-        </section>
-
-        <section className="page-section">
-          <h2 className="section-title">network access</h2>
-          <NetworkPolicyPicker value={networkPolicy} onChange={setNetworkPolicy}/>
-          {policyChanged ? (
-            <p className="hint muted small">
-              <strong>Heads up:</strong> the sandbox briefly restarts to apply
-              the new policy.  Workspace state, DNS, and webhook URLs all
-              survive.
-            </p>
-          ) : null}
-        </section>
-
-        <ToolsPicker
-          value={tools}
-          onChange={setToolsTracked}
-          policyKind={networkPolicy.kind}
+    <section className="panel">
+      <div className="panel-header">
+        <div className="panel-title">identity</div>
+      </div>
+      <p className="muted small">
+        Saving rewrites IDENTITY.md via /api/admin/configure — the running
+        agent picks up the new name and brief on its next turn (no restart).
+      </p>
+      <label className="field">
+        <span>name</span>
+        <input
+          value={name}
+          onChange={e => setName(e.target.value)}
+          placeholder="PR reviewer for foo/bar"
+          disabled={disabled}
         />
+      </label>
+      <label className="field">
+        <span>brief</span>
+        <textarea
+          className="textarea"
+          value={task}
+          onChange={e => setTask(e.target.value)}
+          rows={6}
+          disabled={disabled}
+        />
+      </label>
+      {error ? <div className="error">{error}</div> : null}
+      {dirty ? (
+        <div className="modal-actions">
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={submit}
+            disabled={submitting || disabled}
+          >
+            {submitting ? 'saving…' : 'apply'}
+          </button>
+          <button
+            type="button"
+            className="btn btn-ghost"
+            onClick={() => {
+              setName(baseline.name);
+              setTask(baseline.task);
+              setError(null);
+            }}
+            disabled={submitting}
+          >
+            revert
+          </button>
+        </div>
+      ) : null}
+    </section>
+  );
+}
 
-        {error ? <div className="error">{error}</div> : null}
-      </form>
+function modelListFromInstance(instance) {
+  if (Array.isArray(instance.models) && instance.models.length > 0) return [...instance.models];
+  if (instance.model) return [instance.model];
+  return [];
+}
 
-      {/* MCP servers — separate panel because each row commits
-          independently (add / connect-OAuth / disconnect / remove).
-          Lives outside the form so its buttons don't trigger the
-          identity submit. */}
-      <McpServersPanel
-        instanceId={instance.id}
-        policyKind={networkPolicy.kind}
-        disabled={disabled}
+function sameStringList(a, b) {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
+function ModelSection({ instance }) {
+  const { client, auth } = useApi();
+  const disabled = instance.status === 'destroyed';
+  const defaultModels = auth?.config?.default_models || [];
+  const [baseline, setBaseline] = React.useState(() => modelListFromInstance(instance));
+  const [models, setModels] = React.useState(baseline);
+  const [submitting, setSubmitting] = React.useState(false);
+  const [error, setError] = React.useState(null);
+
+  React.useEffect(() => {
+    const next = modelListFromInstance(instance);
+    setBaseline(next);
+    setModels(next);
+    setError(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [instance.id]);
+
+  const dirty = !sameStringList(models, baseline);
+  const canSubmit = dirty && models.length > 0;
+
+  const submit = async () => {
+    setSubmitting(true); setError(null);
+    try {
+      const updated = await client.updateInstance(instance.id, { models });
+      if (updated) upsertInstance(updated);
+      const next = updated ? modelListFromInstance(updated) : [...models];
+      setBaseline(next);
+      setModels(next);
+    } catch (err) {
+      setError(err?.detail || err?.message || 'save failed');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <section className="panel">
+      <div className="panel-header">
+        <div className="panel-title">model</div>
+      </div>
+      <ModelMultiPicker
+        defaultModels={defaultModels}
+        selected={models}
+        onChange={setModels}
       />
+      {error ? <div className="error">{error}</div> : null}
+      {dirty ? (
+        <div className="modal-actions">
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={submit}
+            disabled={submitting || disabled || !canSubmit}
+            title={!canSubmit ? 'pick at least one model' : undefined}
+          >
+            {submitting ? 'saving…' : 'apply'}
+          </button>
+          <button
+            type="button"
+            className="btn btn-ghost"
+            onClick={() => { setModels(baseline); setError(null); }}
+            disabled={submitting}
+          >
+            revert
+          </button>
+        </div>
+      ) : null}
+    </section>
+  );
+}
 
-      <EditInstanceActionBar
-        formId={formId}
-        backHref={backHref}
-        policyChanged={policyChanged}
+function toolsListFromInstance(instance) {
+  return initialTools(instance, instance.network_policy?.kind);
+}
+
+function ToolsSection({ instance }) {
+  const { client } = useApi();
+  const disabled = instance.status === 'destroyed';
+  const [baseline, setBaseline] = React.useState(() => toolsListFromInstance(instance));
+  const [tools, setTools] = React.useState(baseline);
+  const [submitting, setSubmitting] = React.useState(false);
+  const [error, setError] = React.useState(null);
+
+  React.useEffect(() => {
+    const next = toolsListFromInstance(instance);
+    setBaseline(next);
+    setTools(next);
+    setError(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [instance.id]);
+
+  const dirty = !sameStringList(tools, baseline);
+
+  const submit = async () => {
+    setSubmitting(true); setError(null);
+    try {
+      const updated = await client.updateInstance(instance.id, { tools });
+      if (updated) upsertInstance(updated);
+      const next = updated ? toolsListFromInstance(updated) : [...tools];
+      setBaseline(next);
+      setTools(next);
+    } catch (err) {
+      setError(err?.detail || err?.message || 'save failed');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <>
+      <ToolsPicker
+        value={tools}
+        onChange={setTools}
+        policyKind={instance.network_policy?.kind}
       />
-    </div>
+      {error ? <div className="error">{error}</div> : null}
+      {dirty ? (
+        <div className="modal-actions">
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={submit}
+            disabled={submitting || disabled}
+          >
+            {submitting ? 'saving…' : 'apply'}
+          </button>
+          <button
+            type="button"
+            className="btn btn-ghost"
+            onClick={() => { setTools(baseline); setError(null); }}
+            disabled={submitting}
+          >
+            revert
+          </button>
+        </div>
+      ) : null}
+    </>
+  );
+}
+
+function RuntimeSection({ instance }) {
+  const { auth } = useApi();
+  const cubeProfiles = auth?.config?.cube_profiles || [];
+  return (
+    <section className="panel">
+      <div className="panel-title">runtime</div>
+      {(() => {
+        const profile = findCubeProfile(instance.template_id, cubeProfiles);
+        if (!profile) return null;
+        return <KvRow label="size" value={profileLabel(profile)}/>;
+      })()}
+      <KvRow label="created" value={fmtTime(instance.created_at)}/>
+      <KvRow label="last active" value={fmtTime(instance.last_active_at)}/>
+      <KvRow label="last probe" value={
+        instance.last_probe_at
+          ? `${fmtTime(instance.last_probe_at)} · ${probeLabel(instance.last_probe_status)}`
+          : 'never'
+      }/>
+      {instance.destroyed_at ? <KvRow label="destroyed" value={fmtTime(instance.destroyed_at)}/> : null}
+    </section>
   );
 }
 

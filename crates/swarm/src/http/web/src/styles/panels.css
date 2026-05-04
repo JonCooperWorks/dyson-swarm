@@ -594,9 +594,14 @@
 
 .detail-header {
   display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.detail-header-titlerow {
+  display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 16px;
+  gap: 12px;
   flex-wrap: wrap;
 }
 .detail-id {
@@ -623,46 +628,161 @@
   background: var(--bg-2);
   border-radius: 3px;
 }
-.detail-actions {
+.detail-section-nav {
+  position: relative;
+}
+.detail-section-select {
+  display: none;
+  width: 100%;
+  padding: 8px 10px;
+  font-size: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-1);
+  color: var(--fg);
+}
+.detail-section-chips {
   display: flex;
   gap: 6px;
+  overflow-x: auto;
+  scrollbar-width: thin;
+  -webkit-overflow-scrolling: touch;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+}
+.detail-section-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  white-space: nowrap;
+  text-decoration: none;
+  color: var(--fg-muted);
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font-size: 13px;
   flex-shrink: 0;
+}
+.detail-section-chip:hover {
+  color: var(--fg);
+  background: var(--bg-2);
+}
+.detail-section-chip.active {
+  color: var(--fg);
+  background: var(--bg-2);
+  border-color: var(--accent);
+}
+.detail-section-chip .btn-count-badge {
+  margin-left: 0;
+}
+.detail-summary-links {
+  display: flex;
   flex-wrap: wrap;
+  gap: 8px;
+}
+.detail-summary-link {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  text-decoration: none;
+  color: var(--fg);
+  background: var(--bg-1);
+}
+.detail-summary-link:hover {
+  border-color: var(--accent);
+  background: var(--bg-2);
+}
+.detail-overflow {
+  position: relative;
+  flex-shrink: 0;
+}
+.detail-overflow > summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 4px 12px;
+  font-size: 18px;
+  line-height: 1;
+}
+.detail-overflow > summary::-webkit-details-marker {
+  display: none;
+}
+.detail-overflow-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  min-width: 180px;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 6px 22px rgba(0, 0, 0, 0.25);
+  display: flex;
+  flex-direction: column;
+  padding: 4px;
+  z-index: 30;
+}
+.detail-overflow-item {
+  display: block;
+  padding: 8px 12px;
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  text-align: left;
+  text-decoration: none;
+  color: var(--fg);
+  font: inherit;
+  cursor: pointer;
+}
+.detail-overflow-item:hover:not(:disabled):not(.disabled) {
+  background: var(--bg-2);
+}
+.detail-overflow-item:disabled,
+.detail-overflow-item.disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.detail-overflow-danger {
+  color: var(--danger, #d44);
 }
 @media (max-width: 720px) {
-  /* Hoist action buttons above the title block on mobile and keep
-     them pinned to the top of the scrolling detail pane.  When a
-     subpage (tasks / edit / artifacts) is open, lift it above the
-     employee card too — the subpage is what the user actually came
-     to see, the title block is just orientation. */
-  .detail-header {
-    display: contents;
+  .detail-pane:not(.detail-pane-section-summary) .detail-header {
+    position: relative;
   }
-  .detail-header .detail-actions { order: -2; }
-  .detail-pane > .instance-subpage { order: -1; }
-  /* Hide the title block on mobile when a subpage is open — it'd
-     otherwise sit at the bottom of the viewport as dead weight. */
-  .detail-pane:has(> .instance-subpage) .employee-card { display: none; }
-  .detail-actions {
-    position: sticky;
+  .detail-pane:not(.detail-pane-section-summary) .detail-header-titlerow {
+    position: absolute;
     top: 0;
-    z-index: 20;
-    width: 100%;
-    padding: 10px 0 8px;
-    background: var(--bg);
-    border-bottom: 1px solid var(--border);
-    transition: transform 180ms ease, opacity 180ms ease;
-    will-change: transform;
+    right: 0;
+    z-index: 35;
   }
-  .detail-actions.detail-actions-hidden {
-    transform: translateY(-110%);
-    opacity: 0;
-    pointer-events: none;
+  .detail-pane:not(.detail-pane-section-summary) .employee-card {
+    display: none;
   }
-  .detail-actions .btn { flex: 1 1 auto; min-width: 0; }
+  .detail-pane:not(.detail-pane-section-summary) .detail-section-nav {
+    padding-right: 44px;
+  }
+  .detail-pane:not(.detail-pane-section-summary) .detail-meta {
+    display: none;
+  }
+  .detail-pane:not(.detail-pane-section-summary) .employee-card .employee-name {
+    display: none;
+  }
+  .detail-section-chips {
+    padding-bottom: 2px;
+    gap: 4px;
+  }
+  .detail-section-chip {
+    padding: 5px 10px;
+    font-size: 12px;
+  }
 }
-@media (prefers-reduced-motion: reduce) {
-  .detail-actions { transition: none; }
+@media (max-width: 420px) {
+  .detail-section-chips {
+    display: none;
+  }
+  .detail-section-select {
+    display: block;
+  }
 }
 
 /* Compact tap-to-copy id pill — used in place of a raw 36-char UUID
@@ -2195,12 +2315,11 @@
   gap: 8px;
 }
 
-/* ── Edit page (full-width, save pinned at bottom) ───────────── */
+/* ── Page shell width caps (hire / artifact subpages) ─────────── */
 
-/* Wider canvas than the hire flow's centred 720px column — the edit
- * page stacks an identity form, a network-policy panel, and an MCP
- * panel, each of which wants room to breathe.  Falls back to the
- * 720px max via the .page rule when the viewport is narrower.  */
+/* Wider canvas than the hire flow's centred 720px column.  The
+ * `.page-edit` class remains for the artifact/share standalone pages
+ * that already use it as their wide-canvas marker. */
 .page-edit,
 .page-new { max-width: 1100px; }
 
@@ -2210,21 +2329,6 @@
   gap: 24px;
 }
 
-.edit-form {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-  padding: 16px;
-  background: var(--bg-2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-}
-
-/* Action bar at the very bottom of the edit page.  Sits in normal
- * flow — the previous sticky-bottom variant obscured form rows
- * mid-scroll on every long edit page (tasks form, the instance tool
- * grid, etc.) and users universally expected the action buttons to
- * live at the natural bottom of the form, not float as an overlay. */
 .edit-action-bar {
   display: flex;
   align-items: center;
@@ -2238,8 +2342,6 @@
 .btn-lg { padding: 8px 18px; font-size: 14px; }
 
 @media (max-width: 640px) {
-  /* Stack the action bar buttons vertically on narrow viewports —
-   * primary at the top so it stays in the obvious tap target. */
   .edit-action-bar {
     flex-direction: column;
     align-items: stretch;

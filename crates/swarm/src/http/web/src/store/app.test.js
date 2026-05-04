@@ -1,10 +1,11 @@
 /* Tests for hash-route parsing.
  *
- * Order matters: the edit pattern (`#/i/<id>/edit`) is a strict
- * prefix of the detail pattern (`#/i/<id>`), so a regression that
- * reordered the matches would silently mis-route the edit URL to
- * the detail view with `view.id = "<id>"`.  These tests pin the
- * happy paths and the prefix-shadow case.
+ * Order matters: every section subroute (`#/i/<id>/identity`,
+ * `#/i/<id>/network`, …) is a strict prefix of the bare detail
+ * pattern (`#/i/<id>`), so a regression that reordered the matches
+ * would silently mis-route a section URL to the summary view with
+ * `view.id = "<id>"`.  These tests pin the happy paths and the
+ * prefix-shadow case.
  */
 import { afterEach, describe, expect, test } from 'vitest';
 
@@ -30,16 +31,39 @@ describe('parseHashView', () => {
     });
   });
 
-  test('"#/i/<id>/edit" routes to the dedicated edit page (NOT the detail view)', () => {
-    // Regression guard: an earlier ordering checked the detail
-    // pattern first, so this URL silently parsed as the detail
-    // view with `view.id = "<id>"` and the dedicated edit page
-    // never rendered.
+  test('"#/i/<id>/edit" is preserved as an alias of the identity section', () => {
+    // Stale tabs land on the nearest retired edit surface without
+    // reviving the old `instance-edit` route.
     window.location.hash = '#/i/fluffy-otter-042-4b26de/edit';
     expect(parseHashView()).toEqual({
-      name: 'instance-edit',
+      name: 'instance-identity',
       id: 'fluffy-otter-042-4b26de',
     });
+  });
+
+  test('"#/i/<id>/identity" routes to the identity section (NOT the detail view)', () => {
+    window.location.hash = '#/i/abc/identity';
+    expect(parseHashView()).toEqual({
+      name: 'instance-identity',
+      id: 'abc',
+    });
+  });
+
+  test('every per-section URL gets its own view name', () => {
+    const cases = {
+      identity: 'instance-identity',
+      model: 'instance-model',
+      network: 'instance-network',
+      tools: 'instance-tools',
+      secrets: 'instance-secrets',
+      mcp: 'instance-mcp',
+      snapshots: 'instance-snapshots',
+      runtime: 'instance-runtime',
+    };
+    for (const [slug, name] of Object.entries(cases)) {
+      window.location.hash = `#/i/abc/${slug}`;
+      expect(parseHashView()).toEqual({ name, id: 'abc' });
+    }
   });
 
   test('"#/new" routes to the dedicated hire page', () => {
@@ -57,15 +81,15 @@ describe('parseHashView', () => {
     expect(parseHashView()).toEqual({ name: 'instances', id: null });
   });
 
-  test('decodes percent-encoded ids on both detail and edit routes', () => {
+  test('decodes percent-encoded ids on both detail and section routes', () => {
     // Operator pastes a URL where the `-` survives encoding but
     // some other char in the slug got encoded — make sure we hand
     // a clean id back to downstream consumers.
     window.location.hash = '#/i/fluffy%2Dotter%2D042';
     expect(parseHashView().id).toBe('fluffy-otter-042');
-    window.location.hash = '#/i/fluffy%2Dotter%2D042/edit';
+    window.location.hash = '#/i/fluffy%2Dotter%2D042/network';
     expect(parseHashView()).toEqual({
-      name: 'instance-edit',
+      name: 'instance-network',
       id: 'fluffy-otter-042',
     });
   });

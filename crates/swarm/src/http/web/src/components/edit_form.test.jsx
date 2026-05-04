@@ -1,58 +1,58 @@
-/* End-to-end DOM tests for the EditInstancePage form.
+/* End-to-end DOM tests for the per-section instance detail pages.
  *
- * The hire form's behaviour got pure-function coverage in
- * instances.test.js (initialTools / nextToolsForPolicyChange /
- * toolBlockedByNetwork).  This file goes one layer up and renders
- * the actual edit page so we catch wiring regressions:
- *
- * - Section order (tools is above network access).
- * - Airgap rule fires on edit when the operator picks airgap from
- *   the network panel inside the form (the bug the operator hit
- *   live: airgap was a no-op on edit).
- * - Pre-fill: an already-airgap row keeps its persisted tool list
- *   on mount (the transition guard isn't supposed to wipe it).
- *
- * RTL + jsdom; no real backend touched (the API client is stubbed).
+ * The unified edit form was retired in favour of one URL per
+ * configuration surface.  These tests cover the inline apply/revert
+ * wiring for the sections that replaced it.
  */
 import { describe, expect, test, vi, afterEach } from 'vitest';
 import React from 'react';
-import { render, screen, fireEvent, cleanup } from '@testing-library/react';
+import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 
-// RTL doesn't auto-cleanup under vitest unless `globals: true` is
-// set; explicitly tear down between tests so multi-render assertions
-// ("multiple elements with the role …") don't trip on stale DOM.
-afterEach(() => { cleanup(); });
-
-import { EditInstancePage } from './instances.jsx';
+import { InstancesView } from './instances.jsx';
 import { ApiProvider } from '../hooks/useApi.jsx';
-import { upsertInstance } from '../store/app.js';
+import { setInstances, setSharesFor, setWebhooksFor } from '../store/app.js';
 
-// Stub the API client.  Edit page calls getInstance on mount; we
-// resolve with the seeded row.  Other client methods aren't hit
-// in these tests (we don't actually save).
-function makeStubClient(row) {
+afterEach(() => {
+  cleanup();
+  setInstances([]);
+  setWebhooksFor('inst-test', []);
+  setSharesFor('inst-test', []);
+});
+
+function makeStubClient(row, overrides = {}) {
   return {
     getInstance: vi.fn().mockResolvedValue(row),
-    updateInstance: vi.fn().mockResolvedValue(row),
-    changeInstanceNetwork: vi.fn().mockResolvedValue(row),
     listInstances: vi.fn().mockResolvedValue([row]),
+    listWebhooks: vi.fn().mockResolvedValue([]),
+    listShares: vi.fn().mockResolvedValue([]),
+    listProviderModels: vi.fn().mockResolvedValue({ models: [] }),
+    listSnapshotsForInstance: vi.fn().mockResolvedValue([]),
+    listSecretNames: vi.fn().mockResolvedValue([]),
     listMcpServers: vi.fn().mockResolvedValue([]),
+    updateInstance: vi.fn().mockImplementation(async (_id, payload) => ({ ...row, ...payload })),
+    changeInstanceNetwork: vi.fn().mockImplementation(async (_id, policy) => ({
+      ...row,
+      network_policy: policy,
+    })),
+    ...overrides,
   };
 }
 
-function renderEdit(row, { auth } = {}) {
-  // Seed the store so EditInstancePage's `useAppState` selector
-  // picks the row up immediately (the page also re-fetches via
-  // getInstance, which the stub satisfies).
-  upsertInstance(row);
-  const client = makeStubClient(row);
-  const ctxAuth = auth || { config: { default_models: ['anthropic/claude-sonnet-4-5'] } };
+function renderSection(view, row, { auth, clientOverrides } = {}) {
+  setInstances([row]);
+  const client = makeStubClient(row, clientOverrides || {});
+  const ctxAuth = auth || {
+    config: {
+      default_models: ['anthropic/claude-sonnet-4-5', 'openai/gpt-5'],
+      cube_profiles: [],
+    },
+  };
   return {
     client,
     ...render(
       <ApiProvider client={client} auth={ctxAuth}>
-        <EditInstancePage instanceId={row.id}/>
+        <InstancesView view={view}/>
       </ApiProvider>,
     ),
   };
@@ -81,62 +81,95 @@ function makeRow(overrides = {}) {
   };
 }
 
-describe('EditInstancePage layout', () => {
-  test('network access renders ABOVE the tools panel (same as hire form)', async () => {
-    renderEdit(makeRow());
-    // Wait for the form to materialise (useEffect re-fetches on mount).
-    const networkHeading = await screen.findByRole('heading', { name: /network access/i });
-    const toolsTitle = await screen.findByText(/^built-in tools$/i);
+describe('identity section', () => {
+  test('apply / revert appear only when the form is dirty', async () => {
+    renderSection({ name: 'instance-identity', id: 'inst-test' }, makeRow());
 
-    // DOM order: comparing positions inside the same parent stack.
-    const stack = networkHeading.closest('section').parentElement;
-    expect(stack).toBe(toolsTitle.closest('section').parentElement);
-    const positions = [...stack.children];
-    const netIdx = positions.indexOf(networkHeading.closest('section'));
-    const toolsIdx = positions.indexOf(toolsTitle.closest('section'));
-    expect(netIdx).toBeGreaterThan(-1);
-    expect(toolsIdx).toBeGreaterThan(-1);
-    expect(netIdx).toBeLessThan(toolsIdx);
+    const nameInput = await screen.findByDisplayValue('TARS');
+    expect(screen.queryByRole('button', { name: /^apply$/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^revert$/i })).toBeNull();
+
+    fireEvent.change(nameInput, { target: { value: 'TARS-2' } });
+    expect(screen.getByRole('button', { name: /^apply$/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^revert$/i })).toBeInTheDocument();
+  });
+
+  test('apply patches the identity without touching network', async () => {
+    const { client } = renderSection({ name: 'instance-identity', id: 'inst-test' }, makeRow());
+
+    const nameInput = await screen.findByDisplayValue('TARS');
+    fireEvent.change(nameInput, { target: { value: 'TARS-2' } });
+    fireEvent.click(screen.getByRole('button', { name: /^apply$/i }));
+
+    await waitFor(() => expect(client.updateInstance).toHaveBeenCalled());
+    const [id, payload] = client.updateInstance.mock.calls[0];
+    expect(id).toBe('inst-test');
+    expect(payload).toMatchObject({ name: 'TARS-2', task: 'Security review.' });
+    expect(client.changeInstanceNetwork).not.toHaveBeenCalled();
+  });
+
+  test('revert restores the original name and brief', async () => {
+    renderSection({ name: 'instance-identity', id: 'inst-test' }, makeRow());
+
+    const nameInput = await screen.findByDisplayValue('TARS');
+    fireEvent.change(nameInput, { target: { value: 'NEW' } });
+    fireEvent.click(screen.getByRole('button', { name: /^revert$/i }));
+
+    expect(nameInput.value).toBe('TARS');
+    expect(screen.queryByRole('button', { name: /^apply$/i })).toBeNull();
   });
 });
 
-describe('EditInstancePage airgap rule', () => {
-  test('selecting airgap clears every tool in the picker', async () => {
-    // Row starts on `open` with the default-everything-ticked
-    // implicit list (tools=[]).  After picking airgap, the picker
-    // must drop to zero — same behaviour as the hire form.
-    renderEdit(makeRow({ network_policy: { kind: 'open', entries: [] } }));
+describe('model section', () => {
+  test('apply patches only the model list', async () => {
+    const { client } = renderSection({ name: 'instance-model', id: 'inst-test' }, makeRow());
 
-    // Sanity: at least one tool is initially ticked (the
-    // empty-list-on-non-airgap row pre-fills "every tool").
-    const bashCheckbox = await screen.findByRole('checkbox', { name: 'bash' });
-    expect(bashCheckbox).toBeChecked();
+    fireEvent.click(await screen.findByRole('button', {
+      name: 'remove anthropic/claude-sonnet-4-5',
+    }));
+    const input = screen.getByPlaceholderText('pick at least one model');
+    fireEvent.change(input, { target: { value: 'openai/gpt-5' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    fireEvent.click(screen.getByRole('button', { name: /^apply$/i }));
 
-    // Click the airgap radio inside the network access section.
-    // The picker uses radios labelled by their kind label
-    // ("air-gapped"); we look up by the underlying `value`.
-    const airgapRadio = screen.getByRole('radio', { name: /air-gapped/i });
-    fireEvent.click(airgapRadio);
+    await waitFor(() => expect(client.updateInstance).toHaveBeenCalled());
+    const [, payload] = client.updateInstance.mock.calls[0];
+    expect(payload).toEqual({ models: ['openai/gpt-5'] });
+    expect(client.changeInstanceNetwork).not.toHaveBeenCalled();
+  });
+});
 
-    // Every checkbox in the tools picker should now be unticked.
-    const toolCheckboxes = screen.getAllByRole('checkbox');
-    for (const cb of toolCheckboxes) {
-      expect(cb).not.toBeChecked();
+describe('tools section', () => {
+  test('unticking a tool becomes dirty and saves the trimmed array', async () => {
+    const row = makeRow({
+      tools: [
+        'read_file', 'write_file', 'edit_file', 'bulk_edit',
+        'list_files', 'search_files',
+      ],
+    });
+    const { client } = renderSection({ name: 'instance-tools', id: 'inst-test' }, row);
+
+    const bulkEdit = await screen.findByRole('checkbox', { name: /bulk_edit/ });
+    expect(bulkEdit).toBeChecked();
+    fireEvent.click(bulkEdit);
+    expect(bulkEdit).not.toBeChecked();
+
+    fireEvent.click(screen.getByRole('button', { name: /^apply$/i }));
+    await waitFor(() => expect(client.updateInstance).toHaveBeenCalled());
+    const [, payload] = client.updateInstance.mock.calls[0];
+    expect(payload.tools).toBeDefined();
+    expect(payload.tools).not.toContain('bulk_edit');
+    for (const t of ['read_file', 'write_file', 'edit_file', 'list_files', 'search_files']) {
+      expect(payload.tools).toContain(t);
     }
-
-
   });
 
-  test('airgap row mount does NOT wipe a persisted tool list', async () => {
-    // Regression: the transition-aware effect must not fire on
-    // initial mount when the row was already airgap.  An operator
-    // who hand-picked `bash` + `read_file` last week should see
-    // exactly those still ticked when they re-open edit.
+  test('an airgap row mounts with its persisted tool list intact', async () => {
     const row = makeRow({
       network_policy: { kind: 'airgap', entries: [] },
       tools: ['bash', 'read_file'],
     });
-    renderEdit(row);
+    renderSection({ name: 'instance-tools', id: 'inst-test' }, row);
 
     const bash = await screen.findByRole('checkbox', { name: 'bash' });
     const readFile = await screen.findByRole('checkbox', { name: 'read_file' });
@@ -144,158 +177,34 @@ describe('EditInstancePage airgap rule', () => {
     expect(bash).toBeChecked();
     expect(readFile).toBeChecked();
     expect(writeFile).not.toBeChecked();
-
-
-  });
-
-  test('switching OUT of airgap with a hand-picked selection keeps it', async () => {
-    // Airgap → open with a non-empty tool set: the operator opted
-    // in deliberately, so don't undo their work.
-    const row = makeRow({
-      network_policy: { kind: 'airgap', entries: [] },
-      tools: ['bash'],
-    });
-    renderEdit(row);
-
-    const bash = await screen.findByRole('checkbox', { name: 'bash' });
-    expect(bash).toBeChecked();
-
-    const openRadio = screen.getByRole('radio', { name: /^Open \(full internet\)$/i });
-    fireEvent.click(openRadio);
-
-    // Bash still ticked, web_fetch still NOT ticked (we didn't
-    // re-tick the world — the operator's curated set survived).
-    expect(bash).toBeChecked();
-    const webFetch = screen.getByRole('checkbox', { name: 'web_fetch' });
-    expect(webFetch).not.toBeChecked();
-  });
-
-  test('switching OUT of airgap with an empty picker re-ticks every tool', async () => {
-    // The opposite case: an airgap row with the empty default
-    // (no tools enabled) widens the network — the operator
-    // probably wants the full toolbox available again, otherwise
-    // they're left with a useless dyson.  initialTools renders
-    // airgap+empty as "no checkboxes ticked"; flipping away from
-    // airgap re-fills.
-    const row = makeRow({
-      network_policy: { kind: 'airgap', entries: [] },
-      tools: [],
-    });
-    renderEdit(row);
-
-    // Sanity: every tool starts unticked (initialTools(row, 'airgap') = []).
-    const bash = await screen.findByRole('checkbox', { name: 'bash' });
-    expect(bash).not.toBeChecked();
-
-    const openRadio = screen.getByRole('radio', { name: /^Open \(full internet\)$/i });
-    fireEvent.click(openRadio);
-
-    // After leaving airgap with no prior selection, every tool
-    // becomes ticked (the operator gets a working dyson).
-    expect(bash).toBeChecked();
-    const webFetch = screen.getByRole('checkbox', { name: 'web_fetch' });
-    expect(webFetch).toBeChecked();
   });
 });
 
-describe('EditInstancePage parity with hire form', () => {
-  test('renders identity, model, network access, tools in that order', async () => {
-    renderEdit(makeRow());
+describe('network section', () => {
+  test('apply hits client.changeInstanceNetwork with the new policy', async () => {
+    const { client } = renderSection({ name: 'instance-network', id: 'inst-test' }, makeRow());
 
-    const identity = await screen.findByRole('heading', { name: /^identity$/i });
-    const model = await screen.findByRole('heading', { name: /^model$/i });
-    const network = await screen.findByRole('heading', { name: /^network access$/i });
-    const tools = await screen.findByText(/^built-in tools$/i);
+    const airgapRadio = await screen.findByRole('radio', { name: /air-gapped/i });
+    fireEvent.click(airgapRadio);
+    fireEvent.click(screen.getByRole('button', { name: /^apply$/i }));
 
-    // All four headings live inside the same form element.
-    const form = identity.closest('form');
-    expect(form).not.toBeNull();
-    expect(form.contains(model)).toBe(true);
-    expect(form.contains(network)).toBe(true);
-    expect(form.contains(tools)).toBe(true);
-
-    // DOM-order check via document position.  Mirrors the hire
-    // form: identity → model → network → tools.
-    const order = (a, b) =>
-      Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
-    expect(order(identity, model)).toBe(true);
-    expect(order(model, network)).toBe(true);
-    expect(order(network, tools)).toBe(true);
-
-
-  });
-
-  test('saves identity / models / tools as a PATCH on submit', async () => {
-    const row = makeRow();
-    const { client } = renderEdit(row);
-
-    const nameInput = await screen.findByDisplayValue('TARS');
-    fireEvent.change(nameInput, { target: { value: 'TARS-2' } });
-
-    // Click the bottom save button (form submit).
-    const save = screen.getByRole('button', { name: /^save$/i });
-    fireEvent.click(save);
-
-    // updateInstance was called with the new name; no
-    // change-network call because the policy didn't move.
-    await vi.waitFor(() => {
-      expect(client.updateInstance).toHaveBeenCalled();
-    });
-    const [id, payload] = client.updateInstance.mock.calls[0];
+    await waitFor(() => expect(client.changeInstanceNetwork).toHaveBeenCalled());
+    const [id, policy] = client.changeInstanceNetwork.mock.calls[0];
     expect(id).toBe('inst-test');
-    expect(payload.name).toBe('TARS-2');
-    expect(client.changeInstanceNetwork).not.toHaveBeenCalled();
-
-
+    expect(policy.kind).toBe('airgap');
+    expect(client.updateInstance).not.toHaveBeenCalled();
   });
+});
 
-  test('unchecking a tool sends the trimmed tools array to updateInstance', async () => {
-    // Regression: unchecking `bulk_edit` and clicking save must
-    // include `tools` in the PATCH payload — otherwise the row's
-    // tool list never narrows and the running agent keeps
-    // registering everything.  Found against
-    // central-hickory-255-4b26de when the SPA's client.updateInstance
-    // was destructuring `{ name, task, models }` only and silently
-    // dropping `tools`.
-    const row = makeRow({
-      tools: [
-        'read_file', 'write_file', 'edit_file', 'bulk_edit',
-        'list_files', 'search_files', 'send_file',
-      ],
-    });
-    const { client } = renderEdit(row);
+describe('summary section', () => {
+  test('renders brief, activity, and section links', async () => {
+    renderSection({ name: 'instance', id: 'inst-test' }, makeRow());
 
-    // Untick the bulk_edit checkbox.
-    const bulkEdit = await screen.findByRole('checkbox', { name: /bulk_edit/ });
-    expect(bulkEdit).toBeChecked();
-    fireEvent.click(bulkEdit);
-    expect(bulkEdit).not.toBeChecked();
-
-    // Save.
-    fireEvent.click(screen.getByRole('button', { name: /^save$/i }));
-    await vi.waitFor(() => {
-      expect(client.updateInstance).toHaveBeenCalled();
-    });
-    const [, payload] = client.updateInstance.mock.calls[0];
-    expect(payload.tools).toBeDefined();
-    expect(payload.tools).not.toContain('bulk_edit');
-    // Sanity: every other tool the user kept ticked is still in
-    // the payload — we're trimming, not nuking.
-    for (const t of [
-      'read_file', 'write_file', 'edit_file',
-      'list_files', 'search_files', 'send_file',
-    ]) {
-      expect(payload.tools).toContain(t);
-    }
-  });
-
-  test('save button stays one label even when the network policy is dirty', async () => {
-    // Post-in-place-rotation: a network change still restarts the
-    // sandbox, but the swarm id (and all its surfaces) survive.
-    // The label stays "save" — there's no "successor" to call out.
-    renderEdit(makeRow({ network_policy: { kind: 'open', entries: [] } }));
-    expect(await screen.findByRole('button', { name: /^save$/i })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('radio', { name: /air-gapped/i }));
-    expect(screen.getByRole('button', { name: /^save$/i })).toBeInTheDocument();
+    expect(await screen.findByText(/Security review/)).toBeInTheDocument();
+    expect(screen.getByText(/^activity$/)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /^identity$/ })).toHaveAttribute(
+      'href',
+      '#/i/inst-test/identity',
+    );
   });
 });

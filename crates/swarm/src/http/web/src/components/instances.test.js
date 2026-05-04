@@ -40,14 +40,18 @@ afterEach(() => {
   setSharesFor('a', []);
 });
 
-describe('instance subpage rail routing', () => {
+describe('instance section rail routing', () => {
   test('keeps sibling instance links on the active section', () => {
-    expect(instanceRailHref('next-id', { name: 'instance-edit', id: 'current' }))
-      .toBe('#/i/next-id/edit');
+    expect(instanceRailHref('next-id', { name: 'instance-identity', id: 'current' }))
+      .toBe('#/i/next-id/identity');
     expect(instanceRailHref('next-id', { name: 'instance-tasks', id: 'current' }))
       .toBe('#/i/next-id/tasks');
     expect(instanceRailHref('next-id', { name: 'share-access-log', id: 'current', jti: 'jti' }))
       .toBe('#/i/next-id/artifacts');
+    expect(instanceRailHref('next-id', { name: 'instance-network', id: 'current' }))
+      .toBe('#/i/next-id/network');
+    expect(instanceRailHref('next-id', { name: 'instance-mcp', id: 'current' }))
+      .toBe('#/i/next-id/mcp');
   });
 
   test('treats deep task and artifact pages as their parent section', () => {
@@ -55,6 +59,18 @@ describe('instance subpage rail routing', () => {
       .toBe('tasks');
     expect(instanceSectionFromView({ name: 'instance-artifact', id: 'current', artifactId: 'a1' }))
       .toBe('artifacts');
+  });
+
+  test('maps each per-section view to its own key', () => {
+    expect(instanceSectionFromView({ name: 'instance', id: 'a' })).toBe('summary');
+    expect(instanceSectionFromView({ name: 'instance-identity', id: 'a' })).toBe('identity');
+    expect(instanceSectionFromView({ name: 'instance-model', id: 'a' })).toBe('model');
+    expect(instanceSectionFromView({ name: 'instance-network', id: 'a' })).toBe('network');
+    expect(instanceSectionFromView({ name: 'instance-tools', id: 'a' })).toBe('tools');
+    expect(instanceSectionFromView({ name: 'instance-secrets', id: 'a' })).toBe('secrets');
+    expect(instanceSectionFromView({ name: 'instance-mcp', id: 'a' })).toBe('mcp');
+    expect(instanceSectionFromView({ name: 'instance-snapshots', id: 'a' })).toBe('snapshots');
+    expect(instanceSectionFromView({ name: 'instance-runtime', id: 'a' })).toBe('runtime');
   });
 
   test('renders an instance subpage inside the two-pane instance shell', async () => {
@@ -89,7 +105,7 @@ describe('instance subpage rail routing', () => {
     expect(screen.getByText('Beta').closest('a')).toHaveAttribute('href', '#/i/b/tasks');
   });
 
-  test('offers an overview tab back to the agent overview', () => {
+  test('marks the active section in the section nav', () => {
     const row = {
       id: 'a',
       name: 'Alpha',
@@ -118,9 +134,9 @@ describe('instance subpage rail routing', () => {
       ),
     );
 
-    const overview = screen.getByRole('link', { name: 'overview' });
-    expect(overview).toHaveAttribute('href', '#/i/a');
-    expect(overview).toHaveClass('btn-active');
+    const summary = screen.getByRole('tab', { name: 'summary' });
+    expect(summary).toHaveAttribute('href', '#/i/a');
+    expect(summary).toHaveAttribute('aria-selected', 'true');
   });
 
   test('does not highlight artifacts solely because shared links exist', async () => {
@@ -150,8 +166,8 @@ describe('instance subpage rail routing', () => {
       ),
     );
 
-    const artifacts = screen.getByRole('link', { name: /artifacts/i });
-    expect(artifacts).not.toHaveClass('btn-active');
+    const artifacts = screen.getByRole('tab', { name: /artifacts/i });
+    expect(artifacts).toHaveAttribute('aria-selected', 'false');
     expect(screen.getByLabelText('1 active shared')).toBeInTheDocument();
   });
 });

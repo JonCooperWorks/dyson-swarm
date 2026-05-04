@@ -67,14 +67,19 @@ describe('TasksListPage', () => {
 });
 
 describe('TaskFormPage', () => {
-  test('previews the provider webhook URL before create', () => {
+  test('starts setup with the provider URL visible before create', () => {
     render(
       <ApiProvider client={{}} auth={{ mode: 'none' }}>
         <TaskFormPage instanceId="inst-a" taskName={null} embedded/>
       </ApiProvider>,
     );
 
-    expect(screen.queryByLabelText('url')).toBeNull();
+    expect(screen.getByText('provider URL')).toBeInTheDocument();
+    expect(screen.getByLabelText('url')).toHaveValue(
+      `${window.location.origin}/webhooks/inst-a/task-name`,
+    );
+    expect(screen.getByRole('button', { name: 'name first' })).toBeDisabled();
+
     fireEvent.change(screen.getByLabelText('name'), {
       target: { value: 'mail-research' },
     });
@@ -82,6 +87,7 @@ describe('TaskFormPage', () => {
     expect(screen.getByLabelText('url')).toHaveValue(
       `${window.location.origin}/webhooks/inst-a/mail-research`,
     );
+    expect(screen.getByRole('button', { name: 'copy' })).toBeEnabled();
   });
 
   test('renders task instructions as markdown on the detail form', async () => {

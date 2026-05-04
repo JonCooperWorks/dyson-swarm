@@ -45,6 +45,7 @@ const SCHEMES = [
 ];
 
 const TASK_SLUG_RE = /^[a-z0-9_-]{1,64}$/;
+const TASK_URL_PLACEHOLDER = 'task-name';
 const TASK_MARKDOWN_PLUGINS = [remarkGfm, remarkBreaks];
 const TASK_MARKDOWN_COMPONENTS = {
   a: ({ node, ...props }) => (
@@ -56,10 +57,18 @@ function schemeLabel(s) {
   return SCHEMES.find(x => x.value === s)?.label || s;
 }
 
-function webhookUrlFor(instanceId, name) {
+function validTaskSlug(name) {
   const slug = (name || '').trim();
-  if (!TASK_SLUG_RE.test(slug) || typeof window === 'undefined') return null;
-  return `${window.location.origin}/webhooks/${encodeURIComponent(instanceId)}/${encodeURIComponent(slug)}`;
+  return TASK_SLUG_RE.test(slug);
+}
+
+function webhookUrlFor(instanceId, name, { showPlaceholder = false } = {}) {
+  const slug = (name || '').trim();
+  const hasValidSlug = validTaskSlug(slug);
+  if (!hasValidSlug && !showPlaceholder) return null;
+  if (typeof window === 'undefined') return null;
+  const urlSlug = hasValidSlug ? encodeURIComponent(slug) : TASK_URL_PLACEHOLDER;
+  return `${window.location.origin}/webhooks/${encodeURIComponent(instanceId)}/${urlSlug}`;
 }
 
 // ─── List page ────────────────────────────────────────────────────
@@ -330,13 +339,26 @@ function TaskForm({ instanceId, taskName }) {
     return <div className="muted">loading…</div>;
   }
 
-  const fullUrl = webhookUrlFor(instanceId, editing ? taskName : name);
+  const activeSlug = editing ? taskName : name;
+  const urlReady = validTaskSlug(activeSlug);
+  const fullUrl = webhookUrlFor(instanceId, activeSlug, { showPlaceholder: true });
 
   return (
     <div className="edit-stack">
       <form id="task-form" onSubmit={submit} className="form page-form">
         <section className="page-section">
-          <h2 className="section-title">identity</h2>
+          <h2 className="section-title">provider setup</h2>
+          {fullUrl ? (
+            <label className={`field task-provider-url ${urlReady ? '' : 'pending'}`}>
+              <span>provider URL</span>
+              <UrlField value={fullUrl} disabled={!urlReady}/>
+              <small className="muted">
+                {urlReady
+                  ? 'Copy this into the provider, then paste the secret it gives you below.'
+                  : 'Enter a URL-safe task name below to unlock copy.'}
+              </small>
+            </label>
+          ) : null}
           <label className="field">
             <span>name</span>
             <input
@@ -351,42 +373,10 @@ function TaskForm({ instanceId, taskName }) {
               title="lowercase letters, digits, hyphens or underscores; max 64"
             />
             <small className="muted">
-              URL-safe slug.  Lowercase ASCII letters, digits, hyphens, underscores.
+              This becomes the final segment of the provider URL.  Lowercase ASCII letters, digits, hyphens, underscores.
               {editing ? ' (immutable on edit)' : ''}
             </small>
           </label>
-          {fullUrl ? (
-            <label className="field">
-              <span>url</span>
-              <UrlField value={fullUrl}/>
-              {!editing ? (
-                <small className="muted">
-                  Give this to the provider now, then paste the secret it gives you below before creating the task.
-                </small>
-              ) : null}
-            </label>
-          ) : null}
-          <label className="field">
-            <span>instructions</span>
-            <textarea
-              className="textarea"
-              value={description}
-              onChange={e => setDescription(e.target.value)}
-              placeholder="Triage GitHub issues opened in foo/bar — read the body, label spam, ping me on real reports."
-              rows={5}
-              disabled={submitting}
-            />
-            <small className="muted">
-              Prepended to every fired webhook's prompt.  Tell the agent what to do
-              with the payload that arrives.
-            </small>
-          </label>
-          {description.trim() ? (
-            <section className="task-instructions-preview" aria-label="instructions preview">
-              <div className="muted small">preview</div>
-              <TaskMarkdown markdown={description}/>
-            </section>
-          ) : null}
         </section>
 
         <section className="page-section">
@@ -442,6 +432,31 @@ function TaskForm({ instanceId, taskName }) {
         </section>
 
         <section className="page-section">
+          <h2 className="section-title">instructions</h2>
+          <label className="field">
+            <span>instructions</span>
+            <textarea
+              className="textarea"
+              value={description}
+              onChange={e => setDescription(e.target.value)}
+              placeholder="Triage GitHub issues opened in foo/bar — read the body, label spam, ping me on real reports."
+              rows={5}
+              disabled={submitting}
+            />
+            <small className="muted">
+              Prepended to every fired webhook's prompt.  Tell the agent what to do
+              with the payload that arrives.
+            </small>
+          </label>
+          {description.trim() ? (
+            <section className="task-instructions-preview" aria-label="instructions preview">
+              <div className="muted small">preview</div>
+              <TaskMarkdown markdown={description}/>
+            </section>
+          ) : null}
+        </section>
+
+        <section className="page-section">
           <h2 className="section-title">availability</h2>
           <label className="field check">
             <input
@@ -491,10 +506,11 @@ const TaskMarkdown = React.memo(function TaskMarkdown({ markdown }) {
   );
 });
 
-function UrlField({ value }) {
+function UrlField({ value, disabled = false }) {
   const [copied, setCopied] = React.useState(false);
   const copy = async (e) => {
     e.preventDefault();
+    if (disabled) return;
     try {
       await navigator.clipboard.writeText(value);
       setCopied(true);
@@ -503,9 +519,9 @@ function UrlField({ value }) {
   };
   return (
     <div className="task-url-field">
-      <input aria-label="url" value={value} readOnly className="mono-sm"/>
-      <button type="button" className="btn btn-ghost btn-sm" onClick={copy}>
-        {copied ? 'copied!' : 'copy'}
+      <input aria-label="url" value={value} readOnly className="mono-sm" aria-invalid={disabled ? 'true' : undefined}/>
+      <button type="button" className="btn btn-ghost btn-sm" onClick={copy} disabled={disabled}>
+        {disabled ? 'name first' : (copied ? 'copied!' : 'copy')}
       </button>
     </div>
   );

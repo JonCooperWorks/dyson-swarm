@@ -12,7 +12,20 @@
 import React from 'react';
 import { useApi } from '../hooks/useApi.jsx';
 
-export function AdminView() {
+const DOCKER_CATALOG_TEMPLATE_PLACEHOLDER = JSON.stringify({
+  servers: {
+    example: {
+      type: 'stdio',
+      command: 'docker',
+      args: ['run', '--rm', '-i', 'ghcr.io/example/mcp:latest'],
+    },
+  },
+}, null, 2);
+
+const CREDENTIAL_TOKEN_RE = /{{\s*credentials?\.([A-Za-z0-9_-]+)\s*}}/g;
+const SAFE_PLACEHOLDER_NAME_RE = /^[A-Za-z0-9_-]+$/;
+
+export function AdminView({ view = { name: 'admin' } }) {
   const { client } = useApi();
   const [authz, setAuthz] = React.useState({ state: 'probing' }); // probing | ok | denied | error
 
@@ -46,6 +59,13 @@ export function AdminView() {
     );
   }
 
+  if (view.name === 'admin-mcp-catalog-new') {
+    return <DockerCatalogEditorPage client={client} mode="new"/>;
+  }
+  if (view.name === 'admin-mcp-catalog-edit') {
+    return <DockerCatalogEditorPage client={client} mode="edit" catalogId={view.catalogId}/>;
+  }
+
   return (
     <main className="admin-pane">
       <header className="admin-header">
@@ -77,7 +97,6 @@ function DockerCatalogPanel({ client }) {
   const [rows, setRows] = React.useState(null);
   const [busy, setBusy] = React.useState(false);
   const [err, setErr] = React.useState(null);
-  const [editing, setEditing] = React.useState(null);
 
   const refresh = React.useCallback(async () => {
     setErr(null);
@@ -90,24 +109,6 @@ function DockerCatalogPanel({ client }) {
   }, [client]);
 
   React.useEffect(() => { refresh(); }, [refresh]);
-
-  const save = async (preset) => {
-    setBusy(true); setErr(null);
-    try {
-      await client.adminPutMcpDockerCatalogServer(preset.id, {
-        label: preset.label,
-        description: preset.description,
-        template: preset.template,
-        credentials: preset.credentials,
-      });
-      setEditing(null);
-      await refresh();
-    } catch (e) {
-      setErr(e?.detail || e?.message || 'save Docker MCP preset failed');
-    } finally {
-      setBusy(false);
-    }
-  };
 
   const remove = async (row) => {
     if (!confirm(`delete Docker MCP preset ${row.id}?`)) return;
@@ -127,13 +128,9 @@ function DockerCatalogPanel({ client }) {
       <div className="panel-header">
         <div className="panel-title">docker mcp presets</div>
         <div className="panel-actions">
-          <button
-            className="btn btn-sm"
-            onClick={() => setEditing({ mode: 'new', row: emptyDockerCatalogPreset() })}
-            disabled={busy}
-          >
+          <a className={`btn btn-sm ${busy ? 'disabled' : ''}`} href="#/admin/mcp-catalog/new">
             add preset
-          </button>
+          </a>
           <button className="btn btn-ghost btn-sm" onClick={refresh} disabled={busy}>
             refresh
           </button>
@@ -167,13 +164,12 @@ function DockerCatalogPanel({ client }) {
                 </td>
                 <td data-label="updated" className="muted small">{fmtTime(row.updated_at)}</td>
                 <td className="row-actions">
-                  <button
-                    className="btn btn-ghost btn-sm"
-                    onClick={() => setEditing({ mode: 'edit', row })}
-                    disabled={busy}
+                  <a
+                    className={`btn btn-ghost btn-sm ${busy ? 'disabled' : ''}`}
+                    href={`#/admin/mcp-catalog/${encodeURIComponent(row.id)}`}
                   >
                     edit
-                  </button>
+                  </a>
                   <button
                     className="btn btn-ghost btn-sm"
                     onClick={() => remove(row)}
@@ -187,15 +183,6 @@ function DockerCatalogPanel({ client }) {
           </tbody>
         </table>
       )}
-      {editing ? (
-        <DockerCatalogModal
-          mode={editing.mode}
-          initial={editing.row}
-          busy={busy}
-          onCancel={() => setEditing(null)}
-          onSave={save}
-        />
-      ) : null}
     </section>
   );
 }
@@ -205,77 +192,128 @@ function emptyDockerCatalogPreset() {
     id: '',
     label: '',
     description: '',
-    template: JSON.stringify({
-      servers: {
-        example: {
-          type: 'stdio',
-          command: 'docker',
-          args: ['run', '--rm', '-i', 'ghcr.io/example/mcp:latest'],
-        },
-      },
-    }, null, 2),
+    template: '',
     credentials: [],
   };
 }
 
-function normalizeCredential(field = {}) {
-  return {
-    id: field.id || '',
-    label: field.label || '',
-    description: field.description || '',
-    required: field.required !== false,
-    secret: field.secret !== false,
-    placeholder: field.placeholder || '',
+function DockerCatalogEditorPage({ client, mode, catalogId }) {
+  const isEdit = mode === 'edit';
+  const [initial, setInitial] = React.useState(isEdit ? null : emptyDockerCatalogPreset());
+  const [busy, setBusy] = React.useState(false);
+  const [err, setErr] = React.useState(null);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    if (!isEdit) {
+      setInitial(emptyDockerCatalogPreset());
+      return () => { cancelled = true; };
+    }
+    (async () => {
+      setErr(null);
+      try {
+        const body = await client.adminListMcpDockerCatalog();
+        const row = (body?.servers || []).find(server => server.id === catalogId);
+        if (!cancelled) {
+          setInitial(row || null);
+          if (!row) setErr(`No Docker MCP preset named ${catalogId}.`);
+        }
+      } catch (e) {
+        if (!cancelled) setErr(e?.detail || e?.message || 'load Docker MCP preset failed');
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [client, catalogId, isEdit]);
+
+  const save = async (preset) => {
+    setBusy(true); setErr(null);
+    try {
+      await client.adminPutMcpDockerCatalogServer(preset.id, {
+        label: preset.label,
+        description: preset.description,
+        template: preset.template,
+        credentials: preset.credentials,
+      });
+      window.location.hash = '#/admin';
+    } catch (e) {
+      setErr(e?.detail || e?.message || 'save Docker MCP preset failed');
+    } finally {
+      setBusy(false);
+    }
   };
+
+  return (
+    <main className="admin-pane admin-catalog-page">
+      <header className="admin-header">
+        <div>
+          <h2>{isEdit ? `edit ${catalogId}` : 'add Docker MCP preset'}</h2>
+          <p className="muted small admin-catalog-page-subtitle">
+            Configure the read-only MCP JSON template and the credential placeholders users may fill.
+          </p>
+        </div>
+        <a className="btn btn-ghost btn-sm" href="#/admin">back</a>
+      </header>
+      {err ? <div className="error">{err}</div> : null}
+      {!initial && isEdit && !err ? (
+        <p className="muted small">loading...</p>
+      ) : initial ? (
+        <DockerCatalogForm
+          mode={mode}
+          initial={initial}
+          busy={busy}
+          onCancel={() => { window.location.hash = '#/admin'; }}
+          onSave={save}
+        />
+      ) : null}
+    </main>
+  );
 }
 
-function DockerCatalogModal({ mode, initial, busy, onCancel, onSave }) {
+function DockerCatalogForm({ mode, initial, busy, onCancel, onSave }) {
   const isEdit = mode === 'edit';
+  const templateRef = React.useRef(null);
   const [id, setId] = React.useState(initial?.id || '');
   const [label, setLabel] = React.useState(initial?.label || '');
   const [description, setDescription] = React.useState(initial?.description || '');
   const [template, setTemplate] = React.useState(initial?.template || '');
-  const [credentials, setCredentials] = React.useState(
-    () => (initial?.credentials || []).map(normalizeCredential),
-  );
+  const [placeholderName, setPlaceholderName] = React.useState('');
   const [err, setErr] = React.useState(null);
 
-  const updateCredential = (index, patch) => {
-    setCredentials(curr => curr.map((field, i) => (i === index ? { ...field, ...patch } : field)));
-  };
-  const removeCredential = (index) => {
-    setCredentials(curr => curr.filter((_, i) => i !== index));
-  };
-  const addCredential = () => {
-    setCredentials(curr => [
-      ...curr,
-      {
-        id: '',
-        label: '',
-        description: '',
-        required: true,
-        secret: true,
-        placeholder: '',
-      },
-    ]);
+  const placeholders = React.useMemo(() => extractCredentialPlaceholders(template), [template]);
+  const trimmedPlaceholderName = placeholderName.trim();
+  const canInsertPlaceholder = SAFE_PLACEHOLDER_NAME_RE.test(trimmedPlaceholderName);
+
+  const insertPlaceholder = () => {
+    if (!canInsertPlaceholder) {
+      setErr('placeholder name must match [A-Za-z0-9_-]+');
+      return;
+    }
+    setErr(null);
+    const token = `{{credential.${trimmedPlaceholderName}}}`;
+    const textarea = templateRef.current;
+    const start = textarea?.selectionStart ?? template.length;
+    const end = textarea?.selectionEnd ?? template.length;
+    const next = `${template.slice(0, start)}${token}${template.slice(end)}`;
+    setTemplate(next);
+    setPlaceholderName('');
+    const schedule = window.requestAnimationFrame || ((fn) => setTimeout(fn, 0));
+    schedule(() => {
+      textarea?.focus();
+      const pos = start + token.length;
+      textarea?.setSelectionRange(pos, pos);
+    });
   };
 
   const submit = (e) => {
     e.preventDefault();
     setErr(null);
+    const credentials = credentialSpecsFromTemplate(template);
     const preset = {
       id: id.trim(),
       label: label.trim(),
       description: description.trim() || null,
       template,
-      credentials: credentials.map(field => ({
-        id: field.id.trim(),
-        label: field.label.trim() || field.id.trim(),
-        description: field.description.trim() || null,
-        required: Boolean(field.required),
-        secret: Boolean(field.secret),
-        placeholder: field.placeholder.trim() || null,
-      })),
+      credentials,
     };
     const validation = validateCatalogPreset(preset);
     if (validation) {
@@ -286,21 +324,8 @@ function DockerCatalogModal({ mode, initial, busy, onCancel, onSave }) {
   };
 
   return (
-    <div className="modal-scrim" onClick={onCancel}>
-      <div className="modal admin-catalog-modal" onClick={e => e.stopPropagation()}>
-        <div className="modal-header">
-          <span>{isEdit ? `edit ${initial.id}` : 'add Docker MCP preset'}</span>
-          <button
-            type="button"
-            className="btn btn-ghost btn-sm"
-            onClick={onCancel}
-            disabled={busy}
-            aria-label="close"
-          >
-            x
-          </button>
-        </div>
-        <form className="form modal-body" onSubmit={submit}>
+    <section className="panel admin-catalog-form-panel">
+      <form className="form admin-catalog-form" onSubmit={submit}>
           {err ? <div className="error">{err}</div> : null}
           <label className="field">
             <span>id</span>
@@ -325,116 +350,92 @@ function DockerCatalogModal({ mode, initial, busy, onCancel, onSave }) {
           </label>
           <label className="field">
             <span>description</span>
-            <input
+            <textarea
+              className="textarea admin-catalog-description"
               value={description}
               onChange={e => setDescription(e.target.value)}
               placeholder="Docker-backed GitHub MCP server"
               disabled={busy}
+              rows={4}
               autoComplete="off"
             />
           </label>
-          <label className="field">
-            <span>JSON template</span>
-            <textarea
-              className="mcp-json-textarea admin-catalog-template"
-              value={template}
-              onChange={e => setTemplate(e.target.value)}
-              spellCheck={false}
-              disabled={busy}
-              aria-label="Docker MCP JSON template"
-            />
-          </label>
-          <div className="admin-catalog-placeholders">
-            <div className="panel-header">
-              <div className="panel-title">placeholders</div>
-              <div className="panel-actions">
-                <button type="button" className="btn btn-ghost btn-sm" onClick={addCredential} disabled={busy}>
-                  add placeholder
+          <div className="admin-catalog-payload">
+            <label className="field admin-catalog-template-field">
+              <span>JSON template</span>
+              <textarea
+                ref={templateRef}
+                className="mcp-json-textarea admin-catalog-template"
+                value={template}
+                placeholder={DOCKER_CATALOG_TEMPLATE_PLACEHOLDER}
+                onChange={e => setTemplate(e.target.value)}
+                spellCheck={false}
+                disabled={busy}
+                aria-label="Docker MCP JSON template"
+              />
+            </label>
+            <div className="admin-catalog-token-workbench">
+              <div className="mcp-card-head">
+                <div className="mcp-card-title">
+                  <code className="mcp-card-name">payload placeholders</code>
+                  <span className="mcp-auth-pill mcp-auth-docker">docker</span>
+                </div>
+              </div>
+              <div className="mcp-card-body">
+                <label className="field admin-catalog-placeholder-name">
+                  <span>placeholder name</span>
+                  <input
+                    value={placeholderName}
+                    onChange={e => setPlaceholderName(e.target.value)}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        insertPlaceholder();
+                      }
+                    }}
+                    placeholder="github_token"
+                    disabled={busy}
+                    autoComplete="off"
+                    aria-label="placeholder name"
+                  />
+                </label>
+                <button
+                  type="button"
+                  className="btn btn-primary admin-catalog-insert-token"
+                  onClick={insertPlaceholder}
+                  disabled={busy || !canInsertPlaceholder}
+                >
+                  insert token
                 </button>
+                {placeholders.length === 0 ? (
+                  <div className="admin-catalog-placeholder-empty">
+                    <p className="muted small">no payload placeholders</p>
+                  </div>
+                ) : (
+                  <div className="admin-catalog-credential-list" aria-label="payload placeholders">
+                    {placeholders.map(name => (
+                      <div className="admin-catalog-credential-row" key={name}>
+                        <div className="admin-catalog-credential-row-head">
+                          <div className="admin-catalog-credential-title">
+                            <span className="muted small">credential field</span>
+                            <code className="mono-sm">{name}</code>
+                          </div>
+                          <button
+                            type="button"
+                            className="btn btn-ghost btn-sm"
+                            onClick={() => setPlaceholderName(name)}
+                            disabled={busy}
+                          >
+                            reuse
+                          </button>
+                        </div>
+                        <code className="admin-catalog-token">{`{{credential.${name}}}`}</code>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
-            {credentials.length === 0 ? (
-              <p className="muted small">no placeholders.</p>
-            ) : (
-              <div className="admin-catalog-credential-list">
-                {credentials.map((field, index) => (
-                  <div className="admin-catalog-credential-row" key={index}>
-                    <label className="field">
-                      <span>id</span>
-                      <input
-                        value={field.id}
-                        onChange={e => updateCredential(index, { id: e.target.value })}
-                        placeholder="github_token"
-                        disabled={busy}
-                        autoComplete="off"
-                        aria-label={`placeholder ${index + 1} id`}
-                      />
-                    </label>
-                    <label className="field">
-                      <span>label</span>
-                      <input
-                        value={field.label}
-                        onChange={e => updateCredential(index, { label: e.target.value })}
-                        placeholder="GitHub token"
-                        disabled={busy}
-                        autoComplete="off"
-                        aria-label={`placeholder ${index + 1} label`}
-                      />
-                    </label>
-                    <label className="field">
-                      <span>description</span>
-                      <input
-                        value={field.description}
-                        onChange={e => updateCredential(index, { description: e.target.value })}
-                        placeholder="Personal access token"
-                        disabled={busy}
-                        autoComplete="off"
-                        aria-label={`placeholder ${index + 1} description`}
-                      />
-                    </label>
-                    <label className="field">
-                      <span>placeholder</span>
-                      <input
-                        value={field.placeholder}
-                        onChange={e => updateCredential(index, { placeholder: e.target.value })}
-                        placeholder="ghp_..."
-                        disabled={busy}
-                        autoComplete="off"
-                        aria-label={`placeholder ${index + 1} input placeholder`}
-                      />
-                    </label>
-                    <div className="admin-catalog-flags">
-                      <label className="field check">
-                        <input
-                          type="checkbox"
-                          checked={field.required}
-                          onChange={e => updateCredential(index, { required: e.target.checked })}
-                          disabled={busy}
-                        />
-                        <span>required</span>
-                      </label>
-                      <label className="field check">
-                        <input
-                          type="checkbox"
-                          checked={field.secret}
-                          onChange={e => updateCredential(index, { secret: e.target.checked })}
-                          disabled={busy}
-                        />
-                        <span>secret</span>
-                      </label>
-                      <button
-                        type="button"
-                        className="btn btn-ghost btn-sm"
-                        onClick={() => removeCredential(index)}
-                        disabled={busy}
-                      >
-                        remove
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
           </div>
           <div className="modal-actions">
             <button type="button" className="btn btn-ghost" onClick={onCancel} disabled={busy}>
@@ -445,8 +446,7 @@ function DockerCatalogModal({ mode, initial, busy, onCancel, onSave }) {
             </button>
           </div>
         </form>
-      </div>
-    </div>
+    </section>
   );
 }
 
@@ -461,12 +461,35 @@ function validateCatalogPreset(preset) {
   }
   const seen = new Set();
   for (const field of preset.credentials) {
-    if (!/^[A-Za-z0-9_-]+$/.test(field.id)) return 'placeholder ids must match [A-Za-z0-9_-]+';
+    if (!SAFE_PLACEHOLDER_NAME_RE.test(field.id)) return 'placeholder ids must match [A-Za-z0-9_-]+';
     if (seen.has(field.id)) return `placeholder ${field.id} is duplicated`;
     seen.add(field.id);
-    if (!field.label) return `placeholder ${field.id} needs a label`;
   }
   return null;
+}
+
+function extractCredentialPlaceholders(template) {
+  const seen = new Set();
+  const names = [];
+  for (const match of template.matchAll(CREDENTIAL_TOKEN_RE)) {
+    const name = match[1];
+    if (!seen.has(name)) {
+      seen.add(name);
+      names.push(name);
+    }
+  }
+  return names;
+}
+
+function credentialSpecsFromTemplate(template) {
+  return extractCredentialPlaceholders(template).map(name => ({
+    id: name,
+    label: name,
+    description: null,
+    required: true,
+    secret: true,
+    placeholder: null,
+  }));
 }
 
 // ─── Users panel ─────────────────────────────────────────────────

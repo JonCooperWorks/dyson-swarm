@@ -21,7 +21,7 @@ export function TopBar({ view }) {
   // "not authorized" splash when the probe 401/403s — so showing the
   // link for non-admins lands them on a clear message rather than
   // hiding the navigation surface entirely.
-  const onAdminRoute = view?.name === 'admin';
+  const onAdminRoute = view?.name === 'admin' || String(view?.name || '').startsWith('admin-');
   const onByokRoute = view?.name === 'byok';
   const onArtefactsRoute = view?.name === 'artefacts';
   const onInstancesRoute = !onAdminRoute && !onByokRoute && !onArtefactsRoute;

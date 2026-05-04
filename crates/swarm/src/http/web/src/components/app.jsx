@@ -57,7 +57,9 @@ function renderView(view) {
     case 'artefacts':
       return <MyArtefactsPage/>;
     case 'admin':
-      return <AdminView/>;
+    case 'admin-mcp-catalog-new':
+    case 'admin-mcp-catalog-edit':
+      return <AdminView view={view}/>;
     case 'byok':
       return <ByokView/>;
     default:

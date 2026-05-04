@@ -6,10 +6,43 @@ import '@testing-library/jest-dom/vitest';
 import { ApiProvider } from '../hooks/useApi.jsx';
 import { AdminView } from './admin.jsx';
 
-afterEach(() => { cleanup(); });
+afterEach(() => {
+  cleanup();
+  window.location.hash = '';
+});
 
 describe('AdminView Docker MCP catalog', () => {
-  test('adds an admin Docker MCP preset with credential placeholders', async () => {
+  test('links add and edit actions to dedicated catalog pages', async () => {
+    const client = {
+      adminListUsers: vi.fn().mockResolvedValue([]),
+      adminListMcpDockerCatalog: vi.fn().mockResolvedValue({
+        allow_raw_json: false,
+        servers: [{
+          id: 'github',
+          label: 'GitHub',
+          template: '{"servers":{}}',
+          credentials: [],
+          source: 'admin',
+          created_at: 1,
+          updated_at: 2,
+        }],
+      }),
+      adminDeleteMcpDockerCatalogServer: vi.fn(),
+    };
+
+    render(
+      <ApiProvider client={client} auth={{ mode: 'none' }}>
+        <AdminView/>
+      </ApiProvider>,
+    );
+
+    expect(await screen.findByRole('link', { name: 'add preset' }))
+      .toHaveAttribute('href', '#/admin/mcp-catalog/new');
+    expect(await screen.findByRole('link', { name: 'edit' }))
+      .toHaveAttribute('href', '#/admin/mcp-catalog/github');
+  });
+
+  test('adds an admin Docker MCP preset with credential placeholders on the full page', async () => {
     let rows = [];
     const client = {
       adminListUsers: vi.fn().mockResolvedValue([]),
@@ -30,41 +63,41 @@ describe('AdminView Docker MCP catalog', () => {
 
     render(
       <ApiProvider client={client} auth={{ mode: 'none' }}>
-        <AdminView/>
+        <AdminView view={{ name: 'admin-mcp-catalog-new' }}/>
       </ApiProvider>,
     );
 
-    await screen.findByText('no Docker MCP presets.');
-    fireEvent.click(screen.getByRole('button', { name: 'add preset' }));
-    fireEvent.change(screen.getByLabelText('Docker MCP JSON template'), {
-      target: {
-        value: JSON.stringify({
-          servers: {
-            github: {
-              type: 'stdio',
-              command: 'docker',
-              args: ['run', '--rm', '-i', '-e', 'GITHUB_TOKEN', 'ghcr.io/example/github-mcp'],
-              env: { GITHUB_TOKEN: '{{credential.github_token}}' },
-            },
-          },
-        }),
+    const template = await screen.findByLabelText('Docker MCP JSON template');
+    expect(template).toHaveValue('');
+    expect(template.getAttribute('placeholder')).toContain('"servers"');
+    const baseTemplate = JSON.stringify({
+      servers: {
+        github: {
+          type: 'stdio',
+          command: 'docker',
+          args: ['run', '--rm', '-i', '-e', 'GITHUB_TOKEN', 'ghcr.io/example/github-mcp'],
+          env: { GITHUB_TOKEN: '' },
+        },
       },
     });
+    fireEvent.change(template, {
+      target: {
+        value: baseTemplate,
+      },
+    });
+    const insertionPoint = baseTemplate.indexOf('""') + 1;
+    template.setSelectionRange(insertionPoint, insertionPoint);
     fireEvent.change(screen.getByLabelText('id'), { target: { value: 'github' } });
     fireEvent.change(screen.getByLabelText('label'), { target: { value: 'GitHub' } });
     fireEvent.change(screen.getByLabelText('description'), {
       target: { value: 'GitHub MCP tools' },
     });
-    fireEvent.click(screen.getByRole('button', { name: 'add placeholder' }));
-    fireEvent.change(screen.getByLabelText('placeholder 1 id'), {
+    fireEvent.change(screen.getByLabelText('placeholder name'), {
       target: { value: 'github_token' },
     });
-    fireEvent.change(screen.getByLabelText('placeholder 1 label'), {
-      target: { value: 'GitHub token' },
-    });
-    fireEvent.change(screen.getByLabelText('placeholder 1 input placeholder'), {
-      target: { value: 'ghp_...' },
-    });
+    fireEvent.click(screen.getByRole('button', { name: 'insert token' }));
+    await waitFor(() => expect(template.value).toContain('{{credential.github_token}}'));
+    expect(screen.getByText('github_token')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'save' }));
 
     await waitFor(() => expect(client.adminPutMcpDockerCatalogServer).toHaveBeenCalledTimes(1));
@@ -74,13 +107,13 @@ describe('AdminView Docker MCP catalog', () => {
       template: expect.stringContaining('{{credential.github_token}}'),
       credentials: [{
         id: 'github_token',
-        label: 'GitHub token',
+        label: 'github_token',
         description: null,
         required: true,
         secret: true,
-        placeholder: 'ghp_...',
+        placeholder: null,
       }],
     });
-    await screen.findByText('GitHub');
+    expect(window.location.hash).toBe('#/admin');
   });
 });

@@ -252,6 +252,17 @@ export function parseHashView() {
   const m = h.match(/^#\/i\/([^/?#]+)/);
   if (m) return { name: 'instance', id: decodeURIComponent(m[1]) };
   if (h.startsWith('#/new')) return { name: 'instance-new', id: null };
+  if (h.startsWith('#/admin/mcp-catalog/new')) {
+    return { name: 'admin-mcp-catalog-new', id: null };
+  }
+  const adminCatalogEdit = h.match(/^#\/admin\/mcp-catalog\/([^/?#]+)/);
+  if (adminCatalogEdit) {
+    return {
+      name: 'admin-mcp-catalog-edit',
+      id: null,
+      catalogId: decodeURIComponent(adminCatalogEdit[1]),
+    };
+  }
   if (h.startsWith('#/admin')) return { name: 'admin', id: null };
   if (h.startsWith('#/keys')) return { name: 'byok', id: null };
   if (h.startsWith('#/artefacts')) return { name: 'artefacts', id: null };

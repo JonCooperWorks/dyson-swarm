@@ -15,6 +15,9 @@ use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{Mutex, oneshot};
 use tokio::task::JoinHandle;
 
+const DOCKER_INSTANCE_LABEL: &str = "dyson.mcp.instance";
+const DOCKER_SERVER_LABEL: &str = "dyson.mcp.server";
+
 #[derive(Debug, Parser)]
 #[command(name = "dyson-mcp-runtime")]
 struct Args {
@@ -38,7 +41,6 @@ struct ForwardRequest {
 #[serde(tag = "kind")]
 enum TransportSpec {
     DockerStdio {
-        command: String,
         args: Vec<String>,
         #[serde(default)]
         env: HashMap<String, String>,
@@ -53,46 +55,21 @@ enum TransportSpec {
 }
 
 #[derive(Deserialize)]
-struct RawForwardRequest {
-    instance_id: String,
-    server_name: String,
-    #[serde(default)]
-    transport: Option<TransportSpec>,
-    #[serde(default)]
-    command: Option<String>,
-    #[serde(default)]
-    args: Vec<String>,
-    #[serde(default)]
-    env: HashMap<String, String>,
-    request_json: String,
-}
-
-impl<'de> Deserialize<'de> for ForwardRequest {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let raw = RawForwardRequest::deserialize(deserializer)?;
-        let transport = match raw.transport {
-            Some(transport) => transport,
-            None => match raw.command {
-                Some(command) => TransportSpec::DockerStdio {
-                    command,
-                    args: raw.args,
-                    env: raw.env,
-                },
-                None => {
-                    return Err(serde::de::Error::missing_field("transport"));
-                }
-            },
-        };
-        Ok(Self {
-            instance_id: raw.instance_id,
-            server_name: raw.server_name,
-            transport,
-            request_json: raw.request_json,
-        })
-    }
+#[serde(tag = "op", rename_all = "snake_case")]
+enum RuntimeRequest {
+    Forward {
+        instance_id: String,
+        server_name: String,
+        transport: TransportSpec,
+        request_json: String,
+    },
+    StopServer {
+        instance_id: String,
+        server_name: String,
+    },
+    StopInstance {
+        instance_id: String,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -107,6 +84,7 @@ struct Runtime {
     sessions: Mutex<HashMap<String, Arc<RuntimeSession>>>,
     spawn_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     idle_after: Duration,
+    docker: Arc<dyn DockerController>,
 }
 
 struct RuntimeSession {
@@ -123,6 +101,81 @@ trait McpSession {
     ) -> Result<Option<String>, String>;
     async fn shutdown(&self);
     fn fingerprint(&self) -> &str;
+}
+
+#[async_trait]
+trait DockerController: Send + Sync {
+    fn command(&self) -> &str;
+    async fn cleanup_server(&self, instance_id: &str, server_name: &str) -> Result<usize, String>;
+    async fn cleanup_instance(&self, instance_id: &str) -> Result<usize, String>;
+}
+
+#[derive(Debug)]
+struct CliDockerController {
+    command: String,
+}
+
+#[async_trait]
+impl DockerController for CliDockerController {
+    fn command(&self) -> &str {
+        &self.command
+    }
+
+    async fn cleanup_server(&self, instance_id: &str, server_name: &str) -> Result<usize, String> {
+        self.cleanup_by_labels(&[
+            (DOCKER_INSTANCE_LABEL, instance_id),
+            (DOCKER_SERVER_LABEL, server_name),
+        ])
+        .await
+    }
+
+    async fn cleanup_instance(&self, instance_id: &str) -> Result<usize, String> {
+        self.cleanup_by_labels(&[(DOCKER_INSTANCE_LABEL, instance_id)])
+            .await
+    }
+}
+
+impl CliDockerController {
+    async fn cleanup_by_labels(&self, labels: &[(&str, &str)]) -> Result<usize, String> {
+        let mut ps = Command::new(&self.command);
+        ps.args(["ps", "-aq"]);
+        for (key, value) in labels {
+            ps.arg("--filter").arg(format!("label={key}={value}"));
+        }
+        let output = tokio::time::timeout(Duration::from_secs(10), ps.output())
+            .await
+            .map_err(|_| "docker ps timed out".to_string())?
+            .map_err(|e| format!("docker ps: {e}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "docker ps failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        let ids: Vec<&str> = std::str::from_utf8(&output.stdout)
+            .map_err(|e| format!("docker ps utf8: {e}"))?
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect();
+        if ids.is_empty() {
+            return Ok(0);
+        }
+
+        let mut rm = Command::new(&self.command);
+        rm.args(["rm", "-f"]).args(ids.iter().copied());
+        let output = tokio::time::timeout(Duration::from_secs(20), rm.output())
+            .await
+            .map_err(|_| "docker rm timed out".to_string())?
+            .map_err(|e| format!("docker rm: {e}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "docker rm failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        Ok(ids.len())
+    }
 }
 
 struct DockerStdioSession {
@@ -147,10 +200,20 @@ struct HttpStreamableSession {
 
 impl Runtime {
     fn new(idle_after: Duration) -> Arc<Self> {
+        Self::with_docker(
+            idle_after,
+            Arc::new(CliDockerController {
+                command: "docker".to_string(),
+            }),
+        )
+    }
+
+    fn with_docker(idle_after: Duration, docker: Arc<dyn DockerController>) -> Arc<Self> {
         Arc::new(Self {
             sessions: Mutex::new(HashMap::new()),
             spawn_locks: Mutex::new(HashMap::new()),
             idle_after,
+            docker,
         })
     }
 
@@ -167,7 +230,7 @@ impl Runtime {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
         let id_key = value.get("id").map(|id| id.to_string());
-        let session_key = format!("{}:{}", req.instance_id, req.server_name);
+        let session_key = session_key(&req.instance_id, &req.server_name);
 
         if method == "initialize" {
             self.stop_session(&session_key).await;
@@ -226,9 +289,22 @@ impl Runtime {
         };
         if let Some(session) = stale {
             session.session.shutdown().await;
+            if matches!(req.transport, TransportSpec::DockerStdio { .. })
+                && let Err(err) = self
+                    .docker
+                    .cleanup_server(&req.instance_id, &req.server_name)
+                    .await
+            {
+                tracing::warn!(
+                    error = %err,
+                    instance = %req.instance_id,
+                    server = %req.server_name,
+                    "mcp runtime: stale docker cleanup failed"
+                );
+            }
         }
         let session = Arc::new(RuntimeSession {
-            session: spawn_session(req, wanted)?,
+            session: spawn_session(req, wanted, Arc::clone(&self.docker))?,
             last_used: Arc::new(Mutex::new(Instant::now())),
         });
         self.sessions
@@ -238,11 +314,66 @@ impl Runtime {
         Ok(session)
     }
 
-    async fn stop_session(&self, key: &str) {
+    async fn stop_session(&self, key: &str) -> bool {
         let Some(session) = self.sessions.lock().await.remove(key) else {
-            return;
+            return false;
         };
         session.session.shutdown().await;
+        true
+    }
+
+    async fn stop_server(&self, instance_id: &str, server_name: &str) -> RuntimeStopResult {
+        let stopped_sessions = usize::from(
+            self.stop_session(&session_key(instance_id, server_name))
+                .await,
+        );
+        let removed_containers = match self.docker.cleanup_server(instance_id, server_name).await {
+            Ok(n) => n,
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    instance = %instance_id,
+                    server = %server_name,
+                    "mcp runtime: docker server cleanup failed"
+                );
+                0
+            }
+        };
+        RuntimeStopResult {
+            stopped_sessions,
+            removed_containers,
+        }
+    }
+
+    async fn stop_instance(&self, instance_id: &str) -> RuntimeStopResult {
+        let prefix = format!("{instance_id}:");
+        let keys: Vec<String> = self
+            .sessions
+            .lock()
+            .await
+            .keys()
+            .filter(|key| key.starts_with(&prefix))
+            .cloned()
+            .collect();
+        let mut stopped_sessions = 0usize;
+        for key in keys {
+            stopped_sessions += usize::from(self.stop_session(&key).await);
+        }
+        let removed_containers = match self.docker.cleanup_instance(instance_id).await {
+            Ok(n) => n,
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    instance = %instance_id,
+                    "mcp runtime: docker instance cleanup failed"
+                );
+                0
+            }
+        };
+        RuntimeStopResult {
+            stopped_sessions,
+            removed_containers,
+        }
     }
 
     async fn reap_idle(self: Arc<Self>) {
@@ -259,7 +390,11 @@ impl Runtime {
             for (key, session) in snapshot {
                 if session.last_used.lock().await.elapsed() >= self.idle_after {
                     tracing::debug!(session = %key, "reaping idle MCP runtime session");
-                    self.stop_session(&key).await;
+                    if let Some((instance_id, server_name)) = key.split_once(':') {
+                        self.stop_server(instance_id, server_name).await;
+                    } else {
+                        self.stop_session(&key).await;
+                    }
                 }
             }
         }
@@ -269,18 +404,17 @@ impl Runtime {
 fn spawn_session(
     req: &ForwardRequest,
     fingerprint: String,
+    docker: Arc<dyn DockerController>,
 ) -> Result<Arc<dyn McpSession + Send + Sync>, String> {
     match &req.transport {
-        TransportSpec::DockerStdio { command, args, env } => {
-            Ok(Arc::new(DockerStdioSession::spawn(
-                command,
-                args,
-                env,
-                &req.instance_id,
-                &req.server_name,
-                fingerprint,
-            )?))
-        }
+        TransportSpec::DockerStdio { args, env } => Ok(Arc::new(DockerStdioSession::spawn(
+            docker,
+            args,
+            env,
+            &req.instance_id,
+            &req.server_name,
+            fingerprint,
+        )?)),
         TransportSpec::HttpStreamable {
             url,
             headers,
@@ -294,9 +428,19 @@ fn spawn_session(
     }
 }
 
+fn session_key(instance_id: &str, server_name: &str) -> String {
+    format!("{instance_id}:{server_name}")
+}
+
+#[derive(Debug, Serialize)]
+struct RuntimeStopResult {
+    stopped_sessions: usize,
+    removed_containers: usize,
+}
+
 impl DockerStdioSession {
     fn spawn(
-        command: &str,
+        docker: Arc<dyn DockerController>,
         user_args: &[String],
         env: &HashMap<String, String>,
         instance_id: &str,
@@ -304,7 +448,7 @@ impl DockerStdioSession {
         fingerprint: String,
     ) -> Result<Self, String> {
         let args = docker_run_args(user_args, instance_id, server_name);
-        let mut child = Command::new(command)
+        let mut child = Command::new(docker.command())
             .args(args)
             .envs(env)
             .stdin(Stdio::piped())
@@ -561,10 +705,7 @@ impl McpSession for HttpStreamableSession {
 
 fn validate_transport(transport: &TransportSpec) -> Result<(), String> {
     match transport {
-        TransportSpec::DockerStdio { command, args, .. } => {
-            if command != "docker" {
-                return Err("only `command: \"docker\"` is supported".into());
-            }
+        TransportSpec::DockerStdio { args, .. } => {
             dyson_swarm_core::mcp_servers::validate_docker_stdio_args(args)
         }
         TransportSpec::HttpStreamable {
@@ -609,11 +750,10 @@ fn url_is_loopback(url: &reqwest::Url) -> bool {
 
 fn session_fingerprint(transport: &TransportSpec) -> String {
     match transport {
-        TransportSpec::DockerStdio { command, args, env } => {
+        TransportSpec::DockerStdio { args, env } => {
             let env: BTreeMap<&String, &String> = env.iter().collect();
             serde_json::json!({
                 "kind": "DockerStdio",
-                "command": command,
                 "args": args,
                 "env": env,
             })
@@ -722,9 +862,9 @@ fn docker_run_args(user_args: &[String], instance_id: &str, server_name: &str) -
         "--cpus=1".to_string(),
         "--pids-limit=256".to_string(),
         "--label".to_string(),
-        format!("dyson.mcp.instance={instance_id}"),
+        format!("{DOCKER_INSTANCE_LABEL}={instance_id}"),
         "--label".to_string(),
-        format!("dyson.mcp.server={server_name}"),
+        format!("{DOCKER_SERVER_LABEL}={server_name}"),
     ];
     out.extend(sanitized_docker_user_args(user_args));
     out
@@ -803,8 +943,29 @@ async fn handle_connection(runtime: Arc<Runtime>, stream: UnixStream) {
     let mut line = String::new();
     let response = match reader.read_line(&mut line).await {
         Ok(0) => err(400, "empty request"),
-        Ok(_) => match serde_json::from_str::<ForwardRequest>(&line) {
-            Ok(req) => runtime.forward(req).await,
+        Ok(_) => match serde_json::from_str::<RuntimeRequest>(&line) {
+            Ok(RuntimeRequest::Forward {
+                instance_id,
+                server_name,
+                transport,
+                request_json,
+            }) => {
+                runtime
+                    .forward(ForwardRequest {
+                        instance_id,
+                        server_name,
+                        transport,
+                        request_json,
+                    })
+                    .await
+            }
+            Ok(RuntimeRequest::StopServer {
+                instance_id,
+                server_name,
+            }) => stop_response(runtime.stop_server(&instance_id, &server_name).await),
+            Ok(RuntimeRequest::StopInstance { instance_id }) => {
+                stop_response(runtime.stop_instance(&instance_id).await)
+            }
             Err(e) => err(400, &format!("invalid request: {e}")),
         },
         Err(e) => err(400, &format!("read request: {e}")),
@@ -817,6 +978,21 @@ async fn handle_connection(runtime: Arc<Runtime>, stream: UnixStream) {
     }
 }
 
+fn stop_response(result: RuntimeStopResult) -> ForwardResponse {
+    match serde_json::to_string(&serde_json::json!({
+        "ok": true,
+        "stopped_sessions": result.stopped_sessions,
+        "removed_containers": result.removed_containers,
+    })) {
+        Ok(body) => ForwardResponse {
+            status: 200,
+            content_type: Some("application/json"),
+            body,
+        },
+        Err(e) => err(500, &format!("encode stop response: {e}")),
+    }
+}
+
 #[cfg(unix)]
 fn set_socket_mode(path: &PathBuf) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -826,6 +1002,81 @@ fn set_socket_mode(path: &PathBuf) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Default)]
+    struct MockDocker {
+        server_cleanups: Mutex<Vec<(String, String)>>,
+        instance_cleanups: Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl DockerController for MockDocker {
+        fn command(&self) -> &str {
+            "docker"
+        }
+
+        async fn cleanup_server(
+            &self,
+            instance_id: &str,
+            server_name: &str,
+        ) -> Result<usize, String> {
+            self.server_cleanups
+                .lock()
+                .await
+                .push((instance_id.to_string(), server_name.to_string()));
+            Ok(3)
+        }
+
+        async fn cleanup_instance(&self, instance_id: &str) -> Result<usize, String> {
+            self.instance_cleanups
+                .lock()
+                .await
+                .push(instance_id.to_string());
+            Ok(5)
+        }
+    }
+
+    struct StubSession {
+        fingerprint: String,
+        shutdowns: Arc<Mutex<usize>>,
+    }
+
+    #[async_trait]
+    impl McpSession for StubSession {
+        async fn send(
+            &self,
+            _request_json: String,
+            _id_key: Option<String>,
+        ) -> Result<Option<String>, String> {
+            Ok(None)
+        }
+
+        async fn shutdown(&self) {
+            *self.shutdowns.lock().await += 1;
+        }
+
+        fn fingerprint(&self) -> &str {
+            &self.fingerprint
+        }
+    }
+
+    async fn insert_stub_session(
+        runtime: &Runtime,
+        instance_id: &str,
+        server_name: &str,
+        shutdowns: Arc<Mutex<usize>>,
+    ) {
+        runtime.sessions.lock().await.insert(
+            session_key(instance_id, server_name),
+            Arc::new(RuntimeSession {
+                session: Arc::new(StubSession {
+                    fingerprint: "stub".into(),
+                    shutdowns,
+                }),
+                last_used: Arc::new(Mutex::new(Instant::now())),
+            }),
+        );
+    }
 
     #[tokio::test]
     #[ignore = "requires Docker and pulls python:3.12-alpine"]
@@ -866,7 +1117,6 @@ for line in sys.stdin:
             instance_id: "itest".into(),
             server_name: "echo".into(),
             transport: TransportSpec::DockerStdio {
-                command: "docker".into(),
                 args: args.clone(),
                 env: HashMap::new(),
             },
@@ -885,7 +1135,6 @@ for line in sys.stdin:
             instance_id: "itest".into(),
             server_name: "echo".into(),
             transport: TransportSpec::DockerStdio {
-                command: "docker".into(),
                 args,
                 env: HashMap::new(),
             },
@@ -905,22 +1154,67 @@ for line in sys.stdin:
         runtime.stop_session("itest:echo").await;
     }
 
+    #[tokio::test]
+    async fn stop_server_removes_session_and_cleans_docker_labels() {
+        let docker = Arc::new(MockDocker::default());
+        let runtime = Runtime::with_docker(Duration::from_secs(30), docker.clone());
+        let shutdowns = Arc::new(Mutex::new(0usize));
+        insert_stub_session(&runtime, "i-1", "brave", shutdowns.clone()).await;
+
+        let result = runtime.stop_server("i-1", "brave").await;
+
+        assert_eq!(result.stopped_sessions, 1);
+        assert_eq!(result.removed_containers, 3);
+        assert_eq!(*shutdowns.lock().await, 1);
+        assert!(runtime.sessions.lock().await.is_empty());
+        assert_eq!(
+            docker.server_cleanups.lock().await.as_slice(),
+            &[("i-1".to_string(), "brave".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_instance_removes_matching_sessions_and_cleans_instance_label() {
+        let docker = Arc::new(MockDocker::default());
+        let runtime = Runtime::with_docker(Duration::from_secs(30), docker.clone());
+        let shutdowns = Arc::new(Mutex::new(0usize));
+        insert_stub_session(&runtime, "i-1", "brave", shutdowns.clone()).await;
+        insert_stub_session(&runtime, "i-1", "github", shutdowns.clone()).await;
+        insert_stub_session(&runtime, "i-2", "brave", shutdowns.clone()).await;
+
+        let result = runtime.stop_instance("i-1").await;
+
+        assert_eq!(result.stopped_sessions, 2);
+        assert_eq!(result.removed_containers, 5);
+        assert_eq!(*shutdowns.lock().await, 2);
+        assert_eq!(runtime.sessions.lock().await.len(), 1);
+        assert_eq!(
+            docker.instance_cleanups.lock().await.as_slice(),
+            &["i-1".to_string()]
+        );
+    }
+
     #[test]
-    fn transport_spec_deserializes_legacy_fallback() {
-        let req: ForwardRequest = serde_json::from_value(serde_json::json!({
+    fn runtime_request_deserializes_tagged_docker_forward() {
+        let req: RuntimeRequest = serde_json::from_value(serde_json::json!({
+            "op": "forward",
             "instance_id": "i-1",
             "server_name": "echo",
-            "command": "docker",
-            "args": ["run", "example/mcp"],
-            "env": {"B": "2"},
+            "transport": {
+                "kind": "DockerStdio",
+                "args": ["run", "example/mcp"],
+                "env": {"B": "2"}
+            },
             "request_json": serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}).to_string()
         }))
         .unwrap();
 
+        let RuntimeRequest::Forward { transport, .. } = req else {
+            panic!("expected forward request");
+        };
         assert_eq!(
-            req.transport,
+            transport,
             TransportSpec::DockerStdio {
-                command: "docker".into(),
                 args: vec!["run".into(), "example/mcp".into()],
                 env: HashMap::from([("B".into(), "2".into())]),
             }
@@ -929,7 +1223,8 @@ for line in sys.stdin:
 
     #[test]
     fn transport_spec_deserializes_tagged_http() {
-        let req: ForwardRequest = serde_json::from_value(serde_json::json!({
+        let req: RuntimeRequest = serde_json::from_value(serde_json::json!({
+            "op": "forward",
             "instance_id": "i-1",
             "server_name": "remote",
             "transport": {
@@ -942,8 +1237,11 @@ for line in sys.stdin:
         }))
         .unwrap();
 
+        let RuntimeRequest::Forward { transport, .. } = req else {
+            panic!("expected forward request");
+        };
         assert_eq!(
-            req.transport,
+            transport,
             TransportSpec::HttpStreamable {
                 url: "https://mcp.example.test/mcp".into(),
                 headers: BTreeMap::from([("X-Cluster".into(), "prod".into())]),
@@ -955,12 +1253,10 @@ for line in sys.stdin:
     #[test]
     fn fingerprint_is_stable_across_env_and_header_ordering() {
         let left = TransportSpec::DockerStdio {
-            command: "docker".into(),
             args: vec!["run".into(), "example/mcp".into()],
             env: HashMap::from([("B".into(), "2".into()), ("A".into(), "1".into())]),
         };
         let right = TransportSpec::DockerStdio {
-            command: "docker".into(),
             args: vec!["run".into(), "example/mcp".into()],
             env: HashMap::from([("A".into(), "1".into()), ("B".into(), "2".into())]),
         };

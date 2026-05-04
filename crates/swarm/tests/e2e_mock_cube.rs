@@ -332,6 +332,7 @@ async fn full_walkthrough() {
         shares: shares_svc,
         artefact_cache,
         state_files,
+        mcp_runtime_socket: None,
     };
     // Stage 5 retired the legacy `admin-token` shared bearer; this e2e
     // exercises admin endpoints via `--dangerous-no-auth`, the same

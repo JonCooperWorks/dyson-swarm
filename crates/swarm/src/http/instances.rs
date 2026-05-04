@@ -480,6 +480,16 @@ async fn destroy_instance(
     );
     match state.instances.destroy(&caller.user_id, &id, force).await {
         Ok(()) => {
+            if let Err(err) =
+                crate::proxy::mcp::stop_runtime_instance(state.mcp_runtime_socket.as_deref(), &id)
+                    .await
+            {
+                tracing::warn!(
+                    error = %err,
+                    instance = %id,
+                    "destroy: mcp runtime instance cleanup failed"
+                );
+            }
             // Stage 8: wipe the per-instance configure secret
             // sealed in `system_secrets["instance.<id>.configure"]`.
             // Best-effort — the destroy itself succeeded; lingering

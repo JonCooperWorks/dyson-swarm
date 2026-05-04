@@ -405,6 +405,7 @@ mod tests {
             shares: shares_svc,
             artefact_cache,
             state_files,
+            mcp_runtime_socket: None,
         };
 
         // Spawn the router on an ephemeral port.

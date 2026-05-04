@@ -295,6 +295,7 @@ async fn build() -> Fixture {
         shares: shares_svc,
         artefact_cache,
         state_files,
+        mcp_runtime_socket: None,
     };
     let app = http::router(
         app_state,

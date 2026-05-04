@@ -232,6 +232,7 @@ mod tests {
             shares: shares_svc,
             artefact_cache,
             state_files,
+            mcp_runtime_socket: None,
         };
         (state, tokens_store, token)
     }

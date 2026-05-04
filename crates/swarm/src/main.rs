@@ -576,7 +576,7 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     ) {
         Ok(s) => Arc::new(
             s.with_instance_svc(instance_svc.clone())
-                .with_runtime_socket(mcp_runtime_socket)
+                .with_runtime_socket(mcp_runtime_socket.clone())
                 .with_docker_catalog(docker_catalog, allow_user_docker_json)
                 .with_docker_catalog_store(mcp_catalog_store),
         ),
@@ -701,6 +701,7 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         shares: shares_svc,
         artefact_cache,
         state_files,
+        mcp_runtime_socket,
     };
     let app = http::router(
         app_state,

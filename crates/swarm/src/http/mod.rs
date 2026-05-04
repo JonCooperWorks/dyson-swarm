@@ -31,6 +31,7 @@ pub mod snapshots;
 pub mod static_assets;
 pub mod webhooks;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::{Router, middleware};
@@ -117,6 +118,10 @@ pub struct AppState {
     /// Written by the internal state-sync endpoint with an `st_`
     /// per-instance bearer; bodies are encrypted before disk.
     pub state_files: crate::state_files::StateFiles,
+    /// Unix socket for the MCP runtime helper. Instance destroy uses
+    /// it to tell the helper to stop any Docker/stdout sessions keyed
+    /// to the instance before the sealed MCP rows disappear.
+    pub mcp_runtime_socket: Option<PathBuf>,
 }
 
 /// Build the public `Router`.
@@ -394,6 +399,7 @@ mod tests {
             shares: shares_svc,
             artefact_cache,
             state_files,
+            mcp_runtime_socket: None,
         };
         (state, users_store)
     }

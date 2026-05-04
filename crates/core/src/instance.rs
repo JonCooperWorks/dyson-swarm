@@ -128,6 +128,14 @@ pub const ENV_MODEL: &str = "SWARM_MODEL";
 /// can rewrite `skills.builtin.tools` accordingly.
 pub const ENV_TOOLS: &str = "SWARM_TOOLS";
 
+#[derive(Debug, Clone)]
+pub struct DeletedMcpServer {
+    pub owner_id: String,
+    pub instance_id: String,
+    pub name: String,
+    pub runtime: Option<crate::mcp_servers::McpRuntimeSpec>,
+}
+
 /// Full URL the dyson agent's `Output::send_artefact` POSTs to when
 /// pushing a finalised artefact back to swarm.  Resolved server-side
 /// by appending `/v1/internal/ingest/artefact` to `self.proxy_base`,
@@ -3339,7 +3347,7 @@ impl InstanceService {
         &self,
         owner_id: &str,
         id: &str,
-    ) -> Result<(), SwarmError> {
+    ) -> Result<Option<DeletedMcpServer>, SwarmError> {
         let _row = self
             .instances
             .get_for_owner(owner_id, id)
@@ -3352,18 +3360,21 @@ impl InstanceService {
         let names = mcp_servers::list_names(secrets, owner_id, id)
             .await
             .map_err(|e| SwarmError::Internal(format!("mcp list: {e}")))?;
-        let mut delete_name = None;
+        let mut delete_entry = None;
         for name in &names {
             let entry = mcp_servers::get(secrets, owner_id, id, name)
                 .await
                 .map_err(|e| SwarmError::Internal(format!("mcp get: {e}")))?;
-            if entry.and_then(|e| e.raw_vscode_config).is_some() {
-                delete_name = Some(name.clone());
+            if matches!(
+                entry.as_ref().and_then(|e| e.raw_vscode_config.as_ref()),
+                Some(_)
+            ) {
+                delete_entry = entry.map(|entry| (name.clone(), entry));
                 break;
             }
         }
-        let Some(delete_name) = delete_name else {
-            return Ok(());
+        let Some((delete_name, delete_entry)) = delete_entry else {
+            return Ok(None);
         };
         if let Err(err) = secrets
             .delete(owner_id, &mcp_servers::entry_key(id, &delete_name))
@@ -3385,7 +3396,12 @@ impl InstanceService {
         if let Err(err) = self.sync_mcp_to_dyson(owner_id, id).await {
             tracing::warn!(error = %err, instance = %id, "mcp vscode delete: sync_mcp_to_dyson failed");
         }
-        Ok(())
+        Ok(Some(DeletedMcpServer {
+            owner_id: owner_id.to_string(),
+            instance_id: id.to_string(),
+            name: delete_name,
+            runtime: delete_entry.runtime,
+        }))
     }
 
     /// Remove one MCP server from an instance.  Wipes the user_secrets
@@ -3396,7 +3412,7 @@ impl InstanceService {
         owner_id: &str,
         id: &str,
         name: &str,
-    ) -> Result<(), SwarmError> {
+    ) -> Result<Option<DeletedMcpServer>, SwarmError> {
         let _row = self
             .instances
             .get_for_owner(owner_id, id)
@@ -3406,6 +3422,9 @@ impl InstanceService {
             .mcp_secrets
             .as_ref()
             .ok_or_else(|| SwarmError::PolicyDenied("mcp secrets store not configured".into()))?;
+        let deleted_entry = mcp_servers::get(secrets, owner_id, id, name)
+            .await
+            .map_err(|e| SwarmError::Internal(format!("mcp get: {e}")))?;
         // Idempotent: a delete on a missing entry just returns Ok.
         if let Err(err) = secrets
             .delete(owner_id, &mcp_servers::entry_key(id, name))
@@ -3434,7 +3453,12 @@ impl InstanceService {
         if let Err(err) = self.sync_mcp_to_dyson(owner_id, id).await {
             tracing::warn!(error = %err, instance = %id, "mcp delete: sync_mcp_to_dyson failed");
         }
-        Ok(())
+        Ok(deleted_entry.map(|entry| DeletedMcpServer {
+            owner_id: owner_id.to_string(),
+            instance_id: id.to_string(),
+            name: name.to_string(),
+            runtime: entry.runtime,
+        }))
     }
 
     /// Remove every provisioned MCP server that came from one Docker
@@ -3443,7 +3467,7 @@ impl InstanceService {
     pub async fn delete_mcp_servers_for_docker_catalog(
         &self,
         catalog_id: &str,
-    ) -> Result<usize, SwarmError> {
+    ) -> Result<Vec<DeletedMcpServer>, SwarmError> {
         let secrets = self
             .mcp_secrets
             .as_ref()
@@ -3458,7 +3482,7 @@ impl InstanceService {
                 },
             )
             .await?;
-        let mut removed = 0usize;
+        let mut removed = Vec::new();
         for row in instances {
             let names = match mcp_servers::list_names(secrets, &row.owner_id, &row.id).await {
                 Ok(names) => names,
@@ -3476,7 +3500,7 @@ impl InstanceService {
             }
 
             let mut next_names = Vec::with_capacity(names.len());
-            let mut removed_for_instance = 0usize;
+            let mut removed_for_instance = false;
             for name in names {
                 let entry = match mcp_servers::get(secrets, &row.owner_id, &row.id, &name).await {
                     Ok(entry) => entry,
@@ -3491,8 +3515,12 @@ impl InstanceService {
                         continue;
                     }
                 };
+                let Some(entry) = entry else {
+                    next_names.push(name);
+                    continue;
+                };
                 let should_delete = matches!(
-                    entry.as_ref().and_then(|entry| entry.docker_catalog.as_ref()),
+                    entry.docker_catalog.as_ref(),
                     Some(binding) if binding.id == catalog_id
                 );
                 if !should_delete {
@@ -3512,13 +3540,18 @@ impl InstanceService {
                         "mcp catalog delete: row delete failed"
                     );
                 }
-                removed_for_instance += 1;
+                removed_for_instance = true;
+                removed.push(DeletedMcpServer {
+                    owner_id: row.owner_id.clone(),
+                    instance_id: row.id.clone(),
+                    name,
+                    runtime: entry.runtime,
+                });
             }
 
-            if removed_for_instance == 0 {
+            if !removed_for_instance {
                 continue;
             }
-            removed += removed_for_instance;
             if next_names.is_empty() {
                 let _ = secrets
                     .delete(&row.owner_id, &mcp_servers::index_key(&row.id))
@@ -5359,7 +5392,10 @@ mod tests {
             .delete_mcp_servers_for_docker_catalog("github")
             .await
             .unwrap();
-        assert_eq!(removed, 1);
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].instance_id, created.id);
+        assert_eq!(removed[0].name, "github");
+        assert!(removed[0].runtime.is_some());
 
         assert!(
             crate::mcp_servers::get(&user_secrets, &owner, &created.id, "github")

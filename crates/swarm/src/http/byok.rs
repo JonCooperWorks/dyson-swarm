@@ -529,6 +529,7 @@ mod tests {
             shares: shares_svc,
             artefact_cache,
             state_files,
+            mcp_runtime_socket: None,
         };
         // We don't return the upstream URL here; tests close over their
         // own variables.  The third return is kept stable for symmetry

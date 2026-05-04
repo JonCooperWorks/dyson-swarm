@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use crate::auth::{CallerIdentity, extract_bearer};
 use crate::db::mcp_catalog::{McpDockerCatalogRow, SqlxMcpDockerCatalogStore};
 use crate::error::{StoreError, SwarmError};
-use crate::instance::InstanceService;
+use crate::instance::{DeletedMcpServer, InstanceService};
 use crate::mcp_servers::{
     self, AuthMetadata, DcrRequest, McpAuthSpec, McpOAuthTokens, McpRuntimeSpec, McpServerEntry,
     McpServerSpec, McpToolSummary, McpToolsCatalog, OAuthFlowCache, PendingFlow,
@@ -472,24 +472,27 @@ async fn ensure_fresh_oauth(
 }
 
 #[derive(Debug, Serialize)]
-struct RuntimeForwardRequest<'a> {
-    instance_id: &'a str,
-    server_name: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    command: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    args: Option<&'a [String]>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    env: Option<&'a std::collections::HashMap<String, String>>,
-    transport: RuntimeTransportSpec<'a>,
-    request_json: &'a str,
+#[serde(tag = "op", rename_all = "snake_case")]
+enum RuntimeRequest<'a> {
+    Forward {
+        instance_id: &'a str,
+        server_name: &'a str,
+        transport: RuntimeTransportSpec<'a>,
+        request_json: &'a str,
+    },
+    StopServer {
+        instance_id: &'a str,
+        server_name: &'a str,
+    },
+    StopInstance {
+        instance_id: &'a str,
+    },
 }
 
 #[derive(Debug, Serialize)]
 #[serde(tag = "kind")]
 enum RuntimeTransportSpec<'a> {
     DockerStdio {
-        command: &'a str,
         args: &'a [String],
         env: &'a std::collections::HashMap<String, String>,
     },
@@ -502,27 +505,23 @@ enum RuntimeTransportSpec<'a> {
     },
 }
 
-impl<'a> RuntimeForwardRequest<'a> {
-    fn docker(
+impl<'a> RuntimeRequest<'a> {
+    fn forward_docker(
         instance_id: &'a str,
         server_name: &'a str,
-        command: &'a str,
         args: &'a [String],
         env: &'a std::collections::HashMap<String, String>,
         request_json: &'a str,
     ) -> Self {
-        Self {
+        Self::Forward {
             instance_id,
             server_name,
-            command: Some(command),
-            args: Some(args),
-            env: Some(env),
-            transport: RuntimeTransportSpec::DockerStdio { command, args, env },
+            transport: RuntimeTransportSpec::DockerStdio { args, env },
             request_json,
         }
     }
 
-    fn http_streamable(
+    fn forward_http_streamable(
         instance_id: &'a str,
         server_name: &'a str,
         url: &'a str,
@@ -530,12 +529,9 @@ impl<'a> RuntimeForwardRequest<'a> {
         auth_bearer_env: Option<&'a str>,
         request_json: &'a str,
     ) -> Self {
-        Self {
+        Self::Forward {
             instance_id,
             server_name,
-            command: None,
-            args: None,
-            env: None,
             transport: RuntimeTransportSpec::HttpStreamable {
                 url,
                 headers,
@@ -636,13 +632,15 @@ fn runtime_forward_request_for_entry<'a>(
     server_name: &'a str,
     entry: &'a McpServerEntry,
     request_json: &'a str,
-) -> Result<RuntimeForwardRequest<'a>, String> {
+) -> Result<RuntimeRequest<'a>, String> {
     match entry.runtime.as_ref() {
         Some(McpRuntimeSpec::DockerStdio { command, args, env }) => {
-            Ok(RuntimeForwardRequest::docker(
+            if command != "docker" {
+                return Err("invalid docker MCP runtime command".into());
+            }
+            Ok(RuntimeRequest::forward_docker(
                 instance_id,
                 server_name,
-                command,
                 args,
                 env,
                 request_json,
@@ -670,7 +668,7 @@ fn runtime_forward_request_for_entry<'a>(
                     );
                 }
             }
-            Ok(RuntimeForwardRequest::http_streamable(
+            Ok(RuntimeRequest::forward_http_streamable(
                 instance_id,
                 server_name,
                 url,
@@ -685,7 +683,7 @@ fn runtime_forward_request_for_entry<'a>(
 
 async fn call_runtime(
     socket_path: &FsPath,
-    request: &RuntimeForwardRequest<'_>,
+    request: &RuntimeRequest<'_>,
 ) -> Result<RuntimeForwardResponse, String> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixStream;
@@ -717,6 +715,104 @@ async fn call_runtime(
         return Err("runtime closed without response".into());
     }
     serde_json::from_str(&out).map_err(|e| format!("decode response: {e}"))
+}
+
+pub async fn stop_runtime_server(
+    socket_path: Option<&FsPath>,
+    instance_id: &str,
+    server_name: &str,
+) -> Result<(), String> {
+    let Some(socket_path) = socket_path else {
+        return Ok(());
+    };
+    let resp = call_runtime(
+        socket_path,
+        &RuntimeRequest::StopServer {
+            instance_id,
+            server_name,
+        },
+    )
+    .await?;
+    if (200..300).contains(&resp.status) {
+        Ok(())
+    } else {
+        Err(format!(
+            "runtime stop_server HTTP {}: {}",
+            resp.status, resp.body
+        ))
+    }
+}
+
+pub async fn stop_runtime_instance(
+    socket_path: Option<&FsPath>,
+    instance_id: &str,
+) -> Result<(), String> {
+    let Some(socket_path) = socket_path else {
+        return Ok(());
+    };
+    let resp = call_runtime(socket_path, &RuntimeRequest::StopInstance { instance_id }).await?;
+    if (200..300).contains(&resp.status) {
+        Ok(())
+    } else {
+        Err(format!(
+            "runtime stop_instance HTTP {}: {}",
+            resp.status, resp.body
+        ))
+    }
+}
+
+async fn stop_deleted_runtime_server(
+    svc: &McpService,
+    deleted: &DeletedMcpServer,
+) -> Result<(), Response<Body>> {
+    if deleted.runtime.is_none() {
+        return Ok(());
+    }
+    stop_runtime_server(
+        svc.runtime_socket_path.as_deref(),
+        &deleted.instance_id,
+        &deleted.name,
+    )
+    .await
+    .map_err(|err| {
+        tracing::warn!(
+            error = %err,
+            owner = %deleted.owner_id,
+            instance = %deleted.instance_id,
+            server = %deleted.name,
+            "mcp runtime: deleted server cleanup failed"
+        );
+        error_resp(StatusCode::BAD_GATEWAY, "mcp runtime cleanup failed")
+    })
+}
+
+async fn stop_deleted_runtime_servers_best_effort(
+    svc: &McpService,
+    deleted: &[DeletedMcpServer],
+) -> usize {
+    let mut errors = 0usize;
+    for server in deleted {
+        if server.runtime.is_none() {
+            continue;
+        }
+        if let Err(err) = stop_runtime_server(
+            svc.runtime_socket_path.as_deref(),
+            &server.instance_id,
+            &server.name,
+        )
+        .await
+        {
+            errors += 1;
+            tracing::warn!(
+                error = %err,
+                owner = %server.owner_id,
+                instance = %server.instance_id,
+                server = %server.name,
+                "mcp runtime: catalog delete cleanup failed"
+            );
+        }
+    }
+    errors
 }
 
 // ───────────────────────────────────────────────────────────────────
@@ -1136,17 +1232,19 @@ async fn admin_delete_docker_catalog_server(
         )
     })?;
     let deleted = store.delete(&catalog_id).await.map_err(store_err_to_resp)?;
-    let removed_mcp_servers = if deleted {
+    let removed = if deleted {
         isvc.delete_mcp_servers_for_docker_catalog(&catalog_id)
             .await
             .map_err(swarm_err_to_resp)?
     } else {
-        0
+        Vec::new()
     };
+    let runtime_cleanup_errors = stop_deleted_runtime_servers_best_effort(&svc, &removed).await;
     Ok(Json(serde_json::json!({
         "ok": true,
         "deleted": deleted,
-        "removed_mcp_servers": removed_mcp_servers,
+        "removed_mcp_servers": removed.len(),
+        "runtime_cleanup_errors": runtime_cleanup_errors,
     })))
 }
 
@@ -1481,9 +1579,13 @@ async fn delete_vscode_config(
             "mcp management not configured",
         )
     })?;
-    isvc.delete_vscode_mcp_config(&caller.user_id, &instance_id)
+    let deleted = isvc
+        .delete_vscode_mcp_config(&caller.user_id, &instance_id)
         .await
         .map_err(swarm_err_to_resp)?;
+    if let Some(deleted) = deleted.as_ref() {
+        stop_deleted_runtime_server(&svc, deleted).await?;
+    }
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -1540,9 +1642,13 @@ async fn delete_server(
             "mcp management not configured",
         )
     })?;
-    isvc.delete_mcp_server(&caller.user_id, &instance_id, &name)
+    let deleted = isvc
+        .delete_mcp_server(&caller.user_id, &instance_id, &name)
         .await
         .map_err(swarm_err_to_resp)?;
+    if let Some(deleted) = deleted.as_ref() {
+        stop_deleted_runtime_server(&svc, deleted).await?;
+    }
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -2201,11 +2307,12 @@ mod tests {
             let mut line = String::new();
             reader.read_line(&mut line).await.unwrap();
             let req: serde_json::Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(req["op"], "forward");
             assert_eq!(req["instance_id"], "i-1");
             assert_eq!(req["server_name"], "echo");
-            assert_eq!(req["command"], "docker");
             assert_eq!(req["transport"]["kind"], "DockerStdio");
-            assert_eq!(req["transport"]["command"], "docker");
+            assert!(req.get("command").is_none());
+            assert!(req["transport"].get("command").is_none());
             let resp = serde_json::json!({
                 "status": 200,
                 "content_type": "application/json",
@@ -2221,10 +2328,9 @@ mod tests {
 
         let args = vec!["run".to_string(), "example/mcp".to_string()];
         let env = std::collections::HashMap::new();
-        let req = RuntimeForwardRequest::docker(
+        let req = RuntimeRequest::forward_docker(
             "i-1",
             "echo",
-            "docker",
             &args,
             &env,
             r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
@@ -2232,6 +2338,42 @@ mod tests {
         let resp = call_runtime(&socket, &req).await.unwrap();
         assert_eq!(resp.status, 200);
         assert!(resp.body.contains("\"ok\":true"));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stop_runtime_server_sends_runtime_cleanup_op() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::UnixListener;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let socket = tmp.path().join("runtime.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let req: serde_json::Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(req["op"], "stop_server");
+            assert_eq!(req["instance_id"], "i-1");
+            assert_eq!(req["server_name"], "brave");
+            let resp = serde_json::json!({
+                "status": 200,
+                "content_type": "application/json",
+                "body": "{\"ok\":true,\"stopped_sessions\":1,\"removed_containers\":1}"
+            });
+            let mut stream = reader.into_inner();
+            stream
+                .write_all(serde_json::to_string(&resp).unwrap().as_bytes())
+                .await
+                .unwrap();
+            stream.write_all(b"\n").await.unwrap();
+        });
+
+        stop_runtime_server(Some(&socket), "i-1", "brave")
+            .await
+            .unwrap();
         server.await.unwrap();
     }
 

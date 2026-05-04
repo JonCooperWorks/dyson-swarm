@@ -14,6 +14,7 @@ import { setInstances, setSharesFor, setWebhooksFor } from '../store/app.js';
 import {
   profileLabel,
   serializeMcpServers,
+  splitMcpSetupRows,
   isAirgap,
   toolBlockedByNetwork,
   NETWORK_REQUIRED_TOOL_NAMES,
@@ -23,6 +24,7 @@ import {
   POLICY_OPTIONS,
   CubeProfilePicker,
   McpServersPanel,
+  NewInstanceForm,
   parseMcpCliJsonConfig,
   findCubeProfile,
   InstancesView,
@@ -32,6 +34,7 @@ import {
 
 afterEach(() => {
   cleanup();
+  window.history.pushState(null, '', '/');
   setInstances([]);
   setWebhooksFor('a', []);
   setSharesFor('a', []);
@@ -632,6 +635,120 @@ describe('serializeMcpServers', () => {
         },
       },
     ]);
+  });
+});
+
+describe('splitMcpSetupRows', () => {
+  test('separates hire-time remote specs from Docker JSON configs', () => {
+    const dockerConfig = {
+      mcpServers: {
+        massive: {
+          command: 'docker',
+          args: ['run', '--rm', '-i', 'joncooperworks/mcp_massive:latest'],
+        },
+      },
+    };
+
+    expect(splitMcpSetupRows([
+      {
+        id: 'remote',
+        serverType: 'remote',
+        name: 'linear',
+        url: 'https://api.linear.app/mcp',
+        auth: { kind: 'none' },
+      },
+      {
+        id: 'docker',
+        serverType: 'docker',
+        jsonText: JSON.stringify(dockerConfig),
+      },
+    ])).toEqual({
+      remote: [{
+        name: 'linear',
+        url: 'https://api.linear.app/mcp',
+        auth: { kind: 'none' },
+      }],
+      dockerConfigs: [dockerConfig],
+    });
+  });
+
+  test('rejects duplicate names across remote and Docker setup rows', () => {
+    const dockerConfig = {
+      servers: {
+        linear: {
+          type: 'stdio',
+          command: 'docker',
+          args: ['run', '--rm', '-i', 'ghcr.io/example/linear-mcp'],
+        },
+      },
+    };
+
+    expect(() => splitMcpSetupRows([
+      {
+        id: 'remote',
+        serverType: 'remote',
+        name: 'linear',
+        url: 'https://api.linear.app/mcp',
+        auth: { kind: 'none' },
+      },
+      {
+        id: 'docker',
+        serverType: 'docker',
+        jsonText: JSON.stringify(dockerConfig),
+      },
+    ])).toThrow(/configured more than once/);
+  });
+});
+
+describe('NewInstanceForm MCP setup', () => {
+  test('lets a new agent attach a Docker MCP server before redirecting', async () => {
+    const dockerConfig = {
+      servers: {
+        github: {
+          type: 'stdio',
+          command: 'docker',
+          args: ['run', '--rm', '-i', 'ghcr.io/example/github-mcp'],
+        },
+      },
+    };
+    const client = {
+      createInstance: vi.fn().mockResolvedValue({
+        id: 'inst-1',
+        url: 'https://inst-1.swarm.example',
+      }),
+      putMcpJsonConfig: vi.fn().mockResolvedValue({ ok: true }),
+      probeInstance: vi.fn().mockResolvedValue({ status: 'healthy' }),
+    };
+
+    render(React.createElement(
+      ApiProvider,
+      {
+        client,
+        auth: {
+          config: {
+            default_models: ['openai/gpt-5.1'],
+            default_template_id: 'tpl-default',
+            cube_profiles: [],
+          },
+        },
+      },
+      React.createElement(NewInstanceForm),
+    ));
+
+    fireEvent.click(screen.getByRole('button', { name: /add MCP server/i }));
+    fireEvent.change(screen.getByLabelText('MCP server type'), { target: { value: 'docker' } });
+    expect(screen.getByText('docker config')).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('MCP JSON config'), {
+      target: { value: JSON.stringify(dockerConfig, null, 2) },
+    });
+    expect(screen.getByText('github')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'hire' }));
+
+    await waitFor(() => expect(client.createInstance).toHaveBeenCalledTimes(1));
+    expect(client.createInstance.mock.calls[0][0]).not.toHaveProperty('mcp_servers');
+    await waitFor(() => expect(client.putMcpJsonConfig).toHaveBeenCalledWith('inst-1', dockerConfig));
+    expect(client.probeInstance).toHaveBeenCalledWith('inst-1');
   });
 });
 

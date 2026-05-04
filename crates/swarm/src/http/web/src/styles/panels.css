@@ -1611,6 +1611,11 @@
   color: var(--accent);
   background: color-mix(in srgb, var(--accent) 18%, transparent);
 }
+.mcp-auth-docker {
+  border-color: color-mix(in srgb, var(--ok) 55%, transparent);
+  color: var(--ok);
+  background: color-mix(in srgb, var(--ok) 10%, transparent);
+}
 
 .mcp-remove {
   background: transparent;
@@ -1629,6 +1634,11 @@
   flex-direction: column;
   gap: 10px;
   padding: 12px 16px;
+}
+
+.mcp-card-note {
+  margin: 0;
+  line-height: 1.45;
 }
 
 .mcp-advanced-toggle {

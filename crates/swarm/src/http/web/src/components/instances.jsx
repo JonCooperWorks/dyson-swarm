@@ -637,7 +637,7 @@ function ToolsView({ instance }) {
   );
 }
 
-function NewInstanceForm() {
+export function NewInstanceForm() {
   const { client, auth } = useApi();
   const [name, setName] = React.useState('');
   const [task, setTask] = React.useState('');
@@ -745,8 +745,8 @@ function NewInstanceForm() {
       //   | { kind: "allowlist", entries: [...] }
       //   | { kind: "denylist", entries: [...] }
       req.network_policy = serializeNetworkPolicy(networkPolicy);
-      const mcp = serializeMcpServers(mcpServers);
-      if (mcp.length > 0) req.mcp_servers = mcp;
+      const mcp = splitMcpSetupRows(mcpServers);
+      if (mcp.remote.length > 0) req.mcp_servers = mcp.remote;
       // Surface the tool include list in the env envelope so dyson
       // can read SWARM_TOOLS at boot.  Skip when every tool is
       // ticked AND the kind isn't airgap — that's the implicit
@@ -767,6 +767,9 @@ function NewInstanceForm() {
       const result = await client.createInstance(req);
 
       if (result?.id) {
+        for (const config of mcp.dockerConfigs) {
+          await client.putMcpJsonConfig(result.id, config);
+        }
         await waitUntilHealthy(client, result.id);
         window.location.hash = `#/i/${encodeURIComponent(result.id)}`;
       } else {
@@ -1143,6 +1146,7 @@ function serializeNetworkPolicy(p) {
 // The form just collects the metadata.
 export function serializeMcpServers(rows) {
   return rows
+    .filter(r => (r.serverType || 'remote') !== 'docker')
     .map(r => {
       const name = (r.name || '').trim();
       const url = (r.url || '').trim();
@@ -1176,14 +1180,42 @@ export function serializeMcpServers(rows) {
     .filter(Boolean);
 }
 
+export function splitMcpSetupRows(rows) {
+  const remote = serializeMcpServers(rows);
+  const names = new Set();
+  for (const spec of remote) {
+    if (names.has(spec.name)) {
+      throw new Error(`MCP server "${spec.name}" is configured more than once.`);
+    }
+    names.add(spec.name);
+  }
+
+  const dockerConfigs = [];
+  for (const row of rows || []) {
+    if ((row.serverType || 'remote') !== 'docker') continue;
+    const text = row.jsonText || '';
+    if (!text.trim()) continue;
+    const config = parseMcpCliJsonConfig(text);
+    const serverName = mcpServerNameFromConfig(config);
+    if (names.has(serverName)) {
+      throw new Error(`MCP server "${serverName}" is configured more than once.`);
+    }
+    names.add(serverName);
+    dockerConfigs.push(config);
+  }
+  return { remote, dockerConfigs };
+}
+
 let mcpRowCounter = 0;
-function freshMcpRow() {
+function freshMcpRow(serverType = 'remote') {
   mcpRowCounter += 1;
   return {
     id: `mcp-${mcpRowCounter}-${Date.now()}`,
+    serverType,
     name: '',
     url: '',
     auth: { kind: 'none' },
+    jsonText: '',
   };
 }
 
@@ -1203,8 +1235,8 @@ function McpServersEditor({ value, onChange }) {
       <div className="mcp-empty">
         <p className="muted small" style={{ margin: 0 }}>
           No MCP servers attached. The agent hires fine without any —
-          add one if you want it to call out to Linear, GitHub, your
-          own server, or anything that speaks streamable-HTTP MCP.
+          add one if you want it to call Linear, GitHub, a Docker stdio
+          server, or anything that speaks streamable-HTTP MCP.
         </p>
         <button type="button" className="btn btn-ghost btn-sm" onClick={add}>
           + add MCP server
@@ -1232,15 +1264,24 @@ function McpServersEditor({ value, onChange }) {
 }
 
 function McpServerCard({ row, onChange, onChangeAuth, onRemove }) {
+  const serverType = row.serverType || 'remote';
   const authKind = row.auth?.kind || 'none';
+  const parsedDockerName = serverType === 'docker'
+    ? mcpServerNameFromText(row.jsonText || '')
+    : null;
+  const displayName = serverType === 'docker'
+    ? (parsedDockerName || 'docker config')
+    : (row.name?.trim() || 'unnamed');
   return (
     <div className="mcp-card panel">
       <div className="mcp-card-head">
         <div className="mcp-card-title">
           <code className="mcp-card-name">
-            {row.name?.trim() || 'unnamed'}
+            {displayName}
           </code>
-          <span className={`mcp-auth-pill mcp-auth-${authKind}`}>{authKind}</span>
+          <span className={`mcp-auth-pill mcp-auth-${serverType === 'docker' ? 'docker' : authKind}`}>
+            {serverType === 'docker' ? 'docker' : authKind}
+          </span>
         </div>
         <button
           type="button"
@@ -1253,6 +1294,24 @@ function McpServerCard({ row, onChange, onChangeAuth, onRemove }) {
         </button>
       </div>
       <div className="mcp-card-body">
+        <McpServerTypeField
+          value={serverType}
+          onChange={next => onChange({ serverType: next })}
+        />
+        {serverType === 'docker' ? (
+          <>
+            <p className="muted small mcp-card-note">
+              Paste one Docker-backed stdio server under `servers` or
+              `mcpServers`. Swarm seals the JSON and gives the agent only
+              a swarm proxy URL.
+            </p>
+            <McpDockerJsonField
+              value={row.jsonText || ''}
+              onChange={jsonText => onChange({ jsonText })}
+            />
+          </>
+        ) : (
+          <>
         <label className="field">
           <span>name</span>
           <input
@@ -1320,8 +1379,42 @@ function McpServerCard({ row, onChange, onChangeAuth, onRemove }) {
         {authKind === 'oauth' ? (
           <McpOAuthFields auth={row.auth} onChangeAuth={onChangeAuth}/>
         ) : null}
+          </>
+        )}
       </div>
     </div>
+  );
+}
+
+function McpServerTypeField({ value, onChange, disabled = false }) {
+  return (
+    <label className="field">
+      <span>type</span>
+      <select
+        value={value}
+        onChange={e => onChange(e.target.value)}
+        disabled={disabled}
+        aria-label="MCP server type"
+      >
+        <option value="remote">remote HTTP/SSE</option>
+        <option value="docker">Docker</option>
+      </select>
+    </label>
+  );
+}
+
+function McpDockerJsonField({ value, onChange, disabled = false, autoFocus = false }) {
+  return (
+    <textarea
+      className="mcp-json-textarea"
+      value={value}
+      placeholder={MCP_JSON_CONFIG_EXAMPLE}
+      onChange={e => onChange(e.target.value)}
+      spellCheck={false}
+      disabled={disabled}
+      autoFocus={autoFocus}
+      aria-label="MCP JSON config"
+    />
   );
 }
 
@@ -3104,6 +3197,19 @@ function mcpServerMapFromConfig(parsed) {
   return servers;
 }
 
+function mcpServerNameFromConfig(config) {
+  return Object.keys(mcpServerMapFromConfig(config))[0];
+}
+
+function mcpServerNameFromText(text) {
+  if (!text.trim()) return null;
+  try {
+    return mcpServerNameFromConfig(parseMcpCliJsonConfig(text));
+  } catch {
+    return null;
+  }
+}
+
 function McpServerEditModal({ initial, existingNames, onCancel, onSubmit, onSubmitJson, busy }) {
   // Initial row when editing carries `name`, `url`, `auth_kind` (no
   // tokens — those stay server-side).  Credential inputs pre-fill
@@ -3221,17 +3327,7 @@ function McpServerEditModal({ initial, existingNames, onCancel, onSubmit, onSubm
         </div>
         <form className="form modal-body" onSubmit={submit}>
           {isNew ? (
-            <label className="field">
-              <span>type</span>
-              <select
-                value={serverType}
-                onChange={e => setServerType(e.target.value)}
-                aria-label="MCP server type"
-              >
-                <option value="remote">remote HTTP/SSE</option>
-                <option value="docker">Docker</option>
-              </select>
-            </label>
+            <McpServerTypeField value={serverType} onChange={setServerType}/>
           ) : null}
           {isDockerJsonMode ? (
             <>
@@ -3240,15 +3336,11 @@ function McpServerEditModal({ initial, existingNames, onCancel, onSubmit, onSubm
                 under `servers` or `mcpServers`. Swarm seals the JSON with
                 your key and only gives the agent a swarm proxy URL.
               </p>
-              <textarea
-                className="mcp-json-textarea"
+              <McpDockerJsonField
                 value={jsonText}
-                placeholder={MCP_JSON_CONFIG_EXAMPLE}
-                onChange={e => setJsonText(e.target.value)}
-                spellCheck={false}
+                onChange={setJsonText}
                 disabled={busy}
                 autoFocus={!isNew}
-                aria-label="MCP JSON config"
               />
             </>
           ) : (

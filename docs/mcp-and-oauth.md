@@ -44,6 +44,12 @@ Runtime-managed Docker stdio servers are long-lived by default. The
 configuration is restarted, and each swarm startup asks the helper to restart
 every runtime-backed MCP server attached to a live instance.
 
+Docker stdio environment secrets are launched through private mounted files.
+The runtime mounts each value at `/run/secrets/<NAME>` and sets `<NAME>_FILE`;
+a small wrapper then exports `<NAME>` for images that expect the traditional
+environment variable. This keeps the value out of Docker argv and `docker
+inspect` config while preserving compatibility with existing MCP images.
+
 ## Proxy Surfaces
 
 - `/mcp/:instance/:server/...` — agent-facing JSON-RPC pass-through, authenticated by per-instance bearer

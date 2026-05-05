@@ -44,6 +44,12 @@ The runtime helper does not reap idle MCP sessions by default; user servers
 remain alive until the helper is restarted or the server configuration is
 replaced/deleted.
 
+For Docker stdio MCP servers, secret-bearing environment values are written to
+per-session files under `/run/dyson-mcp-runtime/secrets`, bind-mounted read-only
+into the container at `/run/secrets`, and exported by a runtime wrapper before
+the MCP process starts. Docker argv and container config expose only `KEY_FILE`
+paths, not the secret values.
+
 ## Provider Key Overlay
 
 At startup, swarm overlays provider API keys from `system_secrets` on top of

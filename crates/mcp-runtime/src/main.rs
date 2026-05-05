@@ -1,9 +1,11 @@
 use std::collections::{BTreeMap, HashMap};
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::net::IpAddr;
-use std::path::PathBuf;
-use std::process::Stdio;
+use std::path::{Path, PathBuf};
+use std::process::{Command as StdCommand, Stdio};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use clap::Parser;
@@ -17,6 +19,9 @@ use tokio::task::JoinHandle;
 
 const DOCKER_INSTANCE_LABEL: &str = "dyson.mcp.instance";
 const DOCKER_SERVER_LABEL: &str = "dyson.mcp.server";
+const DEFAULT_SECRET_ROOT: &str = "/run/dyson-mcp-runtime/secrets";
+const CONTAINER_SECRET_DIR: &str = "/run/secrets";
+const SECRET_ENTRYPOINT_CONTAINER_PATH: &str = "/run/dyson-mcp-runtime-secret-entrypoint";
 
 #[derive(Debug, Parser)]
 #[command(name = "dyson-mcp-runtime")]
@@ -27,6 +32,9 @@ struct Args {
     /// Idle stdio sessions are stopped after this many seconds. 0 disables idle reaping.
     #[arg(long, default_value_t = 0)]
     idle_seconds: u64,
+    /// Runtime directory used for per-session Docker secret file mounts.
+    #[arg(long, default_value = DEFAULT_SECRET_ROOT)]
+    secrets_dir: PathBuf,
 }
 
 #[derive(Debug)]
@@ -90,6 +98,7 @@ struct Runtime {
     spawn_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     idle_after: Duration,
     docker: Arc<dyn DockerController>,
+    secret_root: PathBuf,
 }
 
 struct RuntimeSession {
@@ -190,6 +199,7 @@ struct DockerStdioSession {
     pending: Arc<Mutex<HashMap<String, oneshot::Sender<String>>>>,
     child: Arc<Mutex<Child>>,
     reader: JoinHandle<()>,
+    secret_dir: Option<PathBuf>,
 }
 
 struct HttpStreamableSession {
@@ -204,21 +214,33 @@ struct HttpStreamableSession {
 }
 
 impl Runtime {
+    #[cfg(test)]
     fn new(idle_after: Duration) -> Arc<Self> {
-        Self::with_docker(
+        Self::with_docker_and_secrets(
             idle_after,
             Arc::new(CliDockerController {
                 command: "docker".to_string(),
             }),
+            PathBuf::from(DEFAULT_SECRET_ROOT),
         )
     }
 
+    #[cfg(test)]
     fn with_docker(idle_after: Duration, docker: Arc<dyn DockerController>) -> Arc<Self> {
+        Self::with_docker_and_secrets(idle_after, docker, PathBuf::from(DEFAULT_SECRET_ROOT))
+    }
+
+    fn with_docker_and_secrets(
+        idle_after: Duration,
+        docker: Arc<dyn DockerController>,
+        secret_root: PathBuf,
+    ) -> Arc<Self> {
         Arc::new(Self {
             sessions: Mutex::new(HashMap::new()),
             spawn_locks: Mutex::new(HashMap::new()),
             idle_after,
             docker,
+            secret_root,
         })
     }
 
@@ -309,7 +331,7 @@ impl Runtime {
             }
         }
         let session = Arc::new(RuntimeSession {
-            session: spawn_session(req, wanted, Arc::clone(&self.docker))?,
+            session: spawn_session(req, wanted, Arc::clone(&self.docker), &self.secret_root)?,
             last_used: Arc::new(Mutex::new(Instant::now())),
         });
         self.sessions
@@ -457,6 +479,7 @@ fn spawn_session(
     req: &ForwardRequest,
     fingerprint: String,
     docker: Arc<dyn DockerController>,
+    secret_root: &Path,
 ) -> Result<Arc<dyn McpSession + Send + Sync>, String> {
     match &req.transport {
         TransportSpec::DockerStdio { args, env } => Ok(Arc::new(DockerStdioSession::spawn(
@@ -466,6 +489,7 @@ fn spawn_session(
             &req.instance_id,
             &req.server_name,
             fingerprint,
+            secret_root,
         )?)),
         TransportSpec::HttpStreamable {
             url,
@@ -504,25 +528,34 @@ impl DockerStdioSession {
         instance_id: &str,
         server_name: &str,
         fingerprint: String,
+        secret_root: &Path,
     ) -> Result<Self, String> {
-        let mut child_env = env.clone();
-        let args = docker_run_args_with_env(user_args, instance_id, server_name, &mut child_env);
+        let launch = docker_run_launch(
+            user_args,
+            env,
+            instance_id,
+            server_name,
+            secret_root,
+            docker.command(),
+        )?;
         let mut child = Command::new(docker.command())
-            .args(args)
-            .envs(child_env)
+            .args(&launch.args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
-            .map_err(|e| format!("spawn docker: {e}"))?;
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or("docker child stdin was not piped")?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or("docker child stdout was not piped")?;
+            .map_err(|e| {
+                cleanup_secret_dir_sync(launch.secret_dir.as_deref());
+                format!("spawn docker: {e}")
+            })?;
+        let Some(stdin) = child.stdin.take() else {
+            cleanup_secret_dir_sync(launch.secret_dir.as_deref());
+            return Err("docker child stdin was not piped".into());
+        };
+        let Some(stdout) = child.stdout.take() else {
+            cleanup_secret_dir_sync(launch.secret_dir.as_deref());
+            return Err("docker child stdout was not piped".into());
+        };
         let pending: Arc<Mutex<HashMap<String, oneshot::Sender<String>>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let pending_reader = Arc::clone(&pending);
@@ -551,6 +584,7 @@ impl DockerStdioSession {
             pending,
             child: Arc::new(Mutex::new(child)),
             reader,
+            secret_dir: launch.secret_dir,
         })
     }
 }
@@ -602,6 +636,16 @@ impl McpSession for DockerStdioSession {
     async fn shutdown(&self) {
         self.reader.abort();
         let _ = self.child.lock().await.start_kill();
+        if let Some(secret_dir) = &self.secret_dir
+            && let Err(e) = tokio::fs::remove_dir_all(secret_dir).await
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(
+                error = %e,
+                path = %secret_dir.display(),
+                "mcp runtime: failed to remove docker secret dir"
+            );
+        }
     }
 
     fn fingerprint(&self) -> &str {
@@ -909,16 +953,70 @@ async fn remove_pending(
 
 #[cfg(test)]
 fn docker_run_args(user_args: &[String], instance_id: &str, server_name: &str) -> Vec<String> {
-    let mut child_env = HashMap::new();
-    docker_run_args_with_env(user_args, instance_id, server_name, &mut child_env)
+    docker_run_launch(
+        user_args,
+        &HashMap::new(),
+        instance_id,
+        server_name,
+        Path::new("/tmp/dyson-mcp-runtime-test-secrets"),
+        "docker",
+    )
+    .expect("docker args should build")
+    .args
 }
 
-fn docker_run_args_with_env(
+struct DockerLaunch {
+    args: Vec<String>,
+    secret_dir: Option<PathBuf>,
+}
+
+struct DockerImageDefaults {
+    entrypoint: Vec<String>,
+    cmd: Vec<String>,
+}
+
+struct DockerUserArgs {
+    options: Vec<String>,
+    entrypoint: Option<String>,
+    image: String,
+    command: Vec<String>,
+}
+
+fn docker_run_launch(
     user_args: &[String],
+    env: &HashMap<String, String>,
     instance_id: &str,
     server_name: &str,
-    child_env: &mut HashMap<String, String>,
-) -> Vec<String> {
+    secret_root: &Path,
+    docker_command: &str,
+) -> Result<DockerLaunch, String> {
+    let mut secrets = BTreeMap::new();
+    for (name, value) in env {
+        if is_env_name(name) {
+            secrets.insert(name.clone(), value.clone());
+        }
+    }
+    let mut user_args = sanitized_docker_user_args(user_args, &mut secrets);
+    let secret_dir = if secrets.is_empty() {
+        None
+    } else {
+        let dir = create_docker_secret_dir(secret_root, instance_id, server_name)?;
+        if let Err(e) = write_docker_secret_files(&dir, &secrets) {
+            cleanup_secret_dir_sync(Some(&dir));
+            return Err(e);
+        }
+        match inject_secret_wrapper(user_args, &secrets, &dir, docker_command) {
+            Ok(args) => {
+                user_args = args;
+                Some(dir)
+            }
+            Err(e) => {
+                cleanup_secret_dir_sync(Some(&dir));
+                return Err(e);
+            }
+        }
+    };
+
     let mut out = vec![
         "run".to_string(),
         "--rm".to_string(),
@@ -936,13 +1034,16 @@ fn docker_run_args_with_env(
         "--label".to_string(),
         format!("{DOCKER_SERVER_LABEL}={server_name}"),
     ];
-    out.extend(sanitized_docker_user_args(user_args, child_env));
-    out
+    out.extend(user_args);
+    Ok(DockerLaunch {
+        args: out,
+        secret_dir,
+    })
 }
 
 fn sanitized_docker_user_args(
     user_args: &[String],
-    child_env: &mut HashMap<String, String>,
+    secrets: &mut BTreeMap<String, String>,
 ) -> Vec<String> {
     let mut out = Vec::new();
     let mut i = 1usize;
@@ -957,9 +1058,16 @@ fn sanitized_docker_user_args(
             continue;
         }
         if arg == "-e" || arg == "--env" {
-            out.push(arg.clone());
             if let Some(value) = user_args.get(i + 1) {
-                out.push(scrub_env_arg(value, child_env));
+                if let Some(name) = capture_secret_env_arg(value, secrets) {
+                    if !secrets.contains_key(&name) {
+                        out.push(arg.clone());
+                        out.push(value.clone());
+                    }
+                } else {
+                    out.push(arg.clone());
+                    out.push(value.clone());
+                }
                 i += 2;
             } else {
                 i += 1;
@@ -967,14 +1075,26 @@ fn sanitized_docker_user_args(
             continue;
         }
         if let Some(value) = arg.strip_prefix("--env=") {
-            out.push(format!("--env={}", scrub_env_arg(value, child_env)));
+            if let Some(name) = capture_secret_env_arg(value, secrets) {
+                if !secrets.contains_key(&name) {
+                    out.push(format!("--env={value}"));
+                }
+            } else {
+                out.push(format!("--env={value}"));
+            }
             i += 1;
             continue;
         }
         if let Some(value) = arg.strip_prefix("-e")
             && !value.is_empty()
         {
-            out.push(format!("-e{}", scrub_env_arg(value, child_env)));
+            if let Some(name) = capture_secret_env_arg(value, secrets) {
+                if !secrets.contains_key(&name) {
+                    out.push(format!("-e{value}"));
+                }
+            } else {
+                out.push(format!("-e{value}"));
+            }
             i += 1;
             continue;
         }
@@ -984,15 +1104,399 @@ fn sanitized_docker_user_args(
     out
 }
 
-fn scrub_env_arg(arg: &str, child_env: &mut HashMap<String, String>) -> String {
+fn capture_secret_env_arg(arg: &str, secrets: &mut BTreeMap<String, String>) -> Option<String> {
     let Some((name, value)) = arg.split_once('=') else {
-        return arg.to_string();
+        if is_env_name(arg) {
+            return Some(arg.to_string());
+        }
+        return None;
     };
     if !is_env_name(name) {
-        return arg.to_string();
+        return None;
     }
-    child_env.insert(name.to_string(), value.to_string());
-    name.to_string()
+    secrets.insert(name.to_string(), value.to_string());
+    Some(name.to_string())
+}
+
+fn inject_secret_wrapper(
+    user_args: Vec<String>,
+    secrets: &BTreeMap<String, String>,
+    secret_dir: &Path,
+    docker_command: &str,
+) -> Result<Vec<String>, String> {
+    let split = split_docker_user_args(&user_args)?;
+    let wrapper_path = secret_dir.join("entrypoint.sh");
+    write_file_with_mode(&wrapper_path, secret_entrypoint_script().as_bytes(), 0o555)
+        .map_err(|e| format!("write docker secret entrypoint: {e}"))?;
+
+    let mut options = split.options;
+    options.push("--mount".into());
+    options.push(format!(
+        "type=bind,src={},dst={SECRET_ENTRYPOINT_CONTAINER_PATH},readonly",
+        wrapper_path.display()
+    ));
+    for name in secrets.keys() {
+        let container_path = format!("{CONTAINER_SECRET_DIR}/{name}");
+        options.push("--mount".into());
+        options.push(format!(
+            "type=bind,src={},dst={container_path},readonly",
+            secret_dir.join(name).display()
+        ));
+        options.push("--env".into());
+        options.push(format!("{name}_FILE={container_path}"));
+    }
+    options.push("--entrypoint".into());
+    options.push(SECRET_ENTRYPOINT_CONTAINER_PATH.into());
+
+    let wrapped_command = wrapped_image_command(
+        docker_command,
+        &split.image,
+        split.entrypoint.as_deref(),
+        &split.command,
+    )?;
+    options.push(split.image);
+    options.extend(wrapped_command);
+    Ok(options)
+}
+
+fn split_docker_user_args(user_args: &[String]) -> Result<DockerUserArgs, String> {
+    let mut options = Vec::new();
+    let mut entrypoint = None;
+    let mut i = 0usize;
+    while i < user_args.len() {
+        let arg = &user_args[i];
+        if arg == "--" {
+            let Some(image) = user_args.get(i + 1) else {
+                return Err("docker run args must include an image".into());
+            };
+            return Ok(DockerUserArgs {
+                options,
+                entrypoint,
+                image: image.clone(),
+                command: user_args[i + 2..].to_vec(),
+            });
+        }
+        if arg == "--entrypoint" {
+            let Some(value) = user_args.get(i + 1) else {
+                return Err("docker run --entrypoint requires a value".into());
+            };
+            entrypoint = Some(value.clone());
+            i += 2;
+            continue;
+        }
+        if let Some(value) = arg.strip_prefix("--entrypoint=") {
+            entrypoint = Some(value.to_string());
+            i += 1;
+            continue;
+        }
+        if !arg.starts_with('-') {
+            return Ok(DockerUserArgs {
+                options,
+                entrypoint,
+                image: arg.clone(),
+                command: user_args[i + 1..].to_vec(),
+            });
+        }
+        options.push(arg.clone());
+        if docker_run_option_takes_value(arg)
+            && !arg.contains('=')
+            && let Some(value) = user_args.get(i + 1)
+        {
+            options.push(value.clone());
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    Err("docker run args must include an image".into())
+}
+
+fn docker_run_option_takes_value(arg: &str) -> bool {
+    matches!(
+        arg,
+        "-a" | "--add-host"
+            | "--annotation"
+            | "--attach"
+            | "--blkio-weight"
+            | "-c"
+            | "--cap-add"
+            | "--cap-drop"
+            | "--cgroup-parent"
+            | "--cidfile"
+            | "--cpu-period"
+            | "--cpu-quota"
+            | "--cpu-rt-period"
+            | "--cpu-rt-runtime"
+            | "--cpu-shares"
+            | "--cpus"
+            | "--cpuset-cpus"
+            | "--cpuset-mems"
+            | "--device"
+            | "--device-cgroup-rule"
+            | "--device-read-bps"
+            | "--device-read-iops"
+            | "--device-write-bps"
+            | "--device-write-iops"
+            | "--dns"
+            | "--dns-option"
+            | "--dns-search"
+            | "--domainname"
+            | "-e"
+            | "--env"
+            | "--env-file"
+            | "--expose"
+            | "--group-add"
+            | "--health-cmd"
+            | "--health-interval"
+            | "--health-retries"
+            | "--health-start-interval"
+            | "--health-start-period"
+            | "--health-timeout"
+            | "-h"
+            | "--hostname"
+            | "--ip"
+            | "--ip6"
+            | "--isolation"
+            | "-l"
+            | "--label"
+            | "--link"
+            | "--link-local-ip"
+            | "--log-driver"
+            | "--log-opt"
+            | "-m"
+            | "--memory"
+            | "--memory-reservation"
+            | "--memory-swap"
+            | "--memory-swappiness"
+            | "--mount"
+            | "--name"
+            | "--network"
+            | "--network-alias"
+            | "--oom-score-adj"
+            | "-p"
+            | "--pid"
+            | "--pids-limit"
+            | "--platform"
+            | "--publish"
+            | "--pull"
+            | "--restart"
+            | "--runtime"
+            | "--security-opt"
+            | "--shm-size"
+            | "--stop-signal"
+            | "--stop-timeout"
+            | "--storage-opt"
+            | "--sysctl"
+            | "--tmpfs"
+            | "--ulimit"
+            | "-u"
+            | "--user"
+            | "--userns"
+            | "-v"
+            | "--volume"
+            | "--volumes-from"
+            | "-w"
+            | "--workdir"
+    )
+}
+
+fn wrapped_image_command(
+    docker_command: &str,
+    image: &str,
+    entrypoint_override: Option<&str>,
+    command: &[String],
+) -> Result<Vec<String>, String> {
+    let defaults = if entrypoint_override.is_none() || command.is_empty() {
+        inspect_docker_image_defaults(docker_command, image)?
+    } else {
+        None
+    }
+    .unwrap_or_else(|| DockerImageDefaults {
+        entrypoint: Vec::new(),
+        cmd: Vec::new(),
+    });
+
+    let mut out = Vec::new();
+    if let Some(entrypoint) = entrypoint_override {
+        out.push(entrypoint.to_string());
+        if command.is_empty() {
+            out.extend(defaults.cmd);
+        } else {
+            out.extend(command.iter().cloned());
+        }
+    } else if !defaults.entrypoint.is_empty() {
+        out.extend(defaults.entrypoint);
+        if command.is_empty() {
+            out.extend(defaults.cmd);
+        } else {
+            out.extend(command.iter().cloned());
+        }
+    } else if !command.is_empty() {
+        out.extend(command.iter().cloned());
+    } else {
+        out.extend(defaults.cmd);
+    }
+
+    if out.is_empty() {
+        return Err(format!(
+            "docker secret wrapper could not determine startup command for image `{image}`"
+        ));
+    }
+    Ok(out)
+}
+
+fn inspect_docker_image_defaults(
+    docker_command: &str,
+    image: &str,
+) -> Result<Option<DockerImageDefaults>, String> {
+    match inspect_docker_image_defaults_once(docker_command, image)? {
+        Some(defaults) => Ok(Some(defaults)),
+        None => {
+            let pull = StdCommand::new(docker_command)
+                .args(["pull", image])
+                .output()
+                .map_err(|e| format!("docker pull {image}: {e}"))?;
+            if !pull.status.success() {
+                return Ok(None);
+            }
+            inspect_docker_image_defaults_once(docker_command, image)
+        }
+    }
+}
+
+fn inspect_docker_image_defaults_once(
+    docker_command: &str,
+    image: &str,
+) -> Result<Option<DockerImageDefaults>, String> {
+    let output = StdCommand::new(docker_command)
+        .args([
+            "image",
+            "inspect",
+            image,
+            "--format",
+            "{{json .Config.Entrypoint}}\n{{json .Config.Cmd}}",
+        ])
+        .output()
+        .map_err(|e| format!("docker image inspect {image}: {e}"))?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let text = String::from_utf8(output.stdout)
+        .map_err(|e| format!("docker image inspect {image} produced non-utf8 output: {e}"))?;
+    let mut lines = text.lines();
+    let entrypoint = parse_docker_json_string_list(lines.next().unwrap_or(""))?;
+    let cmd = parse_docker_json_string_list(lines.next().unwrap_or(""))?;
+    Ok(Some(DockerImageDefaults { entrypoint, cmd }))
+}
+
+fn parse_docker_json_string_list(raw: &str) -> Result<Vec<String>, String> {
+    let raw = raw.trim();
+    if raw.is_empty() || raw == "null" || raw == "<no value>" {
+        return Ok(Vec::new());
+    }
+    serde_json::from_str::<Vec<String>>(raw)
+        .map_err(|e| format!("parse docker image defaults: {e}"))
+}
+
+fn create_docker_secret_dir(
+    secret_root: &Path,
+    instance_id: &str,
+    server_name: &str,
+) -> Result<PathBuf, String> {
+    create_private_dir(secret_root)
+        .map_err(|e| format!("create docker secret root `{}`: {e}", secret_root.display()))?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| format!("system clock before unix epoch: {e}"))?
+        .as_nanos();
+    let dir = secret_root.join(format!(
+        "{}-{}-{nonce}",
+        safe_path_component(instance_id),
+        safe_path_component(server_name)
+    ));
+    create_private_dir(&dir)
+        .map_err(|e| format!("create docker secret dir `{}`: {e}", dir.display()))?;
+    Ok(dir)
+}
+
+fn write_docker_secret_files(
+    secret_dir: &Path,
+    secrets: &BTreeMap<String, String>,
+) -> Result<(), String> {
+    for (name, value) in secrets {
+        write_file_with_mode(&secret_dir.join(name), value.as_bytes(), 0o444)
+            .map_err(|e| format!("write docker secret `{name}`: {e}"))?;
+    }
+    Ok(())
+}
+
+fn create_private_dir(path: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+fn write_file_with_mode(path: &Path, bytes: &[u8], mode: u32) -> std::io::Result<()> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(mode);
+    }
+    let mut file = options.open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()
+}
+
+fn safe_path_component(value: &str) -> String {
+    let out: String = value
+        .chars()
+        .map(|c| {
+            if c == '_' || c == '-' || c == '.' || c.is_ascii_alphanumeric() {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if out.is_empty() { "_".into() } else { out }
+}
+
+fn secret_entrypoint_script() -> &'static str {
+    r#"#!/bin/sh
+set -eu
+
+for secret in /run/secrets/*; do
+  [ -f "$secret" ] || continue
+  name=${secret##*/}
+  case "$name" in
+    ""|*[!A-Za-z0-9_]*|[0-9]*) continue ;;
+  esac
+  value=$(cat "$secret")
+  export "$name=$value"
+  export "${name}_FILE=$secret"
+done
+
+exec "$@"
+"#
+}
+
+fn cleanup_secret_dir_sync(secret_dir: Option<&Path>) {
+    if let Some(secret_dir) = secret_dir
+        && let Err(e) = fs::remove_dir_all(secret_dir)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!(
+            error = %e,
+            path = %secret_dir.display(),
+            "mcp runtime: failed to remove docker secret dir"
+        );
+    }
 }
 
 fn is_env_name(name: &str) -> bool {
@@ -1039,7 +1543,13 @@ async fn main() -> std::process::ExitCode {
     if let Err(e) = set_socket_mode(&args.socket) {
         tracing::warn!(error = %e, socket = %args.socket.display(), "failed to chmod socket");
     }
-    let runtime = Runtime::new(Duration::from_secs(args.idle_seconds));
+    let runtime = Runtime::with_docker_and_secrets(
+        Duration::from_secs(args.idle_seconds),
+        Arc::new(CliDockerController {
+            command: "docker".to_string(),
+        }),
+        args.secrets_dir.clone(),
+    );
     if args.idle_seconds > 0 {
         tokio::spawn(Arc::clone(&runtime).reap_idle());
     }
@@ -1146,6 +1656,17 @@ fn set_socket_mode(path: &PathBuf) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
+    fn test_secret_root(name: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "dyson-mcp-runtime-{name}-{}-{nonce}",
+            std::process::id()
+        ))
+    }
+
     #[derive(Default)]
     struct MockDocker {
         server_cleanups: Mutex<Vec<(String, String)>>,
@@ -1154,7 +1675,7 @@ mod tests {
 
     #[async_trait]
     impl DockerController for MockDocker {
-        fn command(&self) -> &str {
+        fn command(&self) -> &'static str {
             "docker"
         }
 
@@ -1517,7 +2038,7 @@ for line in sys.stdin:
     }
 
     #[test]
-    fn docker_run_args_moves_inline_env_values_out_of_argv() {
+    fn docker_run_args_mounts_env_values_as_secret_files() {
         let args = vec![
             "run".to_string(),
             "--rm".to_string(),
@@ -1525,18 +2046,73 @@ for line in sys.stdin:
             "MASSIVE_API_KEY=secret-one".to_string(),
             "--env=OTHER_TOKEN=secret-two".to_string(),
             "-eTHIRD_TOKEN=secret-three".to_string(),
+            "--entrypoint".to_string(),
+            "python".to_string(),
             "example/mcp".to_string(),
+            "./entrypoint.py".to_string(),
         ];
-        let mut env = HashMap::new();
-        let out = docker_run_args_with_env(&args, "i-1", "stdio", &mut env);
+        let secret_root = test_secret_root("docker-env-files");
+        let launch = docker_run_launch(
+            &args,
+            &HashMap::from([("ENV_MAP_TOKEN".to_string(), "secret-four".to_string())]),
+            "i-1",
+            "stdio",
+            &secret_root,
+            "docker",
+        )
+        .unwrap();
+        let secret_dir = launch.secret_dir.as_ref().expect("secret dir");
+        let joined = launch.args.join(" ");
 
-        assert!(out.windows(2).any(|w| w == ["-e", "MASSIVE_API_KEY"]));
-        assert!(out.iter().any(|arg| arg == "--env=OTHER_TOKEN"));
-        assert!(out.iter().any(|arg| arg == "-eTHIRD_TOKEN"));
-        assert!(!out.iter().any(|arg| arg.contains("secret-")));
-        assert_eq!(env["MASSIVE_API_KEY"], "secret-one");
-        assert_eq!(env["OTHER_TOKEN"], "secret-two");
-        assert_eq!(env["THIRD_TOKEN"], "secret-three");
+        for value in ["secret-one", "secret-two", "secret-three", "secret-four"] {
+            assert!(!joined.contains(value));
+        }
+        assert!(
+            launch
+                .args
+                .windows(2)
+                .any(|w| { w == ["--entrypoint", SECRET_ENTRYPOINT_CONTAINER_PATH,] })
+        );
+        for name in [
+            "ENV_MAP_TOKEN",
+            "MASSIVE_API_KEY",
+            "OTHER_TOKEN",
+            "THIRD_TOKEN",
+        ] {
+            let expected_file_env = format!("{name}_FILE={CONTAINER_SECRET_DIR}/{name}");
+            assert!(
+                launch
+                    .args
+                    .windows(2)
+                    .any(|w| w[0] == "--env" && w[1] == expected_file_env)
+            );
+            assert!(
+                launch
+                    .args
+                    .iter()
+                    .any(|arg| { arg.contains(&format!("dst={CONTAINER_SECRET_DIR}/{name}")) })
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(secret_dir.join("MASSIVE_API_KEY")).unwrap(),
+            "secret-one"
+        );
+        assert_eq!(
+            std::fs::read_to_string(secret_dir.join("ENV_MAP_TOKEN")).unwrap(),
+            "secret-four"
+        );
+        let image_index = launch
+            .args
+            .iter()
+            .position(|arg| arg == "example/mcp")
+            .expect("image arg");
+        assert_eq!(
+            &launch.args[image_index + 1..],
+            ["python", "./entrypoint.py"]
+        );
+
+        cleanup_secret_dir_sync(launch.secret_dir.as_deref());
+        let _ = std::fs::remove_dir_all(secret_root);
     }
 
     #[tokio::test]

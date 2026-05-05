@@ -282,18 +282,19 @@ async fn full_walkthrough() {
         Arc::new(dyson_swarm::webhooks::NullWebhookDispatcher),
         cipher_dir.clone(),
     ));
-    let shares_svc = Arc::new(dyson_swarm::shares::ShareService::new(
-        pool.clone(),
-        user_secrets_svc.clone(),
-        instance_svc.clone(),
-        dyson_swarm::shares::ShareMetrics::new(),
-        None,
-    ));
     let cache_dir = tempfile::tempdir().unwrap();
     let artefact_cache = Arc::new(dyson_swarm::artefacts::ArtefactCacheService::new(
         pool.clone(),
         cache_dir.path().to_path_buf(),
         cipher_dir.clone(),
+    ));
+    let shares_svc = Arc::new(dyson_swarm::shares::ShareService::new(
+        pool.clone(),
+        user_secrets_svc.clone(),
+        instance_svc.clone(),
+        artefact_cache.clone(),
+        dyson_swarm::shares::ShareMetrics::new(),
+        None,
     ));
     let state_files = Arc::new(dyson_swarm::state_files::StateFileService::new(
         pool.clone(),

@@ -48,8 +48,13 @@ pub async fn dispatch(State(state): State<AppState>, req: Request, next: Next) -
     else {
         return next.run(req).await;
     };
-    let host_no_port = host.split(':').next().unwrap_or("");
-    let expected = format!("share.{apex}");
+    let host_no_port = host
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    let expected = format!("share.{}", apex.trim_end_matches('.').to_ascii_lowercase());
     if host_no_port != expected {
         return next.run(req).await;
     }

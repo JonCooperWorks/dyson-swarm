@@ -1,0 +1,10 @@
+[advisories]
+ignore = [
+    # RUSTSEC-2023-0071: `rsa` Marvin timing advisory via transitive deps.
+    # No patched version is available in this tree; swarm does not expose
+    # attacker-chosen RSA private-key decryption on request paths.
+    "RUSTSEC-2023-0071",
+    # RUSTSEC-2024-0370: `proc-macro-error` is unmaintained and pulled through
+    # build/proc-macro tooling, not runtime request handling.
+    "RUSTSEC-2024-0370",
+]

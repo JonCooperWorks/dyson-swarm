@@ -100,22 +100,23 @@ pub async fn dispatch(
     let Some(instance_id) = extract_instance_subdomain(host, base) else {
         return next.run(req).await;
     };
-    forward(state, instance_id.to_string(), req).await
+    forward(state, instance_id, req).await
 }
 
 /// Pure parser — exposed for tests.  Returns the instance id slice from
 /// `Host: <id>.<base>[:port]` when there's exactly one label in front
 /// of the configured base.  Multi-label prefixes (`a.b.<base>`) and
 /// the bare base host (`<base>`) both return `None`.
-pub fn extract_instance_subdomain<'a>(host: &'a str, base: &str) -> Option<&'a str> {
-    let host_no_port = host.split(':').next().unwrap_or("");
+pub fn extract_instance_subdomain(host: &str, base: &str) -> Option<String> {
+    let host_no_port = canonical_host(host);
+    let base = canonical_host(base);
     // Match the suffix `.{base}` exactly.  A bare `host == base` must
     // not match — that's swarm's own UI, not a sandbox.
     let suffix_len = base.len() + 1;
     if host_no_port.len() <= suffix_len {
         return None;
     }
-    if !host_no_port.ends_with(base) {
+    if !host_no_port.ends_with(&base) {
         return None;
     }
     let dot_idx = host_no_port.len() - suffix_len;
@@ -130,7 +131,15 @@ pub fn extract_instance_subdomain<'a>(host: &'a str, base: &str) -> Option<&'a s
     if prefix.is_empty() || prefix.contains('.') {
         return None;
     }
-    Some(prefix)
+    Some(prefix.to_string())
+}
+
+fn canonical_host(host: &str) -> String {
+    host.split(':')
+        .next()
+        .unwrap_or("")
+        .trim_end_matches('.')
+        .to_ascii_lowercase()
 }
 
 async fn forward(state: DispatchState, instance_id: String, req: Request) -> Response<Body> {
@@ -491,15 +500,17 @@ pub fn origin_host_matches(raw: &str, base: &str) -> bool {
     // Strip scheme.  Only HTTPS is allowed — Caddy redirects HTTP to
     // HTTPS so a legitimate browser never sends an http:// Origin to
     // swarm in production.
-    let Some(rest) = raw.strip_prefix("https://") else {
+    if raw.len() < "https://".len() || !raw[..8].eq_ignore_ascii_case("https://") {
         return false;
-    };
+    }
+    let rest = &raw[8..];
     // Trim path/query/fragment if present (Referer carries them).
     let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
     // Strip userinfo if present (`user:pw@host`).  Browsers don't emit
     // this on Origin, but Referer can carry whatever the page URL had.
     let host_port = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
-    let host = host_port.split(':').next().unwrap_or("");
+    let host = canonical_host(host_port);
+    let base = canonical_host(base);
     if host.is_empty() {
         return false;
     }
@@ -512,7 +523,7 @@ pub fn origin_host_matches(raw: &str, base: &str) -> bool {
     if host.len() <= suffix_len {
         return false;
     }
-    if !host.ends_with(base) {
+    if !host.ends_with(&base) {
         return false;
     }
     let dot_idx = host.len() - suffix_len;
@@ -699,7 +710,7 @@ mod tests {
     #[test]
     fn extract_subdomain_happy_path() {
         assert_eq!(
-            extract_instance_subdomain("abc123.swarm.example.com", "swarm.example.com"),
+            extract_instance_subdomain("abc123.swarm.example.com", "swarm.example.com").as_deref(),
             Some("abc123"),
         );
     }
@@ -707,7 +718,17 @@ mod tests {
     #[test]
     fn extract_subdomain_strips_port() {
         assert_eq!(
-            extract_instance_subdomain("abc123.swarm.example.com:8080", "swarm.example.com"),
+            extract_instance_subdomain("abc123.swarm.example.com:8080", "swarm.example.com")
+                .as_deref(),
+            Some("abc123"),
+        );
+    }
+
+    #[test]
+    fn extract_subdomain_canonicalizes_host_case_and_trailing_dot() {
+        assert_eq!(
+            extract_instance_subdomain("ABC123.SWARM.EXAMPLE.COM.:443", "swarm.example.com")
+                .as_deref(),
             Some("abc123"),
         );
     }
@@ -770,6 +791,14 @@ mod tests {
         assert!(origin_host_matches(
             "https://abc123.swarm.example.com:8443",
             "swarm.example.com"
+        ));
+    }
+
+    #[test]
+    fn origin_match_is_case_insensitive() {
+        assert!(origin_host_matches(
+            "HTTPS://ABC123.SWARM.EXAMPLE.COM:443/path",
+            "swarm.example.com",
         ));
     }
 

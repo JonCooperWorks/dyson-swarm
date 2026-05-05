@@ -19,6 +19,7 @@ use super::{
     RejectReason, ShareError, ShareMetrics, ShareTtl, build_url, decode_token, ensure_signing_key,
     jti_hex, load_signing_key, new_payload, rotate_signing_key, sign_token, verify_with_key,
 };
+use crate::artefacts::ArtefactCache;
 use crate::db::shares::{self, ShareRow, ShareSpec};
 use crate::error::{StoreError, SwarmError};
 use crate::instance::InstanceService;
@@ -61,6 +62,7 @@ pub struct ShareService {
     pool: SqlitePool,
     user_secrets: Arc<UserSecretsService>,
     instances: Arc<InstanceService>,
+    artefact_cache: ArtefactCache,
     metrics: Arc<ShareMetrics>,
     apex: Option<String>,
 }
@@ -76,6 +78,7 @@ impl ShareService {
         pool: SqlitePool,
         user_secrets: Arc<UserSecretsService>,
         instances: Arc<InstanceService>,
+        artefact_cache: ArtefactCache,
         metrics: Arc<ShareMetrics>,
         apex: Option<String>,
     ) -> Self {
@@ -83,6 +86,7 @@ impl ShareService {
             pool,
             user_secrets,
             instances,
+            artefact_cache,
             metrics,
             apex,
         }
@@ -97,11 +101,11 @@ impl ShareService {
     }
 
     /// Mint a new share for an artefact owned by `caller_user_id`.
-    /// The artefact's existence on dyson is *not* verified here — we
-    /// trust the SPA to mint shares only for artefacts the user can
-    /// see.  At read time the verifier hits dyson; a 404 there flows
-    /// straight back to the viewer as a 404, so a typo'd id never
-    /// silently leaks anything.
+    /// The artefact must already exist in the swarm-side cache for
+    /// the exact `(instance_id, chat_id, artefact_id)` tuple.  The
+    /// cache is populated from dyson's authenticated artefact listing,
+    /// so this keeps share creation tied to artefacts the caller could
+    /// actually see instead of trusting a browser-supplied id.
     pub async fn mint(
         &self,
         caller_user_id: &str,
@@ -120,6 +124,15 @@ impl ShareService {
                 SwarmError::NotFound => ShareServiceError::NotFound,
                 other => ShareServiceError::Upstream(other.to_string()),
             })?;
+        let cached = self
+            .artefact_cache
+            .find(instance_id, chat_id, artefact_id)
+            .await
+            .map_err(|e| ShareServiceError::Upstream(e.to_string()))?;
+        match cached {
+            Some(row) if row.owner_id == caller_user_id => {}
+            _ => return Err(ShareServiceError::NotFound),
+        }
         let key = ensure_signing_key(&self.user_secrets, caller_user_id).await?;
         let expires_at = now_secs() + ttl.seconds();
         let payload = new_payload(

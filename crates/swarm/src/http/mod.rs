@@ -15,6 +15,7 @@
 pub mod admin_users;
 pub mod assets;
 pub mod auth_config;
+pub mod auth_session;
 pub mod byok;
 pub mod dyson_proxy;
 pub mod healthz;
@@ -217,6 +218,7 @@ pub fn router(
     let normal = Router::new()
         .merge(healthz::router())
         .merge(auth_config::router(state.clone()))
+        .merge(auth_session::router(state.clone(), user_auth.clone()))
         .merge(instances::internal_router(state.clone()))
         .merge(internal_ingest::router(state.clone()))
         .merge(internal_state::router(state.clone()))
@@ -352,18 +354,19 @@ mod tests {
             Arc::new(crate::webhooks::NullWebhookDispatcher),
             cipher_dir.clone(),
         ));
-        let shares_svc = Arc::new(crate::shares::ShareService::new(
-            pool.clone(),
-            user_secrets.clone(),
-            instance_svc.clone(),
-            crate::shares::ShareMetrics::new(),
-            None,
-        ));
         let cache_dir = tempfile::tempdir().unwrap();
         let artefact_cache = Arc::new(crate::artefacts::ArtefactCacheService::new(
             pool.clone(),
             cache_dir.path().to_path_buf(),
             cipher_dir.clone(),
+        ));
+        let shares_svc = Arc::new(crate::shares::ShareService::new(
+            pool.clone(),
+            user_secrets.clone(),
+            instance_svc.clone(),
+            artefact_cache.clone(),
+            crate::shares::ShareMetrics::new(),
+            None,
         ));
         let state_files = Arc::new(crate::state_files::StateFileService::new(
             pool.clone(),
@@ -487,6 +490,56 @@ mod tests {
         .await;
         let r = reqwest::get(format!("{base}/v1/instances")).await.unwrap();
         assert_eq!(r.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn auth_session_sets_httponly_domain_cookie() {
+        let (mut state, user_auth, _user_id) = build_with_user("alice").await;
+        state.hostname = Some("swarm.example.com".into());
+        let base = spawn(
+            state,
+            AuthState::enforced(crate::config::OidcRoles {
+                claim: "https://test/roles".into(),
+                admin: "rol_admin".into(),
+            }),
+            user_auth,
+        )
+        .await;
+        let r = reqwest::Client::new()
+            .post(format!("{base}/auth/session"))
+            .bearer_auth("access.jwt.token")
+            .json(&serde_json::json!({ "expires_at": crate::now_secs() + 3600 }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 204);
+        let cookie = r
+            .headers()
+            .get(reqwest::header::SET_COOKIE)
+            .expect("session response must set cookie")
+            .to_str()
+            .unwrap();
+        assert!(cookie.starts_with("dyson_swarm_session=access.jwt.token"));
+        assert!(cookie.contains("HttpOnly"));
+        assert!(cookie.contains("SameSite=Strict"));
+        assert!(cookie.contains("Secure"));
+        assert!(cookie.contains("Domain=swarm.example.com"));
+
+        let r = reqwest::Client::new()
+            .delete(format!("{base}/auth/session"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 204);
+        let cookie = r
+            .headers()
+            .get(reqwest::header::SET_COOKIE)
+            .expect("clear response must clear cookie")
+            .to_str()
+            .unwrap();
+        assert!(cookie.starts_with("dyson_swarm_session=;"));
+        assert!(cookie.contains("HttpOnly"));
+        assert!(cookie.contains("Max-Age=0"));
     }
 
     #[tokio::test]

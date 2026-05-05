@@ -159,6 +159,43 @@ describe('parseReturnTo', () => {
 });
 
 describe('handleCallback', () => {
+  test('hands the subdomain session cookie to the server as HttpOnly state', async () => {
+    window.history.pushState(null, '', '/?code=fresh-code&state=fresh-state#/i/abc');
+    sessionStorage.setItem('swarm:auth:pending', JSON.stringify({
+      verifier: 'verifier',
+      state: 'fresh-state',
+      returnTo: '#/i/abc',
+      issuedAt: Date.now(),
+    }));
+    const fetch = vi.fn(async (url, opts = {}) => {
+      if (url === 'https://issuer.example/token') {
+        return new Response(JSON.stringify({
+          access_token: 'access.jwt.token',
+          refresh_token: 'refresh-token',
+          expires_in: 3600,
+          token_type: 'Bearer',
+        }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+      if (url === '/auth/session') {
+        expect(opts.method).toBe('POST');
+        expect(opts.headers.Authorization).toBe('Bearer access.jwt.token');
+        return new Response(null, { status: 204 });
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    });
+    vi.stubGlobal('fetch', fetch);
+
+    await handleCallback(
+      { client_id: 'client-id' },
+      { token_endpoint: 'https://issuer.example/token' },
+    );
+
+    expect(fetch).toHaveBeenCalledWith('/auth/session', expect.objectContaining({
+      method: 'POST',
+    }));
+    expect(document.cookie).not.toContain('dyson_swarm_session=');
+  });
+
   test('recovers from stale callback state instead of trapping retry on the same URL', async () => {
     window.history.pushState(null, '', '/?code=old-code&state=old-state#/i/abc');
     sessionStorage.setItem('swarm:auth:pending', JSON.stringify({
@@ -171,7 +208,7 @@ describe('handleCallback', () => {
       access_token: 'stale-token',
       expires_at: Date.now() + 60_000,
     }));
-    const fetch = vi.fn();
+    const fetch = vi.fn(() => Promise.resolve({ ok: true }));
     vi.stubGlobal('fetch', fetch);
 
     await expect(handleCallback(
@@ -183,6 +220,8 @@ describe('handleCallback', () => {
     expect(window.location.hash).toBe('#/i/abc');
     expect(sessionStorage.getItem('swarm:auth:pending')).toBeNull();
     expect(sessionStorage.getItem('swarm:auth')).toBeNull();
-    expect(fetch).not.toHaveBeenCalled();
+    expect(fetch).toHaveBeenCalledWith('/auth/session', expect.objectContaining({
+      method: 'DELETE',
+    }));
   });
 });

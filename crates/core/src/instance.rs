@@ -19,6 +19,7 @@ use uuid::Uuid;
 
 use crate::error::SwarmError;
 use crate::mcp_servers::{self, McpAuthSpec, McpServerSpec};
+use crate::upstream_policy::{OutboundUrlPolicy, validate_outbound_url};
 
 /// True when the OAuth-token-bearing fields of the auth shape
 /// (kind + endpoints + scopes) haven't moved.  When they have, the
@@ -333,6 +334,9 @@ pub struct InstanceService {
     /// DNS resolver for hostname entries in Allowlist/Denylist.
     /// Production uses `DnsHostResolver`; tests inject a mock.
     resolver: Arc<dyn HostResolver>,
+    /// Shared SSRF policy for tenant-supplied remote MCP upstream URLs.
+    /// The same policy primitives back the BYO LLM upstream guard.
+    mcp_upstream_policy: OutboundUrlPolicy,
     /// Per-user encrypted secret store used to persist the upstream
     /// URL + auth credentials for each MCP server attached to an
     /// instance.  `None` skips the persistence step (older callers
@@ -735,6 +739,7 @@ impl InstanceService {
             image_gen_defaults: Some(ImageGenDefaults::openrouter_gemini3_image()),
             llm_cidr: None,
             resolver: Arc::new(DnsHostResolver),
+            mcp_upstream_policy: OutboundUrlPolicy::default(),
             mcp_secrets: None,
             state_files: None,
         }
@@ -755,6 +760,12 @@ impl InstanceService {
     /// backed mock so they don't depend on real DNS.
     pub fn with_resolver(mut self, resolver: Arc<dyn HostResolver>) -> Self {
         self.resolver = resolver;
+        self
+    }
+
+    /// Builder-style: override remote MCP upstream URL policy.
+    pub fn with_mcp_upstream_policy(mut self, policy: OutboundUrlPolicy) -> Self {
+        self.mcp_upstream_policy = policy;
         self
     }
 
@@ -797,6 +808,54 @@ impl InstanceService {
     /// dyson's `OpenRouterImageProvider` when it builds the request.
     fn image_proxy_base(&self) -> String {
         format!("{}/openrouter", self.proxy_base.trim_end_matches('/'))
+    }
+
+    async fn validate_mcp_server_spec(&self, spec: &McpServerSpec) -> Result<(), SwarmError> {
+        self.validate_mcp_url(&spec.url).await?;
+        self.validate_mcp_auth_urls(&spec.auth).await
+    }
+
+    async fn validate_mcp_entry(
+        &self,
+        entry: &mcp_servers::McpServerEntry,
+    ) -> Result<(), SwarmError> {
+        match entry.runtime.as_ref() {
+            Some(mcp_servers::McpRuntimeSpec::DockerStdio { .. }) => {}
+            Some(mcp_servers::McpRuntimeSpec::HttpStreamable { url, .. }) => {
+                self.validate_mcp_url(url).await?;
+            }
+            None => {
+                self.validate_mcp_url(&entry.url).await?;
+            }
+        }
+        self.validate_mcp_auth_urls(&entry.auth).await
+    }
+
+    async fn validate_mcp_auth_urls(&self, auth: &McpAuthSpec) -> Result<(), SwarmError> {
+        let McpAuthSpec::Oauth {
+            authorization_url,
+            token_url,
+            registration_url,
+            ..
+        } = auth
+        else {
+            return Ok(());
+        };
+        for url in [authorization_url, token_url, registration_url]
+            .into_iter()
+            .flatten()
+            .filter(|url| !url.trim().is_empty())
+        {
+            self.validate_mcp_url(url).await?;
+        }
+        Ok(())
+    }
+
+    async fn validate_mcp_url(&self, url: &str) -> Result<(), SwarmError> {
+        validate_outbound_url(&self.mcp_upstream_policy, url)
+            .await
+            .map(|_| ())
+            .map_err(|e| SwarmError::BadRequest(format!("mcp upstream URL rejected: {e}")))
     }
 
     fn configure_body_for_existing_row(
@@ -2537,6 +2596,10 @@ impl InstanceService {
         )
         .await?;
 
+        for spec in &req.mcp_servers {
+            self.validate_mcp_server_spec(spec).await?;
+        }
+
         // Decode the model list once: SWARM_MODELS (CSV) is the
         // multi-model wire shape; legacy clients still pass the
         // single SWARM_MODEL.  We persist the same vec the
@@ -3043,6 +3106,8 @@ impl InstanceService {
         if url.trim().is_empty() {
             return Err(SwarmError::BadRequest("server url is required".into()));
         }
+        self.validate_mcp_url(&url).await?;
+        self.validate_mcp_auth_urls(&auth).await?;
         // Read-modify-write the entry under its current oauth_tokens
         // (if any) so an OAuth-already-connected server doesn't lose
         // its tokens just because the user edited the URL.  We also
@@ -3138,6 +3203,7 @@ impl InstanceService {
             .ok_or_else(|| SwarmError::PolicyDenied("mcp secrets store not configured".into()))?;
         let (name, entry) =
             mcp_servers::entry_from_vscode_config(raw).map_err(SwarmError::BadRequest)?;
+        self.validate_mcp_entry(&entry).await?;
 
         mcp_servers::put(secrets, owner_id, id, &name, &entry)
             .await
@@ -5023,7 +5089,7 @@ mod tests {
                     mcp_servers: vec![
                         crate::mcp_servers::McpServerSpec {
                             name: "linear".into(),
-                            url: "https://api.linear.app/mcp".into(),
+                            url: "https://8.8.8.8/mcp".into(),
                             auth: crate::mcp_servers::McpAuthSpec::Bearer {
                                 token: "lin_secret".into(),
                             },
@@ -5031,7 +5097,7 @@ mod tests {
                         },
                         crate::mcp_servers::McpServerSpec {
                             name: "no_auth".into(),
-                            url: "https://example/mcp".into(),
+                            url: "https://8.8.4.4/mcp".into(),
                             auth: crate::mcp_servers::McpAuthSpec::None,
                             enabled_tools: None,
                         },
@@ -5067,7 +5133,7 @@ mod tests {
             .await
             .unwrap()
             .expect("linear entry must be persisted");
-        assert_eq!(entry.url, "https://api.linear.app/mcp");
+        assert_eq!(entry.url, "https://8.8.8.8/mcp");
         match entry.auth {
             crate::mcp_servers::McpAuthSpec::Bearer { token } => {
                 assert_eq!(
@@ -5110,7 +5176,7 @@ mod tests {
             &created.id,
             McpServerSpec {
                 name: "linear".into(),
-                url: "https://api.linear.app/mcp".into(),
+                url: "https://8.8.8.8/mcp".into(),
                 auth: crate::mcp_servers::McpAuthSpec::Bearer {
                     token: "lin_xxx".into(),
                 },
@@ -5133,7 +5199,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(entry.url, "https://api.linear.app/mcp");
+        assert_eq!(entry.url, "https://8.8.8.8/mcp");
         match entry.auth {
             crate::mcp_servers::McpAuthSpec::Bearer { token } => assert_eq!(token, "lin_xxx"),
             _ => panic!("bearer auth expected"),
@@ -5144,6 +5210,31 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(names, vec!["linear"]);
+    }
+
+    #[tokio::test]
+    async fn put_mcp_server_rejects_loopback_upstream_url() {
+        let (svc, _cube, _tokens, _instances, _recorder, _user_secrets, owner) =
+            build_with_mcp_secrets().await;
+        let created = hire_minimal(&svc, &owner).await;
+
+        let err = svc
+            .put_mcp_server(
+                &owner,
+                &created.id,
+                McpServerSpec {
+                    name: "local".into(),
+                    url: "http://127.0.0.1:11434/mcp".into(),
+                    auth: crate::mcp_servers::McpAuthSpec::None,
+                    enabled_tools: None,
+                },
+            )
+            .await
+            .expect_err("loopback MCP upstream must be rejected by SSRF policy");
+        assert!(
+            matches!(err, SwarmError::BadRequest(_) | SwarmError::PolicyDenied(_)),
+            "unexpected error: {err:?}",
+        );
     }
 
     #[tokio::test]
@@ -5159,7 +5250,7 @@ mod tests {
             &created.id,
             McpServerSpec {
                 name: "linear".into(),
-                url: "https://api.linear.app/mcp".into(),
+                url: "https://8.8.8.8/mcp".into(),
                 auth: crate::mcp_servers::McpAuthSpec::None,
                 enabled_tools: None,
             },
@@ -5333,7 +5424,7 @@ mod tests {
             &created.id,
             McpServerSpec {
                 name: "linear".into(),
-                url: "https://linear.example.com/mcp".into(),
+                url: "https://8.8.4.4/mcp".into(),
                 auth: crate::mcp_servers::McpAuthSpec::None,
                 enabled_tools: None,
             },
@@ -5390,7 +5481,7 @@ mod tests {
             &created.id,
             McpServerSpec {
                 name: "gh".into(),
-                url: "https://gh/mcp".into(),
+                url: "https://8.8.8.8/mcp".into(),
                 auth: crate::mcp_servers::McpAuthSpec::Oauth {
                     scopes: vec!["read".into()],
                     client_id: None,
@@ -5414,7 +5505,7 @@ mod tests {
             access_token: "AT".into(),
             refresh_token: Some("RT".into()),
             expires_at: Some(crate::now_secs() + 3600),
-            token_url: "https://gh/token".into(),
+            token_url: "https://8.8.8.8/token".into(),
             client_id: "c".into(),
             client_secret: None,
         });
@@ -5428,7 +5519,7 @@ mod tests {
             &created.id,
             McpServerSpec {
                 name: "gh".into(),
-                url: "https://gh-v2/mcp".into(),
+                url: "https://8.8.4.4/mcp".into(),
                 auth: crate::mcp_servers::McpAuthSpec::Oauth {
                     scopes: vec!["read".into()],
                     client_id: None,
@@ -5446,7 +5537,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(after.url, "https://gh-v2/mcp");
+        assert_eq!(after.url, "https://8.8.4.4/mcp");
         let tokens = after.oauth_tokens.expect("oauth tokens must be preserved");
         assert_eq!(tokens.access_token, "AT");
     }
@@ -5465,7 +5556,7 @@ mod tests {
             &created.id,
             McpServerSpec {
                 name: "x".into(),
-                url: "https://x/mcp".into(),
+                url: "https://8.8.8.8/mcp".into(),
                 auth: crate::mcp_servers::McpAuthSpec::Oauth {
                     scopes: vec!["read".into()],
                     client_id: None,
@@ -5500,7 +5591,7 @@ mod tests {
             &created.id,
             McpServerSpec {
                 name: "x".into(),
-                url: "https://x/mcp".into(),
+                url: "https://8.8.8.8/mcp".into(),
                 auth: crate::mcp_servers::McpAuthSpec::Oauth {
                     scopes: vec!["write".into()],
                     client_id: None,
@@ -5538,7 +5629,7 @@ mod tests {
             &created.id,
             McpServerSpec {
                 name: "only".into(),
-                url: "https://only/mcp".into(),
+                url: "https://8.8.8.8/mcp".into(),
                 auth: crate::mcp_servers::McpAuthSpec::None,
                 enabled_tools: None,
             },
@@ -5581,7 +5672,7 @@ mod tests {
                 &created.id,
                 McpServerSpec {
                     name: "x".into(),
-                    url: "https://x/mcp".into(),
+                    url: "https://8.8.8.8/mcp".into(),
                     auth: crate::mcp_servers::McpAuthSpec::None,
                     enabled_tools: None,
                 },
@@ -7018,7 +7109,7 @@ mod tests {
                     network_policy: NetworkPolicy::Open,
                     mcp_servers: vec![crate::mcp_servers::McpServerSpec {
                         name: "linear".into(),
-                        url: "https://api.linear.app/mcp".into(),
+                        url: "https://8.8.8.8/mcp".into(),
                         auth: crate::mcp_servers::McpAuthSpec::Bearer {
                             token: "lin_secret".into(),
                         },
@@ -7032,7 +7123,7 @@ mod tests {
         // Stamp an oauth_tokens blob into the MCP entry so we can
         // prove the active OAuth session survives the clone.
         let entry = crate::mcp_servers::McpServerEntry {
-            url: "https://api.linear.app/mcp".into(),
+            url: "https://8.8.8.8/mcp".into(),
             auth: crate::mcp_servers::McpAuthSpec::Bearer {
                 token: "lin_secret".into(),
             },
@@ -7086,7 +7177,7 @@ mod tests {
             .await
             .unwrap()
             .expect("clone must have a linear MCP entry");
-        assert_eq!(cloned_entry.url, "https://api.linear.app/mcp");
+        assert_eq!(cloned_entry.url, "https://8.8.8.8/mcp");
         let oauth = cloned_entry.oauth_tokens.expect("oauth_tokens preserved");
         assert_eq!(oauth.access_token, "atk");
         assert_eq!(oauth.refresh_token.as_deref(), Some("rtk"));
@@ -7189,7 +7280,7 @@ mod tests {
                     network_policy: NetworkPolicy::Open,
                     mcp_servers: vec![crate::mcp_servers::McpServerSpec {
                         name: "linear".into(),
-                        url: "https://api.linear.app/mcp".into(),
+                        url: "https://8.8.8.8/mcp".into(),
                         auth: crate::mcp_servers::McpAuthSpec::Bearer {
                             token: "lin_secret".into(),
                         },
@@ -7200,7 +7291,7 @@ mod tests {
             .await
             .unwrap();
         let mcp_entry = crate::mcp_servers::McpServerEntry {
-            url: "https://api.linear.app/mcp".into(),
+            url: "https://8.8.8.8/mcp".into(),
             auth: crate::mcp_servers::McpAuthSpec::Bearer {
                 token: "lin_secret".into(),
             },
@@ -7264,7 +7355,7 @@ mod tests {
             .await
             .unwrap()
             .expect("clone must have a linear MCP entry");
-        assert_eq!(cloned_entry.url, "https://api.linear.app/mcp");
+        assert_eq!(cloned_entry.url, "https://8.8.8.8/mcp");
         assert_eq!(
             cloned_entry
                 .oauth_tokens

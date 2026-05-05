@@ -240,18 +240,36 @@ async fn build() -> Fixture {
         cipher_dir.clone(),
     ));
     let apex = "swarm.test".to_string();
-    let shares_svc = Arc::new(dyson_swarm::shares::ShareService::new(
-        pool.clone(),
-        user_secrets_svc.clone(),
-        instance_svc.clone(),
-        dyson_swarm::shares::ShareMetrics::new(),
-        Some(apex.clone()),
-    ));
     let cache_dir = tempfile::tempdir().unwrap();
     let artefact_cache = Arc::new(dyson_swarm::artefacts::ArtefactCacheService::new(
         pool.clone(),
         cache_dir.path().to_path_buf(),
         cipher_dir.clone(),
+    ));
+    artefact_cache
+        .ingest(
+            dyson_swarm::artefacts::IngestMeta {
+                instance_id: &instance_id,
+                owner_id: &user_id,
+                chat_id: "c-test",
+                artefact_id: "a-test",
+                kind: "security_review",
+                title: "Test Artefact",
+                mime: Some("text/markdown"),
+                created_at: dyson_swarm::now_secs(),
+                metadata_json: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    let shares_svc = Arc::new(dyson_swarm::shares::ShareService::new(
+        pool.clone(),
+        user_secrets_svc.clone(),
+        instance_svc.clone(),
+        artefact_cache.clone(),
+        dyson_swarm::shares::ShareMetrics::new(),
+        Some(apex.clone()),
     ));
     let state_files = Arc::new(dyson_swarm::state_files::StateFileService::new(
         pool.clone(),
@@ -411,6 +429,24 @@ async fn share_admin_lifecycle_round_trips() {
     let _ = (fx.user_id, &fx.dyson);
 }
 
+#[tokio::test]
+async fn mint_unknown_artefact_is_404() {
+    let fx = build().await;
+    let client = reqwest::Client::new();
+    let r = client
+        .post(format!(
+            "{}/v1/instances/{}/artefacts/not-in-cache/shares",
+            fx.base, fx.instance_id
+        ))
+        .header("X-Dyson-CSRF", "1")
+        .header("Origin", fx.base.clone())
+        .json(&json!({ "chat_id": "c-test", "ttl": "7d", "label": "ghost" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 404, "share mint must verify artefact existence");
+}
+
 /// Bad ttl strings 400 (no oracle vs other failures — invalid input
 /// is structurally distinct from "not yours" / "not found").
 #[tokio::test]
@@ -480,6 +516,23 @@ async fn share_public_bad_token_404s_with_constant_body() {
         .unwrap();
     assert_eq!(r.status(), 404);
     assert_eq!(r.text().await.unwrap(), "not found");
+}
+
+#[tokio::test]
+async fn share_dispatcher_matches_share_host_case_insensitively() {
+    let fx = build().await;
+    let client = reqwest::Client::new();
+    let r = client
+        .get(format!("{}/healthz", fx.base))
+        .header("Host", format!("SHARE.{}", fx.apex.to_ascii_uppercase()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        r.status(),
+        404,
+        "share.<apex> host matching must be case-insensitive and intercept before /healthz",
+    );
 }
 
 /// Wrong host on share dispatcher passes through (the route doesn't

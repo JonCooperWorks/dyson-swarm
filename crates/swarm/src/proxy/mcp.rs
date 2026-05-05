@@ -34,6 +34,9 @@ use crate::mcp_servers::{
 };
 use crate::secrets::UserSecretsService;
 use crate::traits::{InstanceStore, TokenStore};
+use crate::upstream_policy::{
+    OutboundUrlPolicy, pinned_outbound_client_builder, validate_outbound_url,
+};
 
 /// Wires the MCP routers.  Cheap to clone — every field is `Arc`.
 #[derive(Clone)]
@@ -69,6 +72,9 @@ pub struct McpService {
     /// absent, the static config vector above is used as a fallback so
     /// small unit tests can construct the service without a pool.
     pub docker_catalog_store: Option<Arc<SqlxMcpDockerCatalogStore>>,
+    /// Shared SSRF policy for remote HTTP/SSE MCP upstreams.  Docker
+    /// runtime entries are local runtime requests and do not use this.
+    pub mcp_upstream_policy: OutboundUrlPolicy,
 }
 
 impl McpService {
@@ -92,6 +98,7 @@ impl McpService {
             docker_catalog: Vec::new(),
             allow_user_docker_json: false,
             docker_catalog_store: None,
+            mcp_upstream_policy: OutboundUrlPolicy::default(),
         })
     }
 
@@ -120,6 +127,11 @@ impl McpService {
 
     pub fn with_docker_catalog_store(mut self, store: Arc<SqlxMcpDockerCatalogStore>) -> Self {
         self.docker_catalog_store = Some(store);
+        self
+    }
+
+    pub fn with_mcp_upstream_policy(mut self, policy: OutboundUrlPolicy) -> Self {
+        self.mcp_upstream_policy = policy;
         self
     }
 
@@ -222,6 +234,45 @@ pub fn admin_router(svc: Arc<McpService>) -> Router {
         .with_state(svc)
 }
 
+async fn pinned_remote_mcp_client(
+    svc: &McpService,
+    entry: &McpServerEntry,
+) -> Result<reqwest::Client, String> {
+    let validated = validate_outbound_url(&svc.mcp_upstream_policy, &entry.url)
+        .await
+        .map_err(|e| format!("mcp upstream URL rejected: {e}"))?;
+    pinned_outbound_client_builder(&validated)
+        .build()
+        .map_err(|e| format!("mcp upstream client build failed: {e}"))
+}
+
+async fn validate_remote_mcp_url(svc: &McpService, url: &str) -> Result<(), String> {
+    validate_outbound_url(&svc.mcp_upstream_policy, url)
+        .await
+        .map(|_| ())
+        .map_err(|e| format!("mcp upstream URL rejected: {e}"))
+}
+
+async fn validate_remote_mcp_auth_urls(svc: &McpService, auth: &McpAuthSpec) -> Result<(), String> {
+    let McpAuthSpec::Oauth {
+        authorization_url,
+        token_url,
+        registration_url,
+        ..
+    } = auth
+    else {
+        return Ok(());
+    };
+    for url in [authorization_url, token_url, registration_url]
+        .into_iter()
+        .flatten()
+        .filter(|url| !url.trim().is_empty())
+    {
+        validate_remote_mcp_url(svc, url).await?;
+    }
+    Ok(())
+}
+
 // ───────────────────────────────────────────────────────────────────
 // JSON-RPC pass-through
 // ───────────────────────────────────────────────────────────────────
@@ -319,7 +370,19 @@ async fn forward(
         .await;
     }
 
-    let mut outbound = svc.http.post(&entry.url);
+    if let Err(err) = validate_remote_mcp_auth_urls(&svc, &entry.auth).await {
+        tracing::warn!(error = %err, server = %server_name, "mcp: auth URL rejected");
+        return error_resp(StatusCode::FORBIDDEN, "mcp upstream not allowed");
+    }
+    let pinned_http = match pinned_remote_mcp_client(&svc, &entry).await {
+        Ok(client) => client,
+        Err(err) => {
+            tracing::warn!(error = %err, server = %server_name, "mcp: upstream rejected");
+            return error_resp(StatusCode::FORBIDDEN, "mcp upstream not allowed");
+        }
+    };
+
+    let mut outbound = pinned_http.post(&entry.url);
     // Pass through Content-Type and Accept verbatim so streamable HTTP
     // MCP servers see the SSE-or-JSON negotiation the agent intended.
     if let Some(ct) = parts.headers.get(axum::http::header::CONTENT_TYPE) {
@@ -445,6 +508,7 @@ async fn ensure_fresh_oauth(
         .refresh_token
         .as_deref()
         .ok_or("token expired and no refresh_token available")?;
+    validate_remote_mcp_url(svc, &tokens.token_url).await?;
     let resp = mcp_servers::refresh_token(
         &tokens.token_url,
         refresh,
@@ -569,6 +633,16 @@ async fn forward_runtime_stdio(
         Ok(s) => s,
         Err(_) => return error_resp(StatusCode::BAD_REQUEST, "JSON-RPC body must be UTF-8"),
     };
+    if let Some(McpRuntimeSpec::HttpStreamable { url, .. }) = entry.runtime.as_ref() {
+        if let Err(err) = validate_remote_mcp_url(svc, url).await {
+            tracing::warn!(error = %err, server = %server_name, "mcp runtime: upstream rejected");
+            return error_resp(StatusCode::FORBIDDEN, "mcp upstream not allowed");
+        }
+        if let Err(err) = validate_remote_mcp_auth_urls(svc, &entry.auth).await {
+            tracing::warn!(error = %err, server = %server_name, "mcp runtime: auth URL rejected");
+            return error_resp(StatusCode::FORBIDDEN, "mcp upstream not allowed");
+        }
+    }
     let request =
         match runtime_forward_request_for_entry(instance_id, server_name, entry, request_json) {
             Ok(request) => request,
@@ -885,6 +959,16 @@ async fn oauth_start(
             ));
         }
     };
+    validate_remote_mcp_url(&svc, &entry.url).await.map_err(|err| {
+        tracing::warn!(error = %err, server = %body.server_name, "mcp: oauth upstream rejected");
+        error_resp(StatusCode::FORBIDDEN, "mcp upstream not allowed")
+    })?;
+    validate_remote_mcp_auth_urls(&svc, &entry.auth)
+        .await
+        .map_err(|err| {
+            tracing::warn!(error = %err, server = %body.server_name, "mcp: oauth URL rejected");
+            error_resp(StatusCode::FORBIDDEN, "mcp upstream not allowed")
+        })?;
 
     let redirect_uri = svc.redirect_uri().ok_or_else(|| {
         error_resp(
@@ -907,6 +991,19 @@ async fn oauth_start(
                 error_resp(StatusCode::BAD_GATEWAY, "oauth discovery failed")
             })?,
     };
+    for url in [
+        Some(&metadata.authorization_endpoint),
+        Some(&metadata.token_endpoint),
+        metadata.registration_endpoint.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        validate_remote_mcp_url(&svc, url).await.map_err(|err| {
+            tracing::warn!(error = %err, server = %body.server_name, "mcp: oauth metadata URL rejected");
+            error_resp(StatusCode::FORBIDDEN, "mcp upstream not allowed")
+        })?;
+    }
 
     // DCR if no client_id was provided.
     let (client_id, client_secret) = match client_id_in {
@@ -1015,6 +1112,10 @@ async fn oauth_callback(State(svc): State<Arc<McpService>>, uri: Uri) -> Respons
     let Some(flow) = svc.flows.take(&state) else {
         return callback_html(StatusCode::BAD_REQUEST, "unknown or expired state");
     };
+    if let Err(err) = validate_remote_mcp_url(&svc, &flow.token_url).await {
+        tracing::warn!(error = %err, "mcp: callback token URL rejected");
+        return callback_html(StatusCode::FORBIDDEN, "mcp upstream not allowed");
+    }
 
     let token_resp = match mcp_servers::exchange_code(
         &flow.token_url,
@@ -1894,11 +1995,15 @@ async fn post_jsonrpc_for_entry(
     session_id: Option<&str>,
 ) -> Result<JsonRpcResponse, String> {
     if entry.runtime.is_none() {
-        return post_jsonrpc(&svc.http, entry, body, session_id).await;
+        return post_jsonrpc(svc, entry, body, session_id).await;
     }
     let Some(socket_path) = svc.runtime_socket_path.as_deref() else {
         return Err("mcp runtime helper not configured".into());
     };
+    if let Some(McpRuntimeSpec::HttpStreamable { url, .. }) = entry.runtime.as_ref() {
+        validate_remote_mcp_url(svc, url).await?;
+        validate_remote_mcp_auth_urls(svc, &entry.auth).await?;
+    }
     let request_json = serde_json::to_string(body).map_err(|e| format!("encode JSON-RPC: {e}"))?;
     let request =
         runtime_forward_request_for_entry(instance_id, server_name, entry, &request_json)?;
@@ -1922,11 +2027,13 @@ async fn post_jsonrpc_for_entry(
 /// Single round-trip helper: POST a JSON-RPC envelope, parse whichever
 /// of `application/json` or `text/event-stream` the server returns.
 async fn post_jsonrpc(
-    http: &reqwest::Client,
+    svc: &McpService,
     entry: &McpServerEntry,
     body: &serde_json::Value,
     session_id: Option<&str>,
 ) -> Result<JsonRpcResponse, String> {
+    let http = pinned_remote_mcp_client(svc, entry).await?;
+    validate_remote_mcp_auth_urls(svc, &entry.auth).await?;
     let mut req = http
         .post(&entry.url)
         .header(axum::http::header::CONTENT_TYPE, "application/json")

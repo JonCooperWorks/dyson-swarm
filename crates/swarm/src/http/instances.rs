@@ -107,7 +107,7 @@ async fn tls_allowlist(State(state): State<AppState>, uri: Uri) -> StatusCode {
     // a non-destroyed row".  `get_unscoped` returns NotFound for
     // already-destroyed rows, which is exactly what we want (don't
     // re-issue certs after destroy).
-    match state.instances.get_unscoped(instance_id).await {
+    match state.instances.get_unscoped(&instance_id).await {
         Ok(_) => StatusCode::OK,
         Err(_) => StatusCode::NOT_FOUND,
     }

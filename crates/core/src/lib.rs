@@ -45,6 +45,8 @@ pub mod traits;
 #[cfg(feature = "full")]
 pub mod ttl;
 #[cfg(feature = "full")]
+pub mod upstream_policy;
+#[cfg(feature = "full")]
 pub mod webhooks;
 
 /// Wall-clock seconds since the Unix epoch as `i64`. Saturates at 0 on the

@@ -21,6 +21,16 @@ use axum::{
 
 use super::assets;
 
+const SPA_CSP: &str = "default-src 'self'; \
+    script-src 'self'; \
+    style-src 'self' 'unsafe-inline'; \
+    connect-src 'self' https:; \
+    img-src 'self' data: blob:; \
+    font-src 'self' data:; \
+    base-uri 'self'; \
+    form-action 'self'; \
+    frame-ancestors 'none'";
+
 pub fn router() -> Router {
     // Explicit `/` plus a fallback that handles every non-API path —
     // `/assets/<hash>.js`, `/favicon.ico`, etc.  API routes (healthz,
@@ -45,18 +55,35 @@ fn serve_path(path: &str) -> Response {
         return not_found();
     }
     match assets::lookup(&decoded) {
-        Some((bytes, ct)) => Response::builder()
-            .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, ct)
-            .header(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"))
-            .body(Body::from(bytes))
-            .unwrap_or_else(|_| not_found()),
+        Some((bytes, ct)) => security_headers(
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, ct)
+                .header(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"))
+                .body(Body::from(bytes))
+                .unwrap_or_else(|_| not_found()),
+        ),
         None => not_found(),
     }
 }
 
 fn not_found() -> Response {
-    (StatusCode::NOT_FOUND, "not found").into_response()
+    security_headers((StatusCode::NOT_FOUND, "not found").into_response())
+}
+
+fn security_headers(mut resp: Response) -> Response {
+    let h = resp.headers_mut();
+    h.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(SPA_CSP),
+    );
+    h.insert(
+        "X-Content-Type-Options",
+        HeaderValue::from_static("nosniff"),
+    );
+    h.insert("Referrer-Policy", HeaderValue::from_static("no-referrer"));
+    h.insert("X-Frame-Options", HeaderValue::from_static("DENY"));
+    resp
 }
 
 /// Minimal percent-decoder.  We don't bring in `percent-encoding` for
@@ -111,5 +138,22 @@ mod tests {
     fn url_decode_leaves_malformed_escapes_alone() {
         assert_eq!(url_decode("/foo%2"), "/foo%2");
         assert_eq!(url_decode("/foo%xy"), "/foo%xy");
+    }
+
+    #[test]
+    fn serve_path_stamps_spa_security_headers() {
+        let resp = serve_path("/");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let headers = resp.headers();
+        assert_eq!(headers.get("X-Content-Type-Options").unwrap(), "nosniff",);
+        assert_eq!(headers.get("Referrer-Policy").unwrap(), "no-referrer");
+        assert_eq!(headers.get("X-Frame-Options").unwrap(), "DENY");
+        let csp = headers
+            .get(header::CONTENT_SECURITY_POLICY)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(csp.contains("frame-ancestors 'none'"));
+        assert!(csp.contains("script-src 'self'"));
     }
 }

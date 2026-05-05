@@ -39,6 +39,8 @@ use crate::webhooks::AGE_ARMOR_PREFIX;
 pub enum CacheError {
     #[error(transparent)]
     Store(#[from] StoreError),
+    #[error("invalid cache key: {0}")]
+    Invalid(String),
     #[error("cache i/o: {0}")]
     Io(String),
 }
@@ -261,7 +263,7 @@ impl ArtefactCacheService {
         meta: IngestMeta<'_>,
         body: Option<&[u8]>,
     ) -> Result<CachedArtefact, CacheError> {
-        let body_path = relative_body_path(meta.instance_id, meta.chat_id, meta.artefact_id);
+        let body_path = relative_body_path(meta.instance_id, meta.chat_id, meta.artefact_id)?;
         let (id, existing_path) = store::upsert_meta(
             &self.pool,
             store::UpsertSpec {
@@ -336,8 +338,33 @@ impl ArtefactCacheService {
 /// All three components have already passed through the swarm's
 /// `safe_store_id`-style validation upstream — they're constrained to
 /// `[A-Za-z0-9_-]` — so plain joining is safe (no `..` traversal).
-fn relative_body_path(instance_id: &str, chat_id: &str, artefact_id: &str) -> String {
-    format!("artefacts/{instance_id}/{chat_id}/{artefact_id}.body")
+fn relative_body_path(
+    instance_id: &str,
+    chat_id: &str,
+    artefact_id: &str,
+) -> Result<String, CacheError> {
+    for (label, value) in [
+        ("instance_id", instance_id),
+        ("chat_id", chat_id),
+        ("artefact_id", artefact_id),
+    ] {
+        if !safe_component(value) {
+            return Err(CacheError::Invalid(format!(
+                "{label} must match [A-Za-z0-9_-] and be 1..=128 bytes"
+            )));
+        }
+    }
+    Ok(format!(
+        "artefacts/{instance_id}/{chat_id}/{artefact_id}.body"
+    ))
+}
+
+fn safe_component(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 /// Trait alias — every place that holds an `Arc<ArtefactCacheService>`.
@@ -432,6 +459,26 @@ mod tests {
         assert_eq!(row.bytes, 9);
         let bytes = svc.read_body(&row).await.unwrap().unwrap();
         assert_eq!(bytes, b"v2-longer");
+    }
+
+    #[tokio::test]
+    async fn ingest_rejects_traversal_ids_without_writing_outside_root() {
+        let (svc, tmp, _keys) = svc().await;
+        let outside = tmp.path().parent().unwrap().join("outside");
+        let _ = std::fs::remove_dir_all(&outside);
+
+        let err = svc
+            .ingest(meta("i", ALICE, "../../../outside", "a"), Some(b"pwn"))
+            .await
+            .expect_err("traversal chat id must be rejected");
+        assert!(
+            err.to_string().contains("invalid"),
+            "unexpected error: {err}",
+        );
+        assert!(
+            !outside.exists(),
+            "ingest must not create body files outside the cache root",
+        );
     }
 
     #[tokio::test]

@@ -239,7 +239,12 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         tokens_store.clone(),
         proxy_base,
     )
-    .with_llm_cidr(llm_cidr);
+    .with_llm_cidr(llm_cidr)
+    .with_mcp_upstream_policy(dyson_swarm::upstream_policy::OutboundUrlPolicy {
+        enabled: cfg.byo.enabled,
+        allow_localhost: cfg.byo.allow_localhost,
+        allow_internal: cfg.byo.allow_internal,
+    });
     let user_secrets_svc = Arc::new(dyson_swarm::secrets::UserSecretsService::new(
         user_secrets_store,
         cipher_dir.clone(),
@@ -569,7 +574,12 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
             s.with_instance_svc(instance_svc.clone())
                 .with_runtime_socket(mcp_runtime_socket.clone())
                 .with_docker_catalog(docker_catalog, allow_user_docker_json)
-                .with_docker_catalog_store(mcp_catalog_store),
+                .with_docker_catalog_store(mcp_catalog_store)
+                .with_mcp_upstream_policy(dyson_swarm::upstream_policy::OutboundUrlPolicy {
+                    enabled: cfg.byo.enabled,
+                    allow_localhost: cfg.byo.allow_localhost,
+                    allow_internal: cfg.byo.allow_internal,
+                }),
         ),
         Err(err) => {
             tracing::error!(error = %err, "mcp service init failed");
@@ -641,19 +651,6 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         cipher_dir.clone(),
     ));
 
-    // Anonymous artefact-share service — wires the SQLite pool, the
-    // user-secrets handle (per-user signing keys are sealed under the
-    // user's age cipher), and the apex hostname through one place.
-    // The Prometheus-shaped metrics live as process-local atomics
-    // inside an Arc<ShareMetrics>.
-    let shares_svc = Arc::new(dyson_swarm::shares::ShareService::new(
-        pool.clone(),
-        user_secrets_svc.clone(),
-        instance_svc.clone(),
-        dyson_swarm::shares::ShareMetrics::new(),
-        cfg.hostname.clone(),
-    ));
-
     // Swarm-side artefact cache.  Bytes live under
     // `<local_cache_dir>/artefacts/`; metadata in the `artefact_cache`
     // table.  Reused by share_public (so still-shared artefacts
@@ -662,6 +659,18 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         pool.clone(),
         cfg.backup.local_cache_dir.clone(),
         cipher_dir.clone(),
+    ));
+    // Anonymous artefact-share service — wires the SQLite pool, the
+    // user-secrets handle (per-user signing keys are sealed under the
+    // user's age cipher), the artefact cache used to verify mint
+    // requests, and the apex hostname through one place.
+    let shares_svc = Arc::new(dyson_swarm::shares::ShareService::new(
+        pool.clone(),
+        user_secrets_svc.clone(),
+        instance_svc.clone(),
+        artefact_cache.clone(),
+        dyson_swarm::shares::ShareMetrics::new(),
+        cfg.hostname.clone(),
     ));
     let app_state = http::AppState {
         user_secrets: user_secrets_svc,

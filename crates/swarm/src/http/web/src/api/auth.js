@@ -48,10 +48,8 @@ function readTokens() {
 function writeTokens(tokens) {
   if (!tokens) {
     sessionStorage.removeItem(STORAGE_KEY);
-    clearSessionCookie();
   } else {
     sessionStorage.setItem(STORAGE_KEY, JSON.stringify(tokens));
-    setSessionCookie(tokens.access_token, tokens.expires_at);
   }
 }
 
@@ -100,14 +98,30 @@ export function computeCookieAttributes({ host, protocol, expiresAtMs } = {}) {
   return parts;
 }
 
-function setSessionCookie(token, expiresAtMs) {
-  if (!token) return;
-  const attrs = computeCookieAttributes({
-    host: window.location.hostname,
-    protocol: window.location.protocol,
-    expiresAtMs,
+async function syncSessionCookie(tokens) {
+  if (!tokens?.access_token) return;
+  const r = await fetch('/auth/session', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${tokens.access_token}`,
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    },
+    body: JSON.stringify({
+      expires_at: tokens.expires_at ? Math.floor(tokens.expires_at / 1000) : null,
+    }),
   });
-  document.cookie = [`${COOKIE_NAME}=${encodeURIComponent(token)}`, ...attrs].join('; ');
+  if (!r.ok) throw new Error(`/auth/session: ${r.status}`);
+}
+
+function clearServerSessionCookie() {
+  try {
+    return Promise.resolve(
+      fetch('/auth/session', { method: 'DELETE', keepalive: true }),
+    ).catch(() => {});
+  } catch {
+    return Promise.resolve();
+  }
 }
 // Domain values to issue delete-cookie writes against on logout.  Returns
 // the host-only scope (null) plus every parent up to (but not including)
@@ -331,6 +345,8 @@ export async function handleCallback(cfg, discovery) {
   writePending(null);
   if (!pending || pending.state !== state) {
     writeTokens(null);
+    clearSessionCookie();
+    await clearServerSessionCookie();
     clearAuthCallbackFromUrl();
     return null;
   }
@@ -352,7 +368,9 @@ export async function handleCallback(cfg, discovery) {
     throw new Error(`token exchange failed: ${r.status}${detail ? ` — ${detail}` : ''}`);
   }
   const tokens = await r.json();
-  writeTokens(toStorageShape(tokens));
+  const stored = toStorageShape(tokens);
+  writeTokens(stored);
+  await syncSessionCookie(stored);
 
   // If dyson_proxy bounced us here with a return_to URL, the cookie
   // we just stamped (Domain=<apex>) is now valid for that origin —
@@ -419,6 +437,7 @@ async function refreshTokens(cfg, discovery) {
   // existing one when the response omits it.
   if (!merged.refresh_token) merged.refresh_token = tokens.refresh_token;
   writeTokens(merged);
+  await syncSessionCookie(merged);
   return merged;
 }
 
@@ -483,10 +502,10 @@ export async function bootstrapAuth() {
   // a Dyson subdomain in a fresh tab while another tab held a live
   // session).  We still need to stamp the parent-domain cookie before
   // the navigation because writeTokens only ran on the original auth
-  // tab; setSessionCookie() below covers the refresh path so we can
+  // tab; syncSessionCookie() below covers the refresh path so we can
   // safely navigate now.
   if (returnToUrl) {
-    setSessionCookie(tokens.access_token, tokens.expires_at);
+    await syncSessionCookie(tokens);
     clearReturnToFromUrl();
     window.location.assign(returnToUrl);
     return new Promise(() => {});
@@ -495,9 +514,8 @@ export async function bootstrapAuth() {
   // Every load — not just callback — re-stamps the parent-domain cookie
   // dyson_proxy reads when no Authorization header is present.
   // sessionStorage survives the redirect round-trip, but the cookie is
-  // only set inside writeTokens(); mirror it here so a plain refresh
-  // (where writeTokens never ran) still yields a usable cookie.
-  setSessionCookie(tokens.access_token, tokens.expires_at);
+  // now set server-side so it can be HttpOnly.
+  await syncSessionCookie(tokens);
 
   const onRedirect = () => startAuthorizationFlow(cfg, discovery).catch(() => {});
   scheduleRefresh(cfg, discovery, onRedirect);
@@ -557,6 +575,8 @@ function checkAdminClaim(token, cfg) {
 function signOut(cfg, discovery, onRedirect) {
   const tokens = readTokens();
   writeTokens(null);
+  clearSessionCookie();
+  clearServerSessionCookie();
   writePending(null);
   if (!discovery.end_session_endpoint) {
     onRedirect();

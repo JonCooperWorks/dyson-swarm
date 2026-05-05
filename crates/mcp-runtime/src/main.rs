@@ -22,6 +22,7 @@ const DOCKER_SERVER_LABEL: &str = "dyson.mcp.server";
 const DEFAULT_SECRET_ROOT: &str = "/run/dyson-mcp-runtime/secrets";
 const CONTAINER_SECRET_DIR: &str = "/run/secrets";
 const SECRET_ENTRYPOINT_CONTAINER_PATH: &str = "/run/dyson-mcp-runtime-secret-entrypoint";
+const SECRET_ENTRYPOINT_SHELL: &str = "/bin/sh";
 
 #[derive(Debug, Parser)]
 #[command(name = "dyson-mcp-runtime")]
@@ -1146,7 +1147,7 @@ fn inject_secret_wrapper(
         options.push(format!("{name}_FILE={container_path}"));
     }
     options.push("--entrypoint".into());
-    options.push(SECRET_ENTRYPOINT_CONTAINER_PATH.into());
+    options.push(SECRET_ENTRYPOINT_SHELL.into());
 
     let wrapped_command = wrapped_image_command(
         docker_command,
@@ -1155,6 +1156,7 @@ fn inject_secret_wrapper(
         &split.command,
     )?;
     options.push(split.image);
+    options.push(SECRET_ENTRYPOINT_CONTAINER_PATH.into());
     options.extend(wrapped_command);
     Ok(options)
 }
@@ -2071,7 +2073,7 @@ for line in sys.stdin:
             launch
                 .args
                 .windows(2)
-                .any(|w| { w == ["--entrypoint", SECRET_ENTRYPOINT_CONTAINER_PATH,] })
+                .any(|w| { w == ["--entrypoint", SECRET_ENTRYPOINT_SHELL] })
         );
         for name in [
             "ENV_MAP_TOKEN",
@@ -2108,7 +2110,11 @@ for line in sys.stdin:
             .expect("image arg");
         assert_eq!(
             &launch.args[image_index + 1..],
-            ["python", "./entrypoint.py"]
+            [
+                SECRET_ENTRYPOINT_CONTAINER_PATH,
+                "python",
+                "./entrypoint.py"
+            ]
         );
 
         cleanup_secret_dir_sync(launch.secret_dir.as_deref());

@@ -505,10 +505,11 @@ impl DockerStdioSession {
         server_name: &str,
         fingerprint: String,
     ) -> Result<Self, String> {
-        let args = docker_run_args(user_args, instance_id, server_name);
+        let mut child_env = env.clone();
+        let args = docker_run_args_with_env(user_args, instance_id, server_name, &mut child_env);
         let mut child = Command::new(docker.command())
             .args(args)
-            .envs(env)
+            .envs(child_env)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -906,7 +907,18 @@ async fn remove_pending(
     }
 }
 
+#[cfg(test)]
 fn docker_run_args(user_args: &[String], instance_id: &str, server_name: &str) -> Vec<String> {
+    let mut child_env = HashMap::new();
+    docker_run_args_with_env(user_args, instance_id, server_name, &mut child_env)
+}
+
+fn docker_run_args_with_env(
+    user_args: &[String],
+    instance_id: &str,
+    server_name: &str,
+    child_env: &mut HashMap<String, String>,
+) -> Vec<String> {
     let mut out = vec![
         "run".to_string(),
         "--rm".to_string(),
@@ -924,11 +936,14 @@ fn docker_run_args(user_args: &[String], instance_id: &str, server_name: &str) -
         "--label".to_string(),
         format!("{DOCKER_SERVER_LABEL}={server_name}"),
     ];
-    out.extend(sanitized_docker_user_args(user_args));
+    out.extend(sanitized_docker_user_args(user_args, child_env));
     out
 }
 
-fn sanitized_docker_user_args(user_args: &[String]) -> Vec<String> {
+fn sanitized_docker_user_args(
+    user_args: &[String],
+    child_env: &mut HashMap<String, String>,
+) -> Vec<String> {
     let mut out = Vec::new();
     let mut i = 1usize;
     while i < user_args.len() {
@@ -941,10 +956,54 @@ fn sanitized_docker_user_args(user_args: &[String]) -> Vec<String> {
             i += 1;
             continue;
         }
+        if arg == "-e" || arg == "--env" {
+            out.push(arg.clone());
+            if let Some(value) = user_args.get(i + 1) {
+                out.push(scrub_env_arg(value, child_env));
+                i += 2;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+        if let Some(value) = arg.strip_prefix("--env=") {
+            out.push(format!("--env={}", scrub_env_arg(value, child_env)));
+            i += 1;
+            continue;
+        }
+        if let Some(value) = arg.strip_prefix("-e")
+            && !value.is_empty()
+        {
+            out.push(format!("-e{}", scrub_env_arg(value, child_env)));
+            i += 1;
+            continue;
+        }
         out.push(arg.clone());
         i += 1;
     }
     out
+}
+
+fn scrub_env_arg(arg: &str, child_env: &mut HashMap<String, String>) -> String {
+    let Some((name, value)) = arg.split_once('=') else {
+        return arg.to_string();
+    };
+    if !is_env_name(name) {
+        return arg.to_string();
+    }
+    child_env.insert(name.to_string(), value.to_string());
+    name.to_string()
+}
+
+fn is_env_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        return false;
+    }
+    chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
 }
 
 fn err(status: u16, msg: &str) -> ForwardResponse {
@@ -1455,6 +1514,29 @@ for line in sys.stdin:
         assert!(!out.iter().any(|arg| arg == "--network=bridge"));
         assert!(!out.iter().any(|arg| arg == "--net"));
         assert!(out.iter().any(|arg| arg == "example/mcp"));
+    }
+
+    #[test]
+    fn docker_run_args_moves_inline_env_values_out_of_argv() {
+        let args = vec![
+            "run".to_string(),
+            "--rm".to_string(),
+            "-e".to_string(),
+            "MASSIVE_API_KEY=secret-one".to_string(),
+            "--env=OTHER_TOKEN=secret-two".to_string(),
+            "-eTHIRD_TOKEN=secret-three".to_string(),
+            "example/mcp".to_string(),
+        ];
+        let mut env = HashMap::new();
+        let out = docker_run_args_with_env(&args, "i-1", "stdio", &mut env);
+
+        assert!(out.windows(2).any(|w| w == ["-e", "MASSIVE_API_KEY"]));
+        assert!(out.iter().any(|arg| arg == "--env=OTHER_TOKEN"));
+        assert!(out.iter().any(|arg| arg == "-eTHIRD_TOKEN"));
+        assert!(!out.iter().any(|arg| arg.contains("secret-")));
+        assert_eq!(env["MASSIVE_API_KEY"], "secret-one");
+        assert_eq!(env["OTHER_TOKEN"], "secret-two");
+        assert_eq!(env["THIRD_TOKEN"], "secret-three");
     }
 
     #[tokio::test]

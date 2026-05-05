@@ -586,6 +586,40 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    {
+        let svc = mcp_svc.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            const ATTEMPTS: usize = 6;
+            for attempt in 1..=ATTEMPTS {
+                match dyson_swarm::proxy::mcp::restart_active_runtime_servers(svc.clone()).await {
+                    Ok(report) => {
+                        tracing::info!(
+                            attempt,
+                            visited = report.visited_instances,
+                            runtime_servers = report.runtime_servers,
+                            restarted = report.restarted,
+                            failed = report.failed,
+                            "mcp-runtime: startup restart sweep complete"
+                        );
+                        if report.failed == 0 {
+                            break;
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            attempt,
+                            error = %err,
+                            "mcp-runtime: startup restart sweep aborted"
+                        );
+                    }
+                }
+                if attempt < ATTEMPTS {
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                }
+            }
+        });
+    }
     let mcp_router = dyson_swarm::proxy::mcp::router(mcp_svc.clone());
     let mcp_user_router = dyson_swarm::proxy::mcp::user_router(mcp_svc.clone());
     let mcp_admin_router = dyson_swarm::proxy::mcp::admin_router(mcp_svc);

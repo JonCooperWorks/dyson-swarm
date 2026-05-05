@@ -33,6 +33,17 @@ This is different from the older posture where rotation was documented as an
 opt-in sweep that stranded the old URL. The current config comments are the
 source of truth.
 
+## Startup MCP Runtime Restart
+
+When swarm starts, it enumerates live instances and asks `dyson-mcp-runtime` to
+restart every runtime-backed MCP server saved in user secrets. The sweep retries
+briefly so it can tolerate systemd starting the runtime socket a few seconds
+after swarm.
+
+The runtime helper does not reap idle MCP sessions by default; user servers
+remain alive until the helper is restarted or the server configuration is
+replaced/deleted.
+
 ## Provider Key Overlay
 
 At startup, swarm overlays provider API keys from `system_secrets` on top of

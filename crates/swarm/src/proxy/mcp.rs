@@ -27,13 +27,13 @@ use serde::{Deserialize, Serialize};
 use crate::auth::{CallerIdentity, extract_bearer};
 use crate::db::mcp_catalog::{McpDockerCatalogRow, SqlxMcpDockerCatalogStore};
 use crate::error::{StoreError, SwarmError};
-use crate::instance::{DeletedMcpServer, InstanceService};
+use crate::instance::{DeletedMcpServer, InstanceService, SYSTEM_OWNER};
 use crate::mcp_servers::{
     self, AuthMetadata, DcrRequest, McpAuthSpec, McpOAuthTokens, McpRuntimeSpec, McpServerEntry,
     McpServerSpec, McpToolSummary, McpToolsCatalog, OAuthFlowCache, PendingFlow,
 };
 use crate::secrets::UserSecretsService;
-use crate::traits::{InstanceStore, TokenStore};
+use crate::traits::{InstanceStatus, InstanceStore, ListFilter, TokenStore};
 use crate::upstream_policy::{
     OutboundUrlPolicy, pinned_outbound_client_builder, validate_outbound_url,
 };
@@ -551,6 +551,11 @@ enum RuntimeRequest<'a> {
     StopInstance {
         instance_id: &'a str,
     },
+    RestartServer {
+        instance_id: &'a str,
+        server_name: &'a str,
+        transport: RuntimeTransportSpec<'a>,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -602,6 +607,18 @@ impl<'a> RuntimeRequest<'a> {
                 auth_bearer_env,
             },
             request_json,
+        }
+    }
+
+    fn restart_server(
+        instance_id: &'a str,
+        server_name: &'a str,
+        transport: RuntimeTransportSpec<'a>,
+    ) -> Self {
+        Self::RestartServer {
+            instance_id,
+            server_name,
+            transport,
         }
     }
 }
@@ -707,18 +724,46 @@ fn runtime_forward_request_for_entry<'a>(
     entry: &'a McpServerEntry,
     request_json: &'a str,
 ) -> Result<RuntimeRequest<'a>, String> {
+    Ok(match runtime_transport_for_entry(entry)? {
+        RuntimeTransportSpec::DockerStdio { args, env } => {
+            RuntimeRequest::forward_docker(instance_id, server_name, args, env, request_json)
+        }
+        RuntimeTransportSpec::HttpStreamable {
+            url,
+            headers,
+            auth_bearer_env,
+        } => RuntimeRequest::forward_http_streamable(
+            instance_id,
+            server_name,
+            url,
+            headers,
+            auth_bearer_env,
+            request_json,
+        ),
+    })
+}
+
+fn runtime_restart_request_for_entry<'a>(
+    instance_id: &'a str,
+    server_name: &'a str,
+    entry: &'a McpServerEntry,
+) -> Result<RuntimeRequest<'a>, String> {
+    Ok(RuntimeRequest::restart_server(
+        instance_id,
+        server_name,
+        runtime_transport_for_entry(entry)?,
+    ))
+}
+
+fn runtime_transport_for_entry<'a>(
+    entry: &'a McpServerEntry,
+) -> Result<RuntimeTransportSpec<'a>, String> {
     match entry.runtime.as_ref() {
         Some(McpRuntimeSpec::DockerStdio { command, args, env }) => {
             if command != "docker" {
                 return Err("invalid docker MCP runtime command".into());
             }
-            Ok(RuntimeRequest::forward_docker(
-                instance_id,
-                server_name,
-                args,
-                env,
-                request_json,
-            ))
+            Ok(RuntimeTransportSpec::DockerStdio { args, env })
         }
         Some(McpRuntimeSpec::HttpStreamable {
             url,
@@ -742,14 +787,11 @@ fn runtime_forward_request_for_entry<'a>(
                     );
                 }
             }
-            Ok(RuntimeRequest::forward_http_streamable(
-                instance_id,
-                server_name,
+            Ok(RuntimeTransportSpec::HttpStreamable {
                 url,
-                runtime_headers,
-                auth_bearer_env.as_deref(),
-                request_json,
-            ))
+                headers: runtime_headers,
+                auth_bearer_env: auth_bearer_env.as_deref(),
+            })
         }
         None => Err("invalid mcp runtime entry".into()),
     }
@@ -833,6 +875,147 @@ pub async fn stop_runtime_instance(
             resp.status, resp.body
         ))
     }
+}
+
+pub async fn restart_runtime_server(
+    socket_path: Option<&FsPath>,
+    instance_id: &str,
+    server_name: &str,
+    entry: &McpServerEntry,
+) -> Result<(), String> {
+    let Some(socket_path) = socket_path else {
+        return Ok(());
+    };
+    let req = runtime_restart_request_for_entry(instance_id, server_name, entry)?;
+    let resp = call_runtime(socket_path, &req).await?;
+    if (200..300).contains(&resp.status) {
+        Ok(())
+    } else {
+        Err(format!(
+            "runtime restart_server HTTP {}: {}",
+            resp.status, resp.body
+        ))
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RuntimeRestartReport {
+    pub visited_instances: usize,
+    pub runtime_servers: usize,
+    pub restarted: usize,
+    pub failed: usize,
+}
+
+pub async fn restart_active_runtime_servers(
+    svc: Arc<McpService>,
+) -> Result<RuntimeRestartReport, SwarmError> {
+    if svc.runtime_socket_path.is_none() {
+        return Ok(RuntimeRestartReport::default());
+    }
+    let live = svc
+        .instances
+        .list(
+            SYSTEM_OWNER,
+            ListFilter {
+                status: Some(InstanceStatus::Live),
+                include_destroyed: false,
+            },
+        )
+        .await?;
+    let mut report = RuntimeRestartReport {
+        visited_instances: live.len(),
+        ..RuntimeRestartReport::default()
+    };
+
+    for row in live {
+        let names = match mcp_servers::list_names(&svc.user_secrets, &row.owner_id, &row.id).await {
+            Ok(names) => names,
+            Err(err) => {
+                report.failed += 1;
+                tracing::warn!(
+                    error = %err,
+                    instance = %row.id,
+                    "mcp runtime restart: list failed"
+                );
+                continue;
+            }
+        };
+        for name in names {
+            let entry =
+                match mcp_servers::get(&svc.user_secrets, &row.owner_id, &row.id, &name).await {
+                    Ok(Some(entry)) => entry,
+                    Ok(None) => continue,
+                    Err(err) => {
+                        report.failed += 1;
+                        tracing::warn!(
+                            error = %err,
+                            instance = %row.id,
+                            server = %name,
+                            "mcp runtime restart: entry read failed"
+                        );
+                        continue;
+                    }
+                };
+            let Some(runtime) = entry.runtime.as_ref() else {
+                continue;
+            };
+            if matches!(entry.auth, McpAuthSpec::Oauth { .. }) && entry.oauth_tokens.is_none() {
+                tracing::debug!(
+                    instance = %row.id,
+                    server = %name,
+                    "mcp runtime restart: skipping unauthorised oauth server"
+                );
+                continue;
+            }
+            report.runtime_servers += 1;
+            if let McpRuntimeSpec::HttpStreamable { url, .. } = runtime {
+                if let Err(err) = validate_remote_mcp_url(&svc, url).await {
+                    report.failed += 1;
+                    tracing::warn!(
+                        error = %err,
+                        instance = %row.id,
+                        server = %name,
+                        "mcp runtime restart: upstream rejected"
+                    );
+                    continue;
+                }
+                if let Err(err) = validate_remote_mcp_auth_urls(&svc, &entry.auth).await {
+                    report.failed += 1;
+                    tracing::warn!(
+                        error = %err,
+                        instance = %row.id,
+                        server = %name,
+                        "mcp runtime restart: auth URL rejected"
+                    );
+                    continue;
+                }
+            }
+
+            match restart_runtime_server(svc.runtime_socket_path.as_deref(), &row.id, &name, &entry)
+                .await
+            {
+                Ok(()) => {
+                    report.restarted += 1;
+                    tracing::debug!(
+                        instance = %row.id,
+                        server = %name,
+                        "mcp runtime restart: restarted"
+                    );
+                }
+                Err(err) => {
+                    report.failed += 1;
+                    tracing::warn!(
+                        error = %err,
+                        instance = %row.id,
+                        server = %name,
+                        "mcp runtime restart: failed"
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(report)
 }
 
 async fn stop_deleted_runtime_server(
@@ -2479,6 +2662,59 @@ mod tests {
         });
 
         stop_runtime_server(Some(&socket), "i-1", "brave")
+            .await
+            .unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn restart_runtime_server_sends_runtime_restart_op() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::UnixListener;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let socket = tmp.path().join("runtime.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let req: serde_json::Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(req["op"], "restart_server");
+            assert_eq!(req["instance_id"], "i-1");
+            assert_eq!(req["server_name"], "brave");
+            assert_eq!(req["transport"]["kind"], "DockerStdio");
+            assert!(req["transport"].get("command").is_none());
+            let resp = serde_json::json!({
+                "status": 200,
+                "content_type": "application/json",
+                "body": "{\"ok\":true,\"stopped_sessions\":1,\"removed_containers\":1}"
+            });
+            let mut stream = reader.into_inner();
+            stream
+                .write_all(serde_json::to_string(&resp).unwrap().as_bytes())
+                .await
+                .unwrap();
+            stream.write_all(b"\n").await.unwrap();
+        });
+
+        let entry = McpServerEntry {
+            url: "docker://example/mcp".into(),
+            auth: McpAuthSpec::None,
+            headers: std::collections::HashMap::new(),
+            runtime: Some(McpRuntimeSpec::DockerStdio {
+                command: "docker".into(),
+                args: vec!["run".into(), "example/mcp".into()],
+                env: std::collections::HashMap::new(),
+            }),
+            docker_catalog: None,
+            raw_vscode_config: None,
+            oauth_tokens: None,
+            tools_catalog: None,
+            enabled_tools: None,
+        };
+        restart_runtime_server(Some(&socket), "i-1", "brave", &entry)
             .await
             .unwrap();
         server.await.unwrap();

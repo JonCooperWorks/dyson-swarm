@@ -39,6 +39,11 @@ The SPA shows the preset JSON as read-only and sends only the selected
 `catalog_id` plus placeholder values. Rendered runtime config and values are
 sealed into user secrets; the agent still receives only the swarm proxy URL.
 
+Runtime-managed Docker stdio servers are long-lived by default. The
+`dyson-mcp-runtime` helper keeps them running until the helper or the server
+configuration is restarted, and each swarm startup asks the helper to restart
+every runtime-backed MCP server attached to a live instance.
+
 ## Proxy Surfaces
 
 - `/mcp/:instance/:server/...` — agent-facing JSON-RPC pass-through, authenticated by per-instance bearer

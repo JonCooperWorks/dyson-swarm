@@ -24,8 +24,8 @@ struct Args {
     /// Unix socket swarm uses to ask the helper to proxy one JSON-RPC message.
     #[arg(long, default_value = "/run/dyson-mcp-runtime/runtime.sock")]
     socket: PathBuf,
-    /// Idle stdio sessions are stopped after this many seconds.
-    #[arg(long, default_value_t = 600)]
+    /// Idle stdio sessions are stopped after this many seconds. 0 disables idle reaping.
+    #[arg(long, default_value_t = 0)]
     idle_seconds: u64,
 }
 
@@ -69,6 +69,11 @@ enum RuntimeRequest {
     },
     StopInstance {
         instance_id: String,
+    },
+    RestartServer {
+        instance_id: String,
+        server_name: String,
+        transport: TransportSpec,
     },
 }
 
@@ -376,6 +381,53 @@ impl Runtime {
         }
     }
 
+    async fn restart_server(
+        &self,
+        instance_id: String,
+        server_name: String,
+        transport: TransportSpec,
+    ) -> ForwardResponse {
+        if let Err(e) = validate_transport(&transport) {
+            return err(400, &e);
+        }
+
+        let key = session_key(&instance_id, &server_name);
+        let stopped_sessions = usize::from(self.stop_session(&key).await);
+        let removed_containers = if matches!(transport, TransportSpec::DockerStdio { .. }) {
+            match self.docker.cleanup_server(&instance_id, &server_name).await {
+                Ok(n) => n,
+                Err(cleanup_err) => {
+                    tracing::warn!(
+                        error = %cleanup_err,
+                        instance = %instance_id,
+                        server = %server_name,
+                        "mcp runtime: docker restart cleanup failed"
+                    );
+                    return err(502, &format!("docker cleanup failed: {cleanup_err}"));
+                }
+            }
+        } else {
+            0
+        };
+
+        let req = ForwardRequest {
+            instance_id,
+            server_name,
+            transport,
+            request_json: String::new(),
+        };
+        match self.get_or_spawn(&key, &req).await {
+            Ok(session) => {
+                *session.last_used.lock().await = Instant::now();
+                restart_response(RuntimeRestartResult {
+                    stopped_sessions,
+                    removed_containers,
+                })
+            }
+            Err(e) => err(502, &e),
+        }
+    }
+
     async fn reap_idle(self: Arc<Self>) {
         let mut interval = tokio::time::interval(Duration::from_secs(60));
         loop {
@@ -434,6 +486,12 @@ fn session_key(instance_id: &str, server_name: &str) -> String {
 
 #[derive(Debug, Serialize)]
 struct RuntimeStopResult {
+    stopped_sessions: usize,
+    removed_containers: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct RuntimeRestartResult {
     stopped_sessions: usize,
     removed_containers: usize,
 }
@@ -923,7 +981,9 @@ async fn main() -> std::process::ExitCode {
         tracing::warn!(error = %e, socket = %args.socket.display(), "failed to chmod socket");
     }
     let runtime = Runtime::new(Duration::from_secs(args.idle_seconds));
-    tokio::spawn(Arc::clone(&runtime).reap_idle());
+    if args.idle_seconds > 0 {
+        tokio::spawn(Arc::clone(&runtime).reap_idle());
+    }
     tracing::info!(socket = %args.socket.display(), "dyson MCP runtime listening");
     loop {
         match listener.accept().await {
@@ -966,6 +1026,15 @@ async fn handle_connection(runtime: Arc<Runtime>, stream: UnixStream) {
             Ok(RuntimeRequest::StopInstance { instance_id }) => {
                 stop_response(runtime.stop_instance(&instance_id).await)
             }
+            Ok(RuntimeRequest::RestartServer {
+                instance_id,
+                server_name,
+                transport,
+            }) => {
+                runtime
+                    .restart_server(instance_id, server_name, transport)
+                    .await
+            }
             Err(e) => err(400, &format!("invalid request: {e}")),
         },
         Err(e) => err(400, &format!("read request: {e}")),
@@ -990,6 +1059,21 @@ fn stop_response(result: RuntimeStopResult) -> ForwardResponse {
             body,
         },
         Err(e) => err(500, &format!("encode stop response: {e}")),
+    }
+}
+
+fn restart_response(result: RuntimeRestartResult) -> ForwardResponse {
+    match serde_json::to_string(&serde_json::json!({
+        "ok": true,
+        "stopped_sessions": result.stopped_sessions,
+        "removed_containers": result.removed_containers,
+    })) {
+        Ok(body) => ForwardResponse {
+            status: 200,
+            content_type: Some("application/json"),
+            body,
+        },
+        Err(e) => err(500, &format!("encode restart response: {e}")),
     }
 }
 
@@ -1194,6 +1278,39 @@ for line in sys.stdin:
         );
     }
 
+    #[tokio::test]
+    async fn restart_server_replaces_existing_runtime_session() {
+        let docker = Arc::new(MockDocker::default());
+        let runtime = Runtime::with_docker(Duration::from_secs(30), docker);
+        let shutdowns = Arc::new(Mutex::new(0usize));
+        insert_stub_session(&runtime, "i-1", "remote", shutdowns.clone()).await;
+
+        let resp = runtime
+            .restart_server(
+                "i-1".into(),
+                "remote".into(),
+                TransportSpec::HttpStreamable {
+                    url: "https://mcp.example.test/mcp".into(),
+                    headers: BTreeMap::new(),
+                    auth_bearer_env: None,
+                },
+            )
+            .await;
+
+        assert_eq!(resp.status, 200, "{}", resp.body);
+        assert_eq!(*shutdowns.lock().await, 1);
+        let sessions = runtime.sessions.lock().await;
+        assert_eq!(sessions.len(), 1);
+        assert_ne!(
+            sessions
+                .get("i-1:remote")
+                .expect("session exists")
+                .session
+                .fingerprint(),
+            "stub"
+        );
+    }
+
     #[test]
     fn runtime_request_deserializes_tagged_docker_forward() {
         let req: RuntimeRequest = serde_json::from_value(serde_json::json!({
@@ -1217,6 +1334,32 @@ for line in sys.stdin:
             TransportSpec::DockerStdio {
                 args: vec!["run".into(), "example/mcp".into()],
                 env: HashMap::from([("B".into(), "2".into())]),
+            }
+        );
+    }
+
+    #[test]
+    fn runtime_request_deserializes_tagged_docker_restart() {
+        let req: RuntimeRequest = serde_json::from_value(serde_json::json!({
+            "op": "restart_server",
+            "instance_id": "i-1",
+            "server_name": "echo",
+            "transport": {
+                "kind": "DockerStdio",
+                "args": ["run", "example/mcp"],
+                "env": {"A": "1"}
+            }
+        }))
+        .unwrap();
+
+        let RuntimeRequest::RestartServer { transport, .. } = req else {
+            panic!("expected restart_server request");
+        };
+        assert_eq!(
+            transport,
+            TransportSpec::DockerStdio {
+                args: vec!["run".into(), "example/mcp".into()],
+                env: HashMap::from([("A".into(), "1".into())]),
             }
         );
     }

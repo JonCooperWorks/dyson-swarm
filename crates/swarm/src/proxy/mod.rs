@@ -43,10 +43,8 @@ pub struct ProxyService {
     pub default_policy: InstancePolicy,
     /// Optional Stage-6 per-user OpenRouter bearer resolver.  When
     /// set, requests to `/llm/openrouter/...` substitute the user's
-    /// own minted OR key for the global `[providers.openrouter]
-    /// api_key`.  When `None` the proxy falls back to the global key
-    /// (used in tests + deployments without the OR Provisioning API
-    /// configured).
+    /// own minted OR key. When `None`, OpenRouter calls still require
+    /// a user BYOK row and otherwise fail closed.
     pub user_or_keys: Option<Arc<crate::openrouter::UserOrKeyResolver>>,
     /// Per-user encrypted secret store backing BYOK (`byok_<provider>`
     /// rows).  When `None`, the BYOK lookup branch is skipped and the
@@ -124,12 +122,11 @@ impl ProxyService {
     ///
     /// Pricing tables are intentionally not implemented; configured
     /// `monthly_usd_budget` values fail closed until a pricing layer exists.
-    /// Daily token budgets ARE enforced via `daily_tokens` (which now
-    /// correctly sums `prompt_tokens + output_tokens` after Agent 1's
-    /// audit-completion plumbing — `update_completion` stamps the
-    /// final `output_tokens` count once the upstream body finishes
-    /// streaming, so the daily budget reflects real usage rather than
-    /// just the prompt-side estimate).
+    /// Daily token budgets ARE enforced via `daily_tokens`, which
+    /// sums historical `prompt_tokens` plus final `output_tokens`.
+    /// New proxy rows leave prompt usage empty because request-side
+    /// usage fields are attacker-controlled; `update_completion`
+    /// stamps the upstream-sourced output count once the body finishes.
     pub async fn snapshot(&self, subject: &str) -> UsageSnapshot {
         let recent_rps = self.rate.observe(subject);
         let daily_tokens = self

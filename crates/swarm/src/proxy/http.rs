@@ -100,7 +100,10 @@ async fn handle(
     let body_json: serde_json::Value = if body_bytes.is_empty() {
         serde_json::Value::Null
     } else {
-        serde_json::from_slice(&body_bytes).unwrap_or(serde_json::Value::Null)
+        match serde_json::from_slice(&body_bytes) {
+            Ok(v) => v,
+            Err(_) => return error_response(StatusCode::BAD_REQUEST, "invalid json body"),
+        }
     };
 
     // 3. Policy + usage are keyed on owner_id, not instance_id, so a user
@@ -263,7 +266,6 @@ async fn handle(
     // B's prompt by hashing collision.  BYOK doesn't have this issue
     // (each user authenticates with their own Anthropic api-key →
     // their own namespace).
-    let prompt_tokens_in = estimate_prompt_tokens(&body_json);
     let outbound_body = if provider == "anthropic"
         && matches!(resolved.source, KeySource::Platform)
         && !body_bytes.is_empty()
@@ -299,7 +301,7 @@ async fn handle(
                         .get("model")
                         .and_then(|v| v.as_str())
                         .map(str::to_owned),
-                    prompt_tokens: prompt_tokens_in,
+                    prompt_tokens: None,
                     output_tokens: None,
                     status_code: 502,
                     duration_ms: elapsed_ms(started),
@@ -347,7 +349,7 @@ async fn handle(
                 .get("model")
                 .and_then(|v| v.as_str())
                 .map(str::to_owned),
-            prompt_tokens: prompt_tokens_in,
+            prompt_tokens: None,
             output_tokens: None,
             status_code: i64::from(upstream_status),
             duration_ms: elapsed_ms(started),
@@ -520,15 +522,6 @@ async fn write_audit(state: &ProxyService, entry: AuditEntry) {
     if let Err(e) = state.audit.insert(&entry).await {
         tracing::warn!(error = %e, "llm_audit insert failed");
     }
-}
-
-/// Best-effort prompt-token estimate. The proxy doesn't tokenize requests
-/// itself; we look for `usage.prompt_tokens` on the request body in case the
-/// agent supplied it (rare) and otherwise fall back to None.
-fn estimate_prompt_tokens(body: &serde_json::Value) -> Option<i64> {
-    body.get("usage")
-        .and_then(|u| u.get("prompt_tokens"))
-        .and_then(serde_json::Value::as_i64)
 }
 
 #[cfg(test)]
@@ -885,6 +878,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn malformed_json_body_returns_400_without_forwarding() {
+        let (upstream_url, upstream_calls) = spawn_streaming_upstream(vec![b"ok".to_vec()]).await;
+
+        let pool = open_in_memory().await.unwrap();
+        let (svc, token, _keys) = build_byok_seeded(
+            pool,
+            "openai",
+            upstream_url,
+            "sk-byok-test",
+            permissive_policy(),
+        )
+        .await;
+        let proxy_base = spawn_proxy(svc).await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("{proxy_base}/llm/openai/v1/chat/completions"))
+            .bearer_auth(&token)
+            .header("content-type", "application/json")
+            .body(r#"{"model":"gpt-4o""#)
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+        assert_eq!(
+            upstream_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "malformed bodies must not reach the upstream",
+        );
+    }
+
+    #[tokio::test]
     async fn missing_bearer_returns_401() {
         let pool = open_in_memory().await.unwrap();
         let (upstream_url, _) = spawn_streaming_upstream(vec![b"x".to_vec()]).await;
@@ -1006,6 +1031,44 @@ mod tests {
         assert_eq!(prov, "openai");
         assert_eq!(model, "gpt-4o");
         assert_eq!(status, 200);
+    }
+
+    #[tokio::test]
+    async fn request_supplied_prompt_tokens_are_not_audited() {
+        let pool = open_in_memory().await.unwrap();
+        let (upstream_url, _) = spawn_streaming_upstream(vec![b"ok".to_vec()]).await;
+        let (svc, token, _keys) = build_byok_seeded(
+            pool.clone(),
+            "openai",
+            upstream_url,
+            "sk-byok-audit",
+            permissive_policy(),
+        )
+        .await;
+        let base = spawn_proxy(svc).await;
+        let resp = reqwest::Client::new()
+            .post(format!("{base}/llm/openai/v1/chat/completions"))
+            .bearer_auth(&token)
+            .json(&serde_json::json!({
+                "model": "gpt-4o",
+                "messages": [],
+                "usage": { "prompt_tokens": 999999999 }
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let _ = resp.bytes().await.unwrap();
+
+        let row = sqlx::query("SELECT prompt_tokens FROM llm_audit ORDER BY id DESC LIMIT 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let prompt: Option<i64> = sqlx::Row::try_get(&row, "prompt_tokens").unwrap();
+        assert!(
+            prompt.is_none(),
+            "request-side usage.prompt_tokens must not be trusted",
+        );
     }
 
     #[tokio::test]

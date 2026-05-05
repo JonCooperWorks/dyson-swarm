@@ -467,10 +467,9 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         rps_limit: cfg.default_policy.rps_limit,
     };
     // Stage 6: OpenRouter Provisioning client + per-user key resolver.
-    // Optional — when [openrouter] isn't configured (or the key file
-    // is missing) the proxy falls back to the global
-    // `[providers.openrouter].api_key`.  Constructed up front so both
-    // the proxy and the admin endpoints share one resolver.
+    // Optional — when it is absent, OpenRouter proxy calls require a
+    // user BYOK row and otherwise fail closed. Constructed up front so
+    // both the proxy and the admin endpoints share one resolver.
     let or_provisioning: Option<Arc<dyn dyson_swarm::openrouter::Provisioning>> =
         match resolve_or_provisioning_async(&cfg, system_secrets_svc.as_ref()).await {
             Ok(Some(client)) => {

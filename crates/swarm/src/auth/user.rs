@@ -132,21 +132,18 @@ async fn resolve_or_provision(
     if let Some(existing) = users.get_by_subject(&identity.subject).await? {
         return Ok(existing);
     }
-    // Stage 5: JIT-create as Active.  The IdP (Auth0) is the gate for
-    // who can sign in — anyone holding a valid JWT for our audience
-    // has already been registered + role-assigned upstream.  Pre-Stage-5
-    // the row was Inactive and an admin had to flip it; with no
-    // admin_token to bootstrap from, that loop deadlocks.  Admin
-    // suspend/reactivate via the SPA is still available for ops use.
+    // JIT-provisioning records identity claims, but it must not grant
+    // access by itself. Operators activate users explicitly through
+    // the admin surface after checking the IdP subject/email.
     let now = crate::now_secs();
     let row = UserRow {
         id: Uuid::new_v4().simple().to_string(),
         subject: identity.subject.clone(),
         email: identity.email.clone(),
         display_name: identity.display_name.clone(),
-        status: UserStatus::Active,
+        status: UserStatus::Inactive,
         created_at: now,
-        activated_at: Some(now),
+        activated_at: None,
         last_seen_at: None,
         openrouter_key_id: None,
         openrouter_key_limit_usd: 10.0,
@@ -298,21 +295,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn jit_creates_active_user_and_passes() {
-        // Stage 5: JIT-created users land Active because the IdP is
-        // the gate (anyone with a valid JWT for our audience already
-        // passed the upstream signup flow).  Suspended/Inactive are
-        // now ops-only states an admin can flip via the SPA.
+    async fn jit_creates_inactive_user_and_rejects_until_admin_activation() {
         let pool = open_in_memory().await.unwrap();
         let users: Arc<dyn UserStore> = test_user_store(pool.clone());
         let auth: Arc<dyn Authenticator> = Arc::new(FixedIdentity(id("alice")));
         let state = UserAuthState::new(auth, users.clone());
         let base = spawn(state).await;
         let r = reqwest::get(format!("{base}/v1/x")).await.unwrap();
-        assert_eq!(r.status(), 200);
+        assert_eq!(r.status(), 403);
         let row = users.get_by_subject("alice").await.unwrap().unwrap();
-        assert_eq!(row.status, UserStatus::Active);
-        assert!(row.activated_at.is_some());
+        assert_eq!(row.status, UserStatus::Inactive);
+        assert!(row.activated_at.is_none());
     }
 
     #[tokio::test]

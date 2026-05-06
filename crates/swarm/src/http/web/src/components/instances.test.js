@@ -333,6 +333,7 @@ describe('McpServersPanel', () => {
   function renderPanel(client, props = {}) {
     const fullClient = {
       listMcpDockerCatalog: vi.fn().mockResolvedValue({ allow_raw_json: true, servers: [] }),
+      requestMcpDockerCatalogServer: vi.fn().mockResolvedValue({ status: 'pending' }),
       ...client,
     };
     return render(
@@ -392,6 +393,56 @@ describe('McpServersPanel', () => {
     fireEvent.click(screen.getByRole('button', { name: 'add' }));
     expect(screen.queryByRole('option', { name: 'Docker JSON' })).toBeNull();
     expect(screen.getByLabelText('MCP server type')).toHaveValue('remote');
+  });
+
+  test('Docker image requests submit a pending catalog request from the MCP screen', async () => {
+    const config = {
+      servers: {
+        brave: {
+          type: 'stdio',
+          command: 'docker',
+          args: ['run', '--rm', '-i', '-e', 'BRAVE_API_KEY', 'ghcr.io/example/brave-mcp'],
+          env: { BRAVE_API_KEY: '{{placeholder.brave_api_key}}' },
+        },
+      },
+    };
+    const client = {
+      listMcpServers: vi.fn().mockResolvedValue([]),
+      listMcpDockerCatalog: vi.fn().mockResolvedValue({ allow_raw_json: false, servers: [] }),
+      requestMcpDockerCatalogServer: vi.fn().mockResolvedValue({ status: 'pending' }),
+      putMcpServer: vi.fn(),
+      putMcpJsonConfig: vi.fn(),
+    };
+    renderPanel(client);
+
+    await screen.findByText('no MCP servers attached.');
+    fireEvent.click(screen.getByRole('button', { name: 'add' }));
+    fireEvent.change(screen.getByLabelText('MCP server type'), { target: { value: 'docker_request' } });
+    fireEvent.change(screen.getByLabelText('catalog request id'), { target: { value: 'brave' } });
+    fireEvent.change(screen.getByLabelText('catalog request label'), { target: { value: 'Brave Search' } });
+    fireEvent.change(screen.getByLabelText('catalog request description'), { target: { value: 'Brave MCP image' } });
+    fireEvent.change(screen.getByLabelText('MCP JSON config'), {
+      target: { value: JSON.stringify(config, null, 2) },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'submit request' }));
+
+    await waitFor(() => expect(client.requestMcpDockerCatalogServer).toHaveBeenCalledTimes(1));
+    expect(client.requestMcpDockerCatalogServer).toHaveBeenCalledWith('brave', {
+      label: 'Brave Search',
+      description: 'Brave MCP image',
+      template: JSON.stringify(config, null, 2),
+      placeholders: [{
+        id: 'brave_api_key',
+        label: 'brave_api_key',
+        description: null,
+        required: true,
+        secret: true,
+        placeholder: null,
+      }],
+    });
+    expect(await screen.findByText(/was sent to admins for approval/)).toBeInTheDocument();
+    expect(client.putMcpJsonConfig).not.toHaveBeenCalled();
+    expect(client.putMcpServer).not.toHaveBeenCalled();
   });
 
   test('Docker add path shows the JSON editor and saves through the single-server config API', async () => {

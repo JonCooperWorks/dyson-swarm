@@ -120,6 +120,12 @@ describe('SwarmClient', () => {
       template: '{"servers":{}}',
       placeholders: [{ id: 'github_token', label: 'GitHub token' }],
     });
+    await client.requestMcpDockerCatalogServer('brave/preset', {
+      label: 'Brave',
+      description: 'Search',
+      template: '{"servers":{}}',
+      placeholders: [],
+    });
     await client.adminDeleteMcpDockerCatalogServer('github/preset');
 
     expect(fetchImpl.mock.calls[0][0]).toBe('/v1/admin/mcp/docker-catalog');
@@ -132,8 +138,16 @@ describe('SwarmClient', () => {
       template: '{"servers":{}}',
       placeholders: [{ id: 'github_token', label: 'GitHub token' }],
     });
-    expect(fetchImpl.mock.calls[2][0]).toBe('/v1/admin/mcp/docker-catalog/github%2Fpreset');
-    expect(fetchImpl.mock.calls[2][1].method).toBe('DELETE');
+    expect(fetchImpl.mock.calls[2][0]).toBe('/v1/mcp/docker-catalog/requests/brave%2Fpreset');
+    expect(fetchImpl.mock.calls[2][1].method).toBe('PUT');
+    expect(JSON.parse(fetchImpl.mock.calls[2][1].body)).toEqual({
+      label: 'Brave',
+      description: 'Search',
+      template: '{"servers":{}}',
+      placeholders: [],
+    });
+    expect(fetchImpl.mock.calls[3][0]).toBe('/v1/admin/mcp/docker-catalog/github%2Fpreset');
+    expect(fetchImpl.mock.calls[3][1].method).toBe('DELETE');
   });
 
   test('artifact cache methods use the artifact-spelled API routes', async () => {

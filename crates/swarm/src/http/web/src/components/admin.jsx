@@ -145,7 +145,7 @@ function DockerCatalogPanel({ client }) {
       ) : (
         <table className="rows">
           <thead><tr>
-            <th>id</th><th>label</th><th>source</th><th>placeholders</th><th>updated</th><th></th>
+            <th>id</th><th>label</th><th>status</th><th>source</th><th>placeholders</th><th>updated</th><th></th>
           </tr></thead>
           <tbody>
             {rows.map(row => (
@@ -155,6 +155,16 @@ function DockerCatalogPanel({ client }) {
                   <div>{row.label || row.id}</div>
                   {row.description ? (
                     <MarkdownBody markdown={row.description} className="md-body md-body-compact mcp-description-markdown"/>
+                  ) : null}
+                </td>
+                <td data-label="status">
+                  <span className={`badge badge-${row.status === 'pending' ? 'warn' : 'ok'}`}>
+                    {row.status || 'active'}
+                  </span>
+                  {row.requested_by_user_id ? (
+                    <div className="muted small">
+                      requested by <code className="mono-sm">{row.requested_by_user_id}</code>
+                    </div>
                   ) : null}
                 </td>
                 <td data-label="source">

@@ -147,6 +147,30 @@ pub struct McpDockerCatalogServer {
     pub placeholders: Vec<McpDockerPlaceholderSpec>,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum McpDockerCatalogStatus {
+    Active,
+    Pending,
+}
+
+impl McpDockerCatalogStatus {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Pending => "pending",
+        }
+    }
+
+    pub fn from_db(value: &str) -> Result<Self, String> {
+        match value {
+            "active" => Ok(Self::Active),
+            "pending" => Ok(Self::Pending),
+            other => Err(format!("unknown mcp docker catalog status `{other}`")),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct McpDockerPlaceholderSpec {
     /// Placeholder id referenced by the template.

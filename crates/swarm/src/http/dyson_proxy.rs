@@ -282,6 +282,7 @@ async fn forward(state: DispatchState, instance_id: String, req: Request) -> Res
     let method = req.method().clone();
     let (parts, body) = req.into_parts();
     let path = parts.uri.path();
+    let runtime_model_selection_path = path.to_owned();
     let path_with_query = match parts.uri.query() {
         Some(q) if !q.is_empty() => format!("{path}?{q}"),
         _ => path.to_string(),
@@ -302,6 +303,8 @@ async fn forward(state: DispatchState, instance_id: String, req: Request) -> Res
     let Ok(body_bytes) = axum::body::to_bytes(body, 8 * 1024 * 1024).await else {
         return error_response(StatusCode::BAD_REQUEST, "request body too large");
     };
+    let runtime_model_selection =
+        dyson_model_selection_from_request(&method, &runtime_model_selection_path, &body_bytes);
 
     // 5. Outbound headers: strip hop-by-hop + cookie + host + the
     //    inbound Authorization (swarm's OIDC bearer, useless to
@@ -328,7 +331,7 @@ async fn forward(state: DispatchState, instance_id: String, req: Request) -> Res
         req_builder = req_builder.header(k.as_str(), v);
     }
     if !body_bytes.is_empty() {
-        req_builder = req_builder.body(body_bytes);
+        req_builder = req_builder.body(body_bytes.clone());
     }
     let upstream_resp = match req_builder.send().await {
         Ok(r) => r,
@@ -340,6 +343,21 @@ async fn forward(state: DispatchState, instance_id: String, req: Request) -> Res
 
     // 7. Stream response back.
     let status = upstream_resp.status();
+    if status.is_success()
+        && let Some(model) = runtime_model_selection
+        && let Err(err) = state
+            .app
+            .instances
+            .record_runtime_model_selection(&row.owner_id, &instance_id, &model)
+            .await
+    {
+        tracing::warn!(
+            error = %err,
+            instance = %instance_id,
+            model = %model,
+            "dyson_proxy: failed to mirror Dyson UI model switch into swarm row"
+        );
+    }
     let resp_headers = upstream_resp.headers().clone();
     let stream = upstream_resp
         .bytes_stream()
@@ -359,6 +377,19 @@ async fn forward(state: DispatchState, instance_id: String, req: Request) -> Res
             .body(Body::from("response build failed"))
             .unwrap()
     })
+}
+
+fn dyson_model_selection_from_request(method: &Method, path: &str, body: &[u8]) -> Option<String> {
+    if method != Method::POST || path != "/api/model" {
+        return None;
+    }
+    let parsed: serde_json::Value = serde_json::from_slice(body).ok()?;
+    parsed
+        .get("model")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .map(str::to_owned)
 }
 
 fn error_response(status: StatusCode, msg: &str) -> Response<Body> {
@@ -880,6 +911,43 @@ mod tests {
             HeaderValue::from_static("https://swarm.example.com"),
         );
         assert!(!origin_is_allowed(&h, None));
+    }
+
+    #[test]
+    fn dyson_model_selection_is_detected_only_for_model_post() {
+        let body = br#"{"provider":"openrouter","model":" openai/gpt-5 "}"#;
+        assert_eq!(
+            dyson_model_selection_from_request(&Method::POST, "/api/model", body).as_deref(),
+            Some("openai/gpt-5")
+        );
+        assert!(
+            dyson_model_selection_from_request(&Method::GET, "/api/model", body).is_none(),
+            "GET must never mutate swarm's persisted model row"
+        );
+        assert!(
+            dyson_model_selection_from_request(&Method::POST, "/api/conversations", body).is_none(),
+            "unrelated Dyson API posts must not be interpreted as model switches"
+        );
+    }
+
+    #[test]
+    fn dyson_model_selection_ignores_missing_or_empty_model() {
+        assert!(
+            dyson_model_selection_from_request(
+                &Method::POST,
+                "/api/model",
+                br#"{"provider":"openrouter"}"#,
+            )
+            .is_none()
+        );
+        assert!(
+            dyson_model_selection_from_request(
+                &Method::POST,
+                "/api/model",
+                br#"{"provider":"openrouter","model":"   "}"#,
+            )
+            .is_none()
+        );
     }
 
     // ── Login-redirect on auth failure ────────────────────────────────

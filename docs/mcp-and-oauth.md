@@ -31,6 +31,9 @@ in `config.toml` seed config-managed rows at startup.
   paste one VS Code-style Docker MCP JSON object.
 - `allow_user_docker_json = false` (the default) removes that free-form surface; users choose
   from `[[mcp_runtime.docker_catalog]]` presets instead.
+- users can submit Docker MCP image/template requests from the MCP server
+  config screen; those rows stay `pending` in the same admin catalog panel
+  until an admin reviews and saves them as `active`.
 - each catalog preset is still the same MCP JSON shape, but placeholders
   such as `{{placeholder.github_token}}` are rendered by swarm after the user
   fills the declared fields.

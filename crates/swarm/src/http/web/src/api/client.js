@@ -526,6 +526,14 @@ export class SwarmClient {
     });
   }
 
+  requestMcpDockerCatalogServer(id, { label, description = null, template, placeholders = [] }) {
+    return this._json(`/v1/mcp/docker-catalog/requests/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ label, description, template, placeholders }),
+    });
+  }
+
   // ─── Provider keys (BYOK) ──────────────────────────────────────────
   //
   // Stage 7: per-user keys for any provider in the registry, plus a

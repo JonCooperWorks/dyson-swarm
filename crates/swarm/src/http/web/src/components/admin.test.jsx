@@ -24,6 +24,7 @@ describe('AdminView Docker MCP catalog', () => {
           description: '**GitHub** MCP tools with [docs](https://example.test/docs).',
           placeholders: [],
           source: 'admin',
+          status: 'active',
           created_at: 1,
           updated_at: 2,
         }],
@@ -56,6 +57,7 @@ describe('AdminView Docker MCP catalog', () => {
           id,
           ...payload,
           source: 'admin',
+          status: 'active',
           created_at: 1,
           updated_at: 2,
         }];
@@ -167,6 +169,7 @@ describe('AdminView Docker MCP catalog', () => {
         secret: true,
       }],
       source: 'admin',
+      status: 'active',
       created_at: 1,
       updated_at: 2,
     }];
@@ -195,5 +198,39 @@ describe('AdminView Docker MCP catalog', () => {
     expect(template).toHaveValue('');
     expect(screen.queryByText('Brave API key')).toBeNull();
     expect(screen.getByText('no template placeholders')).toBeInTheDocument();
+  });
+
+  test('shows pending Docker MCP requests in the same catalog panel', async () => {
+    const client = {
+      adminListUsers: vi.fn().mockResolvedValue([]),
+      adminListMcpDockerCatalog: vi.fn().mockResolvedValue({
+        allow_raw_json: false,
+        servers: [{
+          id: 'brave',
+          label: 'Brave',
+          template: '{"servers":{}}',
+          description: 'Requested image',
+          placeholders: [],
+          source: 'user',
+          status: 'pending',
+          requested_by_user_id: 'user-1',
+          created_at: 1,
+          updated_at: 2,
+        }],
+      }),
+      adminDeleteMcpDockerCatalogServer: vi.fn(),
+    };
+
+    render(
+      <ApiProvider client={client} auth={{ mode: 'none' }}>
+        <AdminView/>
+      </ApiProvider>,
+    );
+
+    expect(await screen.findByText('pending')).toBeInTheDocument();
+    expect(screen.getByText(/requested by/)).toBeInTheDocument();
+    expect(screen.getByText('user-1')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'edit' }))
+      .toHaveAttribute('href', '#/admin/mcp-catalog/brave');
   });
 });

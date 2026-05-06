@@ -505,6 +505,23 @@ fn compose_sandbox_env(
     Ok(compose_env(&BTreeMap::new(), managed, caller))
 }
 
+fn models_with_primary(existing: Vec<String>, selected: &str) -> Vec<String> {
+    let selected = selected.trim();
+    if selected.is_empty() {
+        return existing;
+    }
+    let mut out = Vec::with_capacity(existing.len().max(1));
+    out.push(selected.to_owned());
+    out.extend(existing.into_iter().filter_map(|m| {
+        let keep = {
+            let trimmed = m.trim();
+            !trimmed.is_empty() && trimmed != selected
+        };
+        keep.then_some(m)
+    }));
+    out
+}
+
 /// Build the `SWARM_INGEST_URL` value from the operator's `proxy_base`
 /// (the same value already exposed as `SWARM_PROXY_URL`).  An empty
 /// `proxy_base` falls through as an empty URL — dyson reads that as
@@ -3720,6 +3737,33 @@ impl InstanceService {
         Ok(())
     }
 
+    /// Record a model switch that already happened inside the running
+    /// Dyson UI. Unlike [`Self::update_models`], this does not push
+    /// `/api/admin/configure` back into the sandbox: the proxied
+    /// `/api/model` request has already updated the live dyson.json and
+    /// any loaded agents. We only mirror the primary model into swarm's
+    /// row so binary redeploys / snapshot restores replay the user's
+    /// latest choice instead of the stale hire-time default.
+    pub async fn record_runtime_model_selection(
+        &self,
+        owner_id: &str,
+        id: &str,
+        model: &str,
+    ) -> Result<(), SwarmError> {
+        let selected = model.trim();
+        if selected.is_empty() {
+            return Err(SwarmError::BadRequest("model must be non-empty".into()));
+        }
+        let row = self
+            .instances
+            .get_for_owner(owner_id, id)
+            .await?
+            .ok_or(SwarmError::NotFound)?;
+        let models = models_with_primary(row.models, selected);
+        self.instances.set_models(id, &models).await?;
+        Ok(())
+    }
+
     /// Owner-scoped tool include-list update.  Mirrors
     /// `update_models`: pushes the change into the running dyson via
     /// `/api/admin/configure` first, then persists the row so the DB
@@ -4118,6 +4162,27 @@ mod tests {
         assert_eq!(env["APP_SETTING"], "caller");
     }
 
+    #[test]
+    fn models_with_primary_promotes_selection_and_preserves_fallbacks() {
+        let models = models_with_primary(
+            vec![
+                "openrouter/default".into(),
+                "openai/gpt-5".into(),
+                "openrouter/fallback".into(),
+                " ".into(),
+            ],
+            " openai/gpt-5 ",
+        );
+        assert_eq!(
+            models,
+            vec![
+                "openai/gpt-5".to_string(),
+                "openrouter/default".to_string(),
+                "openrouter/fallback".to_string(),
+            ]
+        );
+    }
+
     #[async_trait]
     impl CubeClient for MockCube {
         async fn create_sandbox(&self, args: CreateSandboxArgs) -> Result<SandboxInfo, CubeError> {
@@ -4248,6 +4313,45 @@ mod tests {
         let row = instances.get(&created.id).await.unwrap().unwrap();
         assert_eq!(row.name, "PR reviewer");
         assert_eq!(row.task, "Watch foo/bar PRs and comment on style");
+    }
+
+    #[tokio::test]
+    async fn runtime_model_selection_updates_row_without_reconfigure() {
+        let (svc, _cube, _tokens, instances) = build().await;
+        let mut env = env_with_model();
+        env.insert(
+            ENV_MODELS.into(),
+            "openrouter/default,openrouter/fallback".into(),
+        );
+        let created = svc
+            .create(
+                "legacy",
+                CreateRequest {
+                    template_id: "tpl".into(),
+                    name: None,
+                    task: None,
+                    env,
+                    ttl_seconds: None,
+                    network_policy: NetworkPolicy::default(),
+                    mcp_servers: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+
+        svc.record_runtime_model_selection("legacy", &created.id, " openai/gpt-5 ")
+            .await
+            .unwrap();
+
+        let row = instances.get(&created.id).await.unwrap().unwrap();
+        assert_eq!(
+            row.models,
+            vec![
+                "openai/gpt-5".to_string(),
+                "openrouter/default".to_string(),
+                "openrouter/fallback".to_string(),
+            ]
+        );
     }
 
     #[tokio::test]

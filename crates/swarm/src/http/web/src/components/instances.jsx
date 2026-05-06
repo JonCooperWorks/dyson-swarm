@@ -1772,7 +1772,13 @@ function McpServerCard({ row, dockerCatalog, onChange, onChangeAuth, onRemove })
   );
 }
 
-function McpServerTypeField({ value, onChange, disabled = false, dockerCatalog = null }) {
+function McpServerTypeField({
+  value,
+  onChange,
+  disabled = false,
+  dockerCatalog = null,
+  allowRequests = false,
+}) {
   const catalog = normalizeDockerCatalog(dockerCatalog);
   const hasCatalog = catalog.servers.length > 0;
   return (
@@ -1789,6 +1795,7 @@ function McpServerTypeField({ value, onChange, disabled = false, dockerCatalog =
         {catalog.allow_raw_json || value === 'docker' ? (
           <option value="docker">Docker JSON</option>
         ) : null}
+        {allowRequests ? <option value="docker_request">Request Docker image</option> : null}
       </select>
     </label>
   );
@@ -3125,6 +3132,8 @@ const MCP_JSON_CONFIG_EXAMPLE = `{
     }
   }
 }`;
+const MCP_TEMPLATE_PLACEHOLDER_RE = /{{\s*placeholders?\.([A-Za-z0-9_-]+)\s*}}/g;
+const MCP_CATALOG_REQUEST_ID_RE = /^[A-Za-z0-9_-]+$/;
 
 // ─── MCP servers panel (instance detail) ──────────────────────────
 //
@@ -3142,6 +3151,7 @@ export function McpServersPanel({ instanceId, policyKind, disabled }) {
     servers: [],
   });
   const [err, setErr] = React.useState(null);
+  const [notice, setNotice] = React.useState(null);
   const [busy, setBusy] = React.useState(false);
   // editing: null | { mode: 'new' } | { mode: 'edit', row }
   // Edit-button path fetches the full URL before opening the modal.
@@ -3249,6 +3259,24 @@ export function McpServersPanel({ instanceId, policyKind, disabled }) {
     }
   };
 
+  const submitDockerCatalogRequest = async (preset) => {
+    setBusy(true); setErr(null); setNotice(null);
+    try {
+      await client.requestMcpDockerCatalogServer(preset.id, {
+        label: preset.label,
+        description: preset.description,
+        template: preset.template,
+        placeholders: preset.placeholders,
+      });
+      setNotice(`Docker MCP request "${preset.label || preset.id}" was sent to admins for approval.`);
+      setEditing(null);
+    } catch (e) {
+      setErr(formatMcpPanelError(e, 'save'));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   // Edit-button path: remote rows fetch the FULL URL via getMcpServer
   // because the listing strips query strings. Docker rows fetch the
   // sealed raw MCP JSON so the textarea can round-trip what the
@@ -3296,6 +3324,7 @@ export function McpServersPanel({ instanceId, policyKind, disabled }) {
         </div>
       </div>
       {err ? <McpErrorNotice notice={err}/> : null}
+      {notice ? <div className="banner banner-info">{notice}</div> : null}
       <p className="muted small">
         Swarm proxies every MCP request — the agent only sees a swarm URL,
         never your upstream URL or its secrets. OAuth tokens land in
@@ -3343,6 +3372,7 @@ export function McpServersPanel({ instanceId, policyKind, disabled }) {
           onSubmit={submitEdit}
           onSubmitJson={submitCliJson}
           onSubmitCatalog={submitDockerCatalog}
+          onSubmitCatalogRequest={submitDockerCatalogRequest}
           dockerCatalog={dockerCatalog}
           busy={busy}
         />
@@ -3601,6 +3631,25 @@ function mcpServerNameFromText(text) {
   }
 }
 
+function placeholderSpecsFromMcpTemplate(template) {
+  const seen = new Set();
+  const placeholders = [];
+  for (const match of template.matchAll(MCP_TEMPLATE_PLACEHOLDER_RE)) {
+    const id = match[1];
+    if (seen.has(id)) continue;
+    seen.add(id);
+    placeholders.push({
+      id,
+      label: id,
+      description: null,
+      required: true,
+      secret: true,
+      placeholder: null,
+    });
+  }
+  return placeholders;
+}
+
 function McpServerEditModal({
   initial,
   existingNames,
@@ -3608,6 +3657,7 @@ function McpServerEditModal({
   onSubmit,
   onSubmitJson,
   onSubmitCatalog,
+  onSubmitCatalogRequest,
   dockerCatalog = null,
   busy,
 }) {
@@ -3654,6 +3704,9 @@ function McpServerEditModal({
   const [jsonText, setJsonText] = React.useState(
     initialIsDocker && initial?.raw_config ? JSON.stringify(initial.raw_config, null, 2) : ''
   );
+  const [requestId, setRequestId] = React.useState('');
+  const [requestLabel, setRequestLabel] = React.useState('');
+  const [requestDescription, setRequestDescription] = React.useState('');
   const [catalogId, setCatalogId] = React.useState(initial?.docker_catalog_id || initialCatalog?.id || '');
   const [catalogPlaceholders, setCatalogPlaceholders] = React.useState(() => {
     if (!initialIsCatalog || !initialCatalog) return {};
@@ -3662,6 +3715,7 @@ function McpServerEditModal({
   const [err, setErr] = React.useState(null);
   const isDockerJsonMode = (isNew && serverType === 'docker') || (!isNew && initialIsDocker);
   const isDockerCatalogMode = (isNew && serverType === 'docker_catalog') || (!isNew && initialIsCatalog);
+  const isDockerRequestMode = isNew && serverType === 'docker_request';
   const selectedCatalog = catalog.servers.find(s => s.id === catalogId) || null;
 
   // Auth kind changed mid-edit → drop any "keep existing" sentinels.
@@ -3718,6 +3772,31 @@ function McpServerEditModal({
       onSubmitCatalog({ catalogId: selectedCatalog.id, placeholders: catalogPlaceholders });
       return;
     }
+    if (isDockerRequestMode) {
+      const id = requestId.trim();
+      if (!MCP_CATALOG_REQUEST_ID_RE.test(id)) {
+        setErr('id must match [A-Za-z0-9_-]+');
+        return;
+      }
+      if (!requestLabel.trim()) {
+        setErr('label is required');
+        return;
+      }
+      try {
+        parseMcpCliJsonConfig(jsonText);
+      } catch (e) {
+        setErr(e?.message || 'The configuration is not valid JSON.');
+        return;
+      }
+      onSubmitCatalogRequest({
+        id,
+        label: requestLabel.trim(),
+        description: requestDescription.trim() || null,
+        template: jsonText,
+        placeholders: placeholderSpecsFromMcpTemplate(jsonText),
+      });
+      return;
+    }
     if (isDockerJsonMode) {
       try {
         const config = parseMcpCliJsonConfig(jsonText);
@@ -3762,8 +3841,12 @@ function McpServerEditModal({
     }
     onSubmit({ name: trimmed, url: url.trim(), auth });
   };
-  const primaryAction = isDockerCatalogMode ? 'provision' : 'save';
-  const busyAction = isDockerCatalogMode ? 'provisioning…' : 'saving…';
+  const primaryAction = isDockerCatalogMode
+    ? 'provision'
+    : (isDockerRequestMode ? 'submit request' : 'save');
+  const busyAction = isDockerCatalogMode
+    ? 'provisioning…'
+    : (isDockerRequestMode ? 'submitting…' : 'saving…');
 
   return (
     <div className="modal-scrim" onClick={onCancel}>
@@ -3786,6 +3869,7 @@ function McpServerEditModal({
               value={serverType}
               onChange={setServerType}
               dockerCatalog={catalog}
+              allowRequests={Boolean(onSubmitCatalogRequest)}
             />
           ) : null}
           {isDockerCatalogMode ? (
@@ -3833,6 +3917,53 @@ function McpServerEditModal({
               ) : (
                 <p className="muted small">Choose a Docker server to continue.</p>
               )}
+            </>
+          ) : isDockerRequestMode ? (
+            <>
+              <p className="muted small">
+                Request a Docker-backed MCP image for admins to review.
+                It appears in the admin Docker MCP templates panel as pending.
+              </p>
+              <label className="field">
+                <span>id</span>
+                <input
+                  value={requestId}
+                  onChange={e => setRequestId(e.target.value)}
+                  placeholder="github"
+                  autoComplete="off"
+                  disabled={busy}
+                  aria-label="catalog request id"
+                />
+                <span className="hint muted small">Stable catalog id. Use letters, numbers, underscores, or dashes.</span>
+              </label>
+              <label className="field">
+                <span>label</span>
+                <input
+                  value={requestLabel}
+                  onChange={e => setRequestLabel(e.target.value)}
+                  placeholder="GitHub"
+                  autoComplete="off"
+                  disabled={busy}
+                  aria-label="catalog request label"
+                />
+              </label>
+              <label className="field">
+                <span>description</span>
+                <textarea
+                  value={requestDescription}
+                  onChange={e => setRequestDescription(e.target.value)}
+                  placeholder="Docker-backed GitHub MCP server"
+                  rows={3}
+                  disabled={busy}
+                  aria-label="catalog request description"
+                />
+              </label>
+              <McpDockerJsonField
+                value={jsonText}
+                onChange={setJsonText}
+                disabled={busy}
+                autoFocus
+              />
             </>
           ) : isDockerJsonMode ? (
             <>

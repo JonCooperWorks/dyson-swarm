@@ -96,6 +96,8 @@ async fn ingest_file(State(state): State<AppState>, req: Request<Body>) -> Statu
         updated_at: body.updated_at,
     };
 
+    let is_identity = is_workspace_identity(&body.namespace, &body.path);
+    let mut identity_body: Option<String> = None;
     let result = if body.deleted {
         state.state_files.tombstone(meta).await
     } else {
@@ -110,11 +112,47 @@ async fn ingest_file(State(state): State<AppState>, req: Request<Body>) -> Statu
                 return StatusCode::BAD_REQUEST;
             }
         };
+        if is_identity {
+            match std::str::from_utf8(&decoded) {
+                Ok(s) => identity_body = Some(s.to_owned()),
+                Err(e) => {
+                    tracing::debug!(
+                        error = %e,
+                        instance = %instance_id,
+                        "state ingest: IDENTITY.md was not valid UTF-8; skipping row mirror"
+                    );
+                }
+            }
+        }
         state.state_files.ingest(meta, &decoded).await
     };
 
     match result {
-        Ok(_) => StatusCode::NO_CONTENT,
+        Ok(_) => {
+            if is_identity {
+                let task = if body.deleted {
+                    ""
+                } else if let Some(task) = identity_body.as_deref() {
+                    task
+                } else {
+                    return StatusCode::NO_CONTENT;
+                };
+                let name = identity_name(task).unwrap_or_else(|| instance.name.clone());
+                if let Err(e) = state
+                    .instances
+                    .mirror_identity_from_instance(&instance.owner_id, &instance.id, &name, task)
+                    .await
+                {
+                    tracing::warn!(
+                        error = %e,
+                        instance = %instance_id,
+                        "state ingest: failed to mirror IDENTITY.md into instance row",
+                    );
+                    return StatusCode::INTERNAL_SERVER_ERROR;
+                }
+            }
+            StatusCode::NO_CONTENT
+        }
         Err(crate::state_files::StateFileError::Invalid(e)) => {
             tracing::debug!(error = %e, "state ingest: rejected file");
             StatusCode::BAD_REQUEST
@@ -143,4 +181,48 @@ fn extract_bearer(req: &Request<Body>) -> Option<&str> {
         .or_else(|| raw.strip_prefix("bearer "))
         .map(str::trim)
         .filter(|s| !s.is_empty())
+}
+
+fn is_workspace_identity(namespace: &str, path: &str) -> bool {
+    namespace == "workspace" && path == "IDENTITY.md"
+}
+
+fn identity_name(body: &str) -> Option<String> {
+    body.lines()
+        .find_map(identity_name_line)
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+}
+
+fn identity_name_line(line: &str) -> Option<&str> {
+    let line = line.trim();
+    if let Some(rest) = line.strip_prefix("Name:") {
+        return Some(rest);
+    }
+    let line = line.strip_prefix("- ").unwrap_or(line);
+    line.strip_prefix("**Name:**")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn identity_name_reads_markdown_identity_field() {
+        let body = "# IDENTITY.md — Who Am I?\n\n- **Name:** axelrod\n";
+        assert_eq!(identity_name(body).as_deref(), Some("axelrod"));
+    }
+
+    #[test]
+    fn identity_name_reads_legacy_identity_field() {
+        let body = "# Identity\n\nName: axelrod\n";
+        assert_eq!(identity_name(body).as_deref(), Some("axelrod"));
+    }
+
+    #[test]
+    fn workspace_identity_match_is_exact() {
+        assert!(is_workspace_identity("workspace", "IDENTITY.md"));
+        assert!(!is_workspace_identity("workspace", "notes/IDENTITY.md"));
+        assert!(!is_workspace_identity("chats", "IDENTITY.md"));
+    }
 }

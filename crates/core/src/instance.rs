@@ -921,66 +921,29 @@ impl InstanceService {
         }
     }
 
-    /// Re-push the per-instance identity to every Live instance.  The
-    /// dyson side rewrites IDENTITY.md when identity lands, so this fixes
-    /// any running dyson whose IDENTITY.md fell out of sync with the
-    /// swarm-side row (typical cause: the row was renamed while the
-    /// instance was offline, or a previous configure push failed).
-    /// Idempotent — `/api/admin/configure` returns the same shape and
-    /// the dyson handler short-circuits when the merged IDENTITY.md
-    /// matches what's already on disk.  Returns `(visited, succeeded)`
-    /// for the caller's log line.
-    pub async fn push_names_all(&self) -> Result<(usize, usize), SwarmError> {
-        let Some(reconfigurer) = self.reconfigurer.as_ref() else {
-            return Ok((0, 0));
+    async fn clear_identity_fields_when_mirror_is_authoritative(
+        &self,
+        body: &mut ReconfigureBody,
+        owner_id: &str,
+        instance_id: &str,
+        state_files: &crate::state_files::StateFileService,
+    ) -> Result<(), SwarmError> {
+        let Some(row) = state_files
+            .find(instance_id, "workspace", "IDENTITY.md")
+            .await
+            .map_err(|e| SwarmError::Internal(format!("find mirrored identity: {e}")))?
+        else {
+            return Ok(());
         };
-        let live = self
-            .instances
-            .list(
-                SYSTEM_OWNER,
-                ListFilter {
-                    status: Some(InstanceStatus::Live),
-                    include_destroyed: false,
-                },
-            )
-            .await?;
-        let mut succeeded = 0usize;
-        for row in &live {
-            let name = row.name.trim();
-            let task = row.task.trim();
-            if name.is_empty() && task.is_empty() {
-                continue;
-            }
-            let Some(sandbox_id) = &row.cube_sandbox_id else {
-                tracing::debug!(
-                    instance = %row.id,
-                    "push-names: skipping — no cube_sandbox_id on row"
-                );
-                continue;
-            };
-            let body = ReconfigureBody {
-                name: Some(name.to_owned()).filter(|s| !s.is_empty()),
-                task: Some(task.to_owned()).filter(|s| !s.is_empty()),
-                instance_id: Some(row.id.clone()),
-                ..Default::default()
-            };
-            match push_with_retry(reconfigurer.as_ref(), &row.id, sandbox_id, &body).await {
-                Ok(()) => {
-                    succeeded += 1;
-                    tracing::debug!(instance = %row.id, name = %name, "push-names: pushed");
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        instance = %row.id,
-                        error = %e,
-                        "push-names: push failed (will retry next sweep)"
-                    );
-                }
-            }
+        if row.owner_id != owner_id {
+            return Err(SwarmError::Internal(format!(
+                "state row owner mismatch for {}:{}",
+                row.namespace, row.path
+            )));
         }
-        let visited = live.len();
-        tracing::info!(visited, succeeded, "push-names: sweep complete");
-        Ok((visited, succeeded))
+        body.name = None;
+        body.task = None;
+        Ok(())
     }
 
     /// Re-push the image-generation defaults to every Live instance.
@@ -1596,12 +1559,19 @@ impl InstanceService {
             let reconfigurer = self.reconfigurer.as_ref().ok_or_else(|| {
                 SwarmError::PolicyDenied("dyson reconfigurer not configured".into())
             })?;
-            let body = self.configure_body_for_existing_row(
+            let mut body = self.configure_body_for_existing_row(
                 &source,
                 &proxy_token,
                 &ingest_token,
                 &state_sync_token,
             );
+            self.clear_identity_fields_when_mirror_is_authoritative(
+                &mut body,
+                owner_id,
+                &source.id,
+                state_files,
+            )
+            .await?;
             if let Err(err) =
                 push_with_retry(reconfigurer.as_ref(), &source.id, &info.sandbox_id, &body).await
             {
@@ -1656,9 +1626,9 @@ impl InstanceService {
         // boots out of warmup-placeholder mode.  Mirrors the create
         // path's body shape — name, task, models, image-gen,
         // mcp_servers.  Best-effort: a failure here leaves the row
-        // pointing at a Live cube that hasn't been reconfigured yet,
-        // which the running `push-names` / `rewire-image-gen` sweeps
-        // at next swarm restart will pick up.
+        // pointing at a Live cube that hasn't been reconfigured yet;
+        // the image-gen rewire sweep will retry the non-identity
+        // parts on the next swarm restart.
         if replay_state_files.is_none()
             && let Some(reconfigurer) = self.reconfigurer.as_ref()
         {
@@ -2026,12 +1996,19 @@ impl InstanceService {
             let reconfigurer = self.reconfigurer.as_ref().ok_or_else(|| {
                 SwarmError::PolicyDenied("dyson reconfigurer not configured".into())
             })?;
-            let body = self.configure_body_for_existing_row(
+            let mut body = self.configure_body_for_existing_row(
                 &source,
                 &proxy_token,
                 &ingest_token,
                 &state_sync_token,
             );
+            self.clear_identity_fields_when_mirror_is_authoritative(
+                &mut body,
+                owner_id,
+                &source.id,
+                state_files,
+            )
+            .await?;
             if let Err(err) =
                 push_with_retry(reconfigurer.as_ref(), &source.id, &info.sandbox_id, &body).await
             {
@@ -2213,7 +2190,7 @@ impl InstanceService {
         }
 
         if let Some(reconfigurer) = self.reconfigurer.as_ref() {
-            let body = ReconfigureBody {
+            let mut body = ReconfigureBody {
                 name: Some(source.name.clone()).filter(|s| !s.is_empty()),
                 task: Some(source.task.clone()).filter(|s| !s.is_empty()),
                 models: source.models.clone(),
@@ -2250,6 +2227,13 @@ impl InstanceService {
                 tools: (!source.tools.is_empty()).then(|| source.tools.clone()),
                 mcp_servers: None,
             };
+            self.clear_identity_fields_when_mirror_is_authoritative(
+                &mut body,
+                owner_id,
+                &source.id,
+                state_files,
+            )
+            .await?;
             if let Err(err) =
                 push_with_retry(reconfigurer.as_ref(), &source.id, &info.sandbox_id, &body).await
             {
@@ -3054,6 +3038,28 @@ impl InstanceService {
                 })?;
         }
         Ok(row)
+    }
+
+    /// Mirror identity that originated inside the running dyson.
+    ///
+    /// Unlike [`rename`], this only updates swarm's metadata row. The
+    /// instance is the source of truth for this path, so pushing the
+    /// same body back through `/api/admin/configure` would risk racing
+    /// an agent-authored edit with stale swarm state.
+    pub async fn mirror_identity_from_instance(
+        &self,
+        owner_id: &str,
+        id: &str,
+        name: &str,
+        task: &str,
+    ) -> Result<InstanceRow, SwarmError> {
+        self.instances
+            .update_identity(owner_id, id, name, task)
+            .await?;
+        self.instances
+            .get_for_owner(owner_id, id)
+            .await?
+            .ok_or(SwarmError::NotFound)
     }
 
     /// Owner-scoped models update.  Stage 8.3 entry point — lets a
@@ -5073,43 +5079,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn push_names_all_pushes_full_identity() {
-        let (svc, _cube, _tokens, _instances, recorder) = build_with_recorder().await;
-        let created = svc
-            .create(
-                "legacy",
-                CreateRequest {
-                    template_id: "tpl".into(),
-                    name: Some("axelrod".into()),
-                    task: Some("write investment memos".into()),
-                    env: env_with_model(),
-                    ttl_seconds: None,
-                    network_policy: NetworkPolicy::default(),
-                    mcp_servers: Vec::new(),
-                },
-            )
-            .await
-            .unwrap();
-        recorder.pushed.lock().unwrap().clear();
-
-        let (visited, succeeded) = svc.push_names_all().await.unwrap();
-
-        assert_eq!(visited, 1);
-        assert_eq!(succeeded, 1);
-        let pushed = recorder.pushed.lock().unwrap();
-        assert_eq!(pushed.len(), 1);
-        let (instance_id, _sandbox_id, body) = &pushed[0];
-        assert_eq!(instance_id, &created.id);
-        assert_eq!(body.name.as_deref(), Some("axelrod"));
-        assert_eq!(body.task.as_deref(), Some("write investment memos"));
-        assert_eq!(body.instance_id.as_deref(), Some(created.id.as_str()));
-        assert!(
-            body.models.is_empty(),
-            "identity sweep must not touch models"
-        );
-    }
-
-    #[tokio::test]
     async fn rename_waits_for_identity_reconfigure() {
         let (svc, _cube, _tokens, _instances, recorder) = build_with_recorder().await;
         let created = svc
@@ -5139,6 +5108,47 @@ mod tests {
         assert_eq!(body.name.as_deref(), Some("new"));
         assert_eq!(body.task.as_deref(), Some("new task"));
         assert_eq!(body.instance_id.as_deref(), Some(created.id.as_str()));
+    }
+
+    #[tokio::test]
+    async fn mirror_identity_from_instance_updates_row_without_reconfigure() {
+        let (svc, _cube, _tokens, _instances, recorder) = build_with_recorder().await;
+        let created = svc
+            .create(
+                "legacy",
+                CreateRequest {
+                    template_id: "tpl".into(),
+                    name: Some("old".into()),
+                    task: Some("old task".into()),
+                    env: env_with_model(),
+                    ttl_seconds: None,
+                    network_policy: NetworkPolicy::default(),
+                    mcp_servers: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+        recorder.pushed.lock().unwrap().clear();
+
+        let mirrored = svc
+            .mirror_identity_from_instance(
+                "legacy",
+                &created.id,
+                "axelrod",
+                "# IDENTITY.md — Who Am I?\n\n- **Name:** axelrod",
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(mirrored.name, "axelrod");
+        assert_eq!(
+            mirrored.task,
+            "# IDENTITY.md — Who Am I?\n\n- **Name:** axelrod"
+        );
+        assert!(
+            recorder.pushed.lock().unwrap().is_empty(),
+            "instance-originated identity sync must not push stale state back"
+        );
     }
 
     #[tokio::test]
@@ -7684,6 +7694,20 @@ mod tests {
                     instance_id: &src.id,
                     owner_id: &owner,
                     namespace: "workspace",
+                    path: "IDENTITY.md",
+                    mime: Some("text/markdown"),
+                    updated_at: 1_777_699_999,
+                },
+                b"# IDENTITY.md\n\n- **Name:** instance-memoryful",
+            )
+            .await
+            .unwrap();
+        state_files
+            .ingest(
+                crate::state_files::StateFileMeta {
+                    instance_id: &src.id,
+                    owner_id: &owner,
+                    namespace: "workspace",
                     path: "memory/SOUL.md",
                     mime: Some("text/markdown"),
                     updated_at: 1_777_700_000,
@@ -7758,7 +7782,13 @@ mod tests {
         assert!(!captured.env.contains_key(ENV_STATE_SYNC_TOKEN));
 
         let restored = recorder.restored.lock().unwrap();
-        assert_eq!(restored.len(), 3);
+        assert_eq!(restored.len(), 4);
+        assert!(
+            restored
+                .iter()
+                .any(|(_, _, b)| b.namespace == "workspace" && b.path == "IDENTITY.md"),
+            "identity must be replayed from the sealed mirror"
+        );
         assert!(
             restored
                 .iter()
@@ -7784,6 +7814,10 @@ mod tests {
         assert!(
             pushed[0].2.state_sync_url.is_some() && pushed[0].2.state_sync_token.is_some(),
             "state sync should be enabled by the post-replay configure push"
+        );
+        assert!(
+            pushed[0].2.name.is_none() && pushed[0].2.task.is_none(),
+            "post-replay configure must not overwrite mirrored IDENTITY.md with row metadata"
         );
         drop(pushed);
 
@@ -7875,6 +7909,20 @@ mod tests {
                     instance_id: &src.id,
                     owner_id: &owner,
                     namespace: "workspace",
+                    path: "IDENTITY.md",
+                    mime: Some("text/markdown"),
+                    updated_at: 1_777_709_999,
+                },
+                b"# IDENTITY.md\n\n- **Name:** instance-redeploy-safe",
+            )
+            .await
+            .unwrap();
+        state_files
+            .ingest(
+                crate::state_files::StateFileMeta {
+                    instance_id: &src.id,
+                    owner_id: &owner,
+                    namespace: "workspace",
                     path: "memory/SOUL.md",
                     mime: Some("text/markdown"),
                     updated_at: 1_777_710_000,
@@ -7924,7 +7972,13 @@ mod tests {
         assert!(!captured.env.contains_key(ENV_STATE_SYNC_TOKEN));
 
         let restored = recorder.restored.lock().unwrap();
-        assert_eq!(restored.len(), 2);
+        assert_eq!(restored.len(), 3);
+        assert!(
+            restored
+                .iter()
+                .any(|(_, _, b)| b.namespace == "workspace" && b.path == "IDENTITY.md"),
+            "identity must be replayed during redeploy rotation"
+        );
         assert!(
             restored
                 .iter()
@@ -7938,6 +7992,10 @@ mod tests {
         assert!(
             pushed[0].2.state_sync_url.is_some() && pushed[0].2.state_sync_token.is_some(),
             "state sync should be re-enabled only by the post-replay configure push"
+        );
+        assert!(
+            pushed[0].2.name.is_none() && pushed[0].2.task.is_none(),
+            "redeploy configure must not overwrite mirrored IDENTITY.md with row metadata"
         );
         drop(pushed);
 

@@ -282,25 +282,6 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     instance_svc = instance_svc.with_state_files(state_files.clone());
     let instance_svc = Arc::new(instance_svc);
 
-    // Name push sweep.  Every swarm restart re-pushes the per-instance
-    // `name` (from the swarm-side row) into the running dyson's
-    // IDENTITY.md via /api/admin/configure.  Catches up any dysons
-    // whose name fell out of sync with the row — typically because
-    // the row was renamed while offline, or the instance predates the
-    // SPA's /api/agent endpoint.  Idempotent.
-    {
-        let svc = instance_svc.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(3)).await;
-            match svc.push_names_all().await {
-                Ok((visited, succeeded)) => {
-                    tracing::info!(visited, succeeded, "push-names: startup sweep complete");
-                }
-                Err(err) => tracing::warn!(error = %err, "push-names: startup sweep aborted"),
-            }
-        });
-    }
-
     // Image-generation rewire sweep.  Every swarm restart re-pushes
     // the current image-gen defaults to every Live instance so a
     // bumped model id (or a fresh OpenRouter image provider entry)

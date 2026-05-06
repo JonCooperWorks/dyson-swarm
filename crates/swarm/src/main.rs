@@ -282,12 +282,10 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     instance_svc = instance_svc.with_state_files(state_files.clone());
     let instance_svc = Arc::new(instance_svc);
 
-    // Image-generation rewire sweep.  Every swarm restart re-pushes
-    // the current image-gen defaults to every Live instance so a
-    // bumped model id (or a fresh OpenRouter image provider entry)
-    // rolls out without operator-side intervention.  Idempotent —
-    // dysons that already have the right values get the same JSON
-    // written back.  Spawned so the HTTP server doesn't wait on
+    // Runtime config sync sweep. Every swarm restart re-pushes the
+    // current desired config to every Live instance: models, tools,
+    // runtime tokens, state sync, image generation, and MCP servers.
+    // Idempotent; spawned so the HTTP server doesn't wait on
     // possibly-cold cubeproxy timeouts.
     {
         let svc = instance_svc.clone();
@@ -298,17 +296,17 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
             // load-bearing — the loop is best-effort with retries
             // through `push_with_retry` inside the per-row push call.
             tokio::time::sleep(Duration::from_secs(3)).await;
-            match svc.rewire_image_generation_all().await {
+            match svc.sync_runtime_config_all().await {
                 Ok((visited, succeeded)) => {
                     tracing::info!(
                         visited,
                         succeeded,
-                        "rewire-image-gen: startup sweep complete"
+                        "runtime-config-sync: startup sweep complete"
                     );
                 }
                 Err(err) => tracing::warn!(
                     error = %err,
-                    "rewire-image-gen: startup sweep aborted"
+                    "runtime-config-sync: startup sweep aborted"
                 ),
             }
         });

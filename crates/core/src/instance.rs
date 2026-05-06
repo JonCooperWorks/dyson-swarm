@@ -352,6 +352,13 @@ pub struct InstanceService {
     state_files: Option<crate::state_files::StateFiles>,
 }
 
+#[derive(Debug, Clone)]
+struct RuntimeTokens {
+    proxy: String,
+    ingest: String,
+    state_sync: String,
+}
+
 /// Anything that can push swarm-side identity/task/model state to a
 /// running dyson sandbox via dyson's `/api/admin/configure` runtime
 /// endpoint.  Trait so tests can substitute a recorder without
@@ -689,9 +696,9 @@ pub struct RestoreStateFileBody {
 }
 
 /// Image-generation defaults a swarm-managed dyson should run with.
-/// Pushed at `create()` time and re-pushed by the startup sweep
-/// (`rewire_image_generation_all`) so existing instances inherit
-/// changes after a swarm redeploy without operator intervention.
+/// Pushed at `create()` time and re-pushed by the startup runtime
+/// config sync so existing instances inherit changes after a swarm
+/// redeploy without operator intervention.
 ///
 /// `provider_block` is whatever JSON shape dyson's loader expects for
 /// a provider entry; today that's `{ "type", "base_url", "api_key",
@@ -875,12 +882,45 @@ impl InstanceService {
             .map_err(|e| SwarmError::BadRequest(format!("mcp upstream URL rejected: {e}")))
     }
 
-    fn configure_body_for_existing_row(
+    async fn runtime_tokens_for_instance(
+        &self,
+        instance_id: &str,
+    ) -> Result<RuntimeTokens, SwarmError> {
+        let proxy = match self.tokens.lookup_by_instance(instance_id).await? {
+            Some(t) => t,
+            None => self.tokens.mint(instance_id, SHARED_PROVIDER).await?,
+        };
+        let ingest = match self
+            .tokens
+            .lookup_by_instance_for_provider(instance_id, crate::db::tokens::INGEST_PROVIDER)
+            .await?
+        {
+            Some(t) => t,
+            None => self.tokens.mint_ingest(instance_id).await?,
+        };
+        let state_sync = match self
+            .tokens
+            .lookup_by_instance_for_provider(instance_id, crate::db::tokens::STATE_SYNC_PROVIDER)
+            .await?
+        {
+            Some(t) => t,
+            None => self.tokens.mint_state_sync(instance_id).await?,
+        };
+        Ok(RuntimeTokens {
+            proxy,
+            ingest,
+            state_sync,
+        })
+    }
+
+    fn configure_body_from_parts(
         &self,
         source: &InstanceRow,
         proxy_token: &str,
         ingest_token: &str,
         state_sync_token: &str,
+        image_gen_defaults: Option<&ImageGenDefaults>,
+        mcp_servers: Option<serde_json::Map<String, serde_json::Value>>,
     ) -> ReconfigureBody {
         ReconfigureBody {
             name: Some(source.name.clone()).filter(|s| !s.is_empty()),
@@ -902,23 +942,36 @@ impl InstanceService {
                 if u.is_empty() { None } else { Some(u) }
             },
             state_sync_token: Some(state_sync_token.to_owned()),
-            image_provider_name: self
-                .image_gen_defaults
-                .as_ref()
-                .map(|d| d.provider_name.clone()),
-            image_provider_block: self
-                .image_gen_defaults
-                .as_ref()
+            image_provider_name: image_gen_defaults.map(|d| d.provider_name.clone()),
+            image_provider_block: image_gen_defaults
                 .map(|d| d.provider_block(&self.image_proxy_base(), proxy_token)),
-            image_generation_provider: self
-                .image_gen_defaults
-                .as_ref()
-                .map(|d| d.provider_name.clone()),
-            image_generation_model: self.image_gen_defaults.as_ref().map(|d| d.model.clone()),
+            image_generation_provider: image_gen_defaults.map(|d| d.provider_name.clone()),
+            image_generation_model: image_gen_defaults.map(|d| d.model.clone()),
             reset_skills: source.tools.is_empty(),
             tools: (!source.tools.is_empty()).then(|| source.tools.clone()),
-            mcp_servers: None,
+            mcp_servers,
         }
+    }
+
+    async fn configure_body_for_existing_row(
+        &self,
+        owner_id: &str,
+        source: &InstanceRow,
+        proxy_token: &str,
+        ingest_token: &str,
+        state_sync_token: &str,
+    ) -> ReconfigureBody {
+        let mcp_servers = self
+            .mcp_servers_block_for_instance(owner_id, &source.id, proxy_token, true)
+            .await;
+        self.configure_body_from_parts(
+            source,
+            proxy_token,
+            ingest_token,
+            state_sync_token,
+            self.image_gen_defaults.as_ref(),
+            mcp_servers,
+        )
     }
 
     async fn mcp_servers_block_for_instance(
@@ -926,12 +979,14 @@ impl InstanceService {
         owner_id: &str,
         instance_id: &str,
         proxy_token: &str,
+        clear_when_empty: bool,
     ) -> Option<serde_json::Map<String, serde_json::Value>> {
         let Some(secrets) = self.mcp_secrets.as_ref() else {
             return None;
         };
         let names = match mcp_servers::list_names(secrets, owner_id, instance_id).await {
             Ok(names) if !names.is_empty() => names,
+            Ok(_) if clear_when_empty => return Some(serde_json::Map::new()),
             Ok(_) => return None,
             Err(err) => {
                 tracing::warn!(
@@ -977,20 +1032,16 @@ impl InstanceService {
         Ok(())
     }
 
-    /// Re-push the image-generation defaults to every Live instance.
-    /// Idempotent — a dyson that already has the right values gets
-    /// the same JSON written back.  Best-effort: a sandbox that's
+    /// Re-push the canonical desired runtime config to every Live
+    /// instance. Idempotent: a dyson that already has the right values
+    /// gets the same JSON written back. Best-effort: a sandbox that's
     /// asleep / mid-restore will fail the push and be retried on the
-    /// next sweep.  Returns `(visited, succeeded)` so the caller can
-    /// log a one-line summary.
-    pub async fn rewire_image_generation_all(&self) -> Result<(usize, usize), SwarmError> {
-        let Some(defaults) = self.image_gen_defaults.clone() else {
-            return Ok((0, 0));
-        };
+    /// next sweep. Returns `(visited, succeeded)` so the caller can log
+    /// a one-line summary.
+    pub async fn sync_runtime_config_all(&self) -> Result<(usize, usize), SwarmError> {
         let Some(reconfigurer) = self.reconfigurer.as_ref() else {
             return Ok((0, 0));
         };
-        let proxy_base = self.image_proxy_base();
         let live = self
             .instances
             .list(
@@ -1006,100 +1057,46 @@ impl InstanceService {
             let Some(sandbox_id) = &row.cube_sandbox_id else {
                 tracing::debug!(
                     instance = %row.id,
-                    "rewire-image-gen: skipping — no cube_sandbox_id on row"
+                    "runtime-config-sync: skipping; no cube_sandbox_id on row"
                 );
                 continue;
             };
-            // Use the per-instance proxy_token (re-mint NOT needed —
-            // the existing token is still valid).  Look it up from
-            // the token store.
-            let token = match self.tokens.lookup_by_instance(&row.id).await {
-                Ok(Some(t)) => t,
-                Ok(None) => {
-                    tracing::debug!(
-                        instance = %row.id,
-                        "rewire-image-gen: skipping — no proxy_token (instance pre-Stage-8?)"
-                    );
-                    continue;
-                }
+            let tokens = match self.runtime_tokens_for_instance(&row.id).await {
+                Ok(tokens) => tokens,
                 Err(e) => {
                     tracing::warn!(
                         instance = %row.id,
                         error = %e,
-                        "rewire-image-gen: token lookup failed — skipping"
+                        "runtime-config-sync: token repair failed; skipping"
                     );
                     continue;
                 }
             };
-            let state_sync_token = match self
-                .tokens
-                .lookup_by_instance_for_provider(&row.id, crate::db::tokens::STATE_SYNC_PROVIDER)
-                .await
-            {
-                Ok(Some(t)) => t,
-                Ok(None) => match self.tokens.mint_state_sync(&row.id).await {
-                    Ok(t) => t,
-                    Err(e) => {
-                        tracing::warn!(
-                            instance = %row.id,
-                            error = %e,
-                            "rewire-image-gen: state-sync token mint failed — skipping"
-                        );
-                        continue;
-                    }
-                },
-                Err(e) => {
-                    tracing::warn!(
-                        instance = %row.id,
-                        error = %e,
-                        "rewire-image-gen: state-sync token lookup failed — skipping"
-                    );
-                    continue;
-                }
-            };
-            // Re-render the mcp_servers block on every sweep so any
-            // change to the proxied URL propagates into running dysons
-            // without operator intervention.
-            let mcp_servers = self
-                .mcp_servers_block_for_instance(&row.owner_id, &row.id, &token)
+            let body = self
+                .configure_body_for_existing_row(
+                    &row.owner_id,
+                    row,
+                    &tokens.proxy,
+                    &tokens.ingest,
+                    &tokens.state_sync,
+                )
                 .await;
-            let body = ReconfigureBody {
-                image_provider_name: Some(defaults.provider_name.clone()),
-                image_provider_block: Some(defaults.provider_block(&proxy_base, &token)),
-                image_generation_provider: Some(defaults.provider_name.clone()),
-                image_generation_model: Some(defaults.model.clone()),
-                // Preserve the admin-selected built-in tool allowlist
-                // during the startup rewire sweep.  Empty row.tools is
-                // still the legacy/default sentinel, so those instances
-                // get reset back to Dyson defaults; non-empty rows must
-                // be pushed as an explicit allowlist or a redeploy
-                // re-enables tools the operator deliberately disabled.
-                reset_skills: row.tools.is_empty(),
-                tools: (!row.tools.is_empty()).then(|| row.tools.clone()),
-                state_sync_url: {
-                    let u = build_state_sync_url(&self.proxy_base);
-                    if u.is_empty() { None } else { Some(u) }
-                },
-                state_sync_token: Some(state_sync_token),
-                mcp_servers,
-                ..Default::default()
-            };
-            match reconfigurer.push(&row.id, sandbox_id, &body).await {
+            match push_with_retry(reconfigurer.as_ref(), &row.id, sandbox_id, &body).await {
                 Ok(()) => {
                     succeeded += 1;
-                    tracing::debug!(instance = %row.id, "rewire-image-gen: pushed");
+                    tracing::debug!(instance = %row.id, "runtime-config-sync: pushed");
                 }
                 Err(e) => {
                     tracing::warn!(
                         instance = %row.id,
                         error = %e,
-                        "rewire-image-gen: push failed (will retry next sweep)"
+                        "runtime-config-sync: push failed (will retry next sweep)"
                     );
                 }
             }
         }
         let visited = live.len();
-        tracing::info!(visited, succeeded, "rewire-image-gen: sweep complete");
+        tracing::info!(visited, succeeded, "runtime-config-sync: sweep complete");
         Ok((visited, succeeded))
     }
 
@@ -1463,39 +1460,15 @@ impl InstanceService {
         );
 
         // Phase 2: build env envelope using the EXISTING bearer + id.
-        // The proxy_token is reused — same token that already has a
-        // tokens row keyed on this instance id.  Legacy rows missing
-        // a token (Stage-7 vintage) get a fresh mint here.
-        let proxy_token = match self.tokens.lookup_by_instance(&source.id).await? {
-            Some(t) => t,
-            None => self.tokens.mint(&source.id, SHARED_PROVIDER).await?,
-        };
-        // Same lookup-or-mint posture for the ingest token.  Legacy
-        // rows that pre-date the ingest token get one minted here so
-        // post-rotation the agent's artefact pushes work without an
-        // operator re-hire.
-        let ingest_token = match self
-            .tokens
-            .lookup_by_instance_for_provider(&source.id, crate::db::tokens::INGEST_PROVIDER)
-            .await?
-        {
-            Some(t) => t,
-            None => self.tokens.mint_ingest(&source.id).await?,
-        };
-        let state_sync_token = match self
-            .tokens
-            .lookup_by_instance_for_provider(&source.id, crate::db::tokens::STATE_SYNC_PROVIDER)
-            .await?
-        {
-            Some(t) => t,
-            None => self.tokens.mint_state_sync(&source.id).await?,
-        };
+        // Runtime tokens are repaired here so legacy rows missing any
+        // sibling token self-heal during rotation.
+        let runtime_tokens = self.runtime_tokens_for_instance(&source.id).await?;
         let replay_state_files = self.state_files.clone();
         let mut managed = managed_env(
             &self.proxy_base,
-            &proxy_token,
-            &ingest_token,
-            &state_sync_token,
+            &runtime_tokens.proxy,
+            &runtime_tokens.ingest,
+            &runtime_tokens.state_sync,
             &source.id,
             &source.bearer_token,
             &source.name,
@@ -1566,12 +1539,15 @@ impl InstanceService {
             let reconfigurer = self.reconfigurer.as_ref().ok_or_else(|| {
                 SwarmError::PolicyDenied("dyson reconfigurer not configured".into())
             })?;
-            let mut body = self.configure_body_for_existing_row(
-                &source,
-                &proxy_token,
-                &ingest_token,
-                &state_sync_token,
-            );
+            let mut body = self
+                .configure_body_for_existing_row(
+                    owner_id,
+                    &source,
+                    &runtime_tokens.proxy,
+                    &runtime_tokens.ingest,
+                    &runtime_tokens.state_sync,
+                )
+                .await;
             self.clear_identity_fields_when_mirror_is_authoritative(
                 &mut body,
                 owner_id,
@@ -1579,9 +1555,6 @@ impl InstanceService {
                 state_files,
             )
             .await?;
-            body.mcp_servers = self
-                .mcp_servers_block_for_instance(owner_id, &source.id, &proxy_token)
-                .await;
             if let Err(err) =
                 push_with_retry(reconfigurer.as_ref(), &source.id, &info.sandbox_id, &body).await
             {
@@ -1637,19 +1610,19 @@ impl InstanceService {
         // path's body shape — name, task, models, image-gen,
         // mcp_servers.  Best-effort: a failure here leaves the row
         // pointing at a Live cube that hasn't been reconfigured yet;
-        // the image-gen rewire sweep will retry the non-identity
+        // the runtime config sync sweep will retry the non-identity
         // parts on the next swarm restart.
         if replay_state_files.is_none()
             && let Some(reconfigurer) = self.reconfigurer.as_ref()
         {
-            let mut body = self.configure_body_for_existing_row(
-                &source,
-                &proxy_token,
-                &ingest_token,
-                &state_sync_token,
-            );
-            body.mcp_servers = self
-                .mcp_servers_block_for_instance(owner_id, &source.id, &proxy_token)
+            let body = self
+                .configure_body_for_existing_row(
+                    owner_id,
+                    &source,
+                    &runtime_tokens.proxy,
+                    &runtime_tokens.ingest,
+                    &runtime_tokens.state_sync,
+                )
                 .await;
             if let Err(err) =
                 push_with_retry(reconfigurer.as_ref(), &source.id, &info.sandbox_id, &body).await
@@ -1742,31 +1715,12 @@ impl InstanceService {
             "restore-snapshot-in-place: creating replacement cube from deploy snapshot"
         );
 
-        let proxy_token = match self.tokens.lookup_by_instance(&source.id).await? {
-            Some(t) => t,
-            None => self.tokens.mint(&source.id, SHARED_PROVIDER).await?,
-        };
-        let ingest_token = match self
-            .tokens
-            .lookup_by_instance_for_provider(&source.id, crate::db::tokens::INGEST_PROVIDER)
-            .await?
-        {
-            Some(t) => t,
-            None => self.tokens.mint_ingest(&source.id).await?,
-        };
-        let state_sync_token = match self
-            .tokens
-            .lookup_by_instance_for_provider(&source.id, crate::db::tokens::STATE_SYNC_PROVIDER)
-            .await?
-        {
-            Some(t) => t,
-            None => self.tokens.mint_state_sync(&source.id).await?,
-        };
+        let runtime_tokens = self.runtime_tokens_for_instance(&source.id).await?;
         let managed = managed_env(
             &self.proxy_base,
-            &proxy_token,
-            &ingest_token,
-            &state_sync_token,
+            &runtime_tokens.proxy,
+            &runtime_tokens.ingest,
+            &runtime_tokens.state_sync,
             &source.id,
             &source.bearer_token,
             &source.name,
@@ -1814,45 +1768,14 @@ impl InstanceService {
         }
 
         if let Some(reconfigurer) = self.reconfigurer.as_ref() {
-            let mut body = ReconfigureBody {
-                name: Some(source.name.clone()).filter(|s| !s.is_empty()),
-                task: Some(source.task.clone()).filter(|s| !s.is_empty()),
-                models: source.models.clone(),
-                instance_id: Some(source.id.clone()),
-                proxy_token: Some(proxy_token.clone()),
-                proxy_base: Some(format!(
-                    "{}/openrouter",
-                    self.proxy_base.trim_end_matches('/')
-                )),
-                ingest_url: {
-                    let u = build_ingest_url(&self.proxy_base);
-                    if u.is_empty() { None } else { Some(u) }
-                },
-                ingest_token: Some(ingest_token.clone()),
-                state_sync_url: {
-                    let u = build_state_sync_url(&self.proxy_base);
-                    if u.is_empty() { None } else { Some(u) }
-                },
-                state_sync_token: Some(state_sync_token.clone()),
-                image_provider_name: self
-                    .image_gen_defaults
-                    .as_ref()
-                    .map(|d| d.provider_name.clone()),
-                image_provider_block: self
-                    .image_gen_defaults
-                    .as_ref()
-                    .map(|d| d.provider_block(&self.image_proxy_base(), &proxy_token)),
-                image_generation_provider: self
-                    .image_gen_defaults
-                    .as_ref()
-                    .map(|d| d.provider_name.clone()),
-                image_generation_model: self.image_gen_defaults.as_ref().map(|d| d.model.clone()),
-                reset_skills: source.tools.is_empty(),
-                tools: (!source.tools.is_empty()).then(|| source.tools.clone()),
-                mcp_servers: None,
-            };
-            body.mcp_servers = self
-                .mcp_servers_block_for_instance(owner_id, &source.id, &proxy_token)
+            let body = self
+                .configure_body_for_existing_row(
+                    owner_id,
+                    &source,
+                    &runtime_tokens.proxy,
+                    &runtime_tokens.ingest,
+                    &runtime_tokens.state_sync,
+                )
                 .await;
             if let Err(err) =
                 push_with_retry(reconfigurer.as_ref(), &source.id, &info.sandbox_id, &body).await
@@ -1938,32 +1861,13 @@ impl InstanceService {
             "recreate-in-place: starting clean swap"
         );
 
-        let proxy_token = match self.tokens.lookup_by_instance(&source.id).await? {
-            Some(t) => t,
-            None => self.tokens.mint(&source.id, SHARED_PROVIDER).await?,
-        };
-        let ingest_token = match self
-            .tokens
-            .lookup_by_instance_for_provider(&source.id, crate::db::tokens::INGEST_PROVIDER)
-            .await?
-        {
-            Some(t) => t,
-            None => self.tokens.mint_ingest(&source.id).await?,
-        };
-        let state_sync_token = match self
-            .tokens
-            .lookup_by_instance_for_provider(&source.id, crate::db::tokens::STATE_SYNC_PROVIDER)
-            .await?
-        {
-            Some(t) => t,
-            None => self.tokens.mint_state_sync(&source.id).await?,
-        };
+        let runtime_tokens = self.runtime_tokens_for_instance(&source.id).await?;
         let replay_state_files = self.state_files.clone();
         let mut managed = managed_env(
             &self.proxy_base,
-            &proxy_token,
-            &ingest_token,
-            &state_sync_token,
+            &runtime_tokens.proxy,
+            &runtime_tokens.ingest,
+            &runtime_tokens.state_sync,
             &source.id,
             &source.bearer_token,
             &source.name,
@@ -2012,12 +1916,15 @@ impl InstanceService {
             let reconfigurer = self.reconfigurer.as_ref().ok_or_else(|| {
                 SwarmError::PolicyDenied("dyson reconfigurer not configured".into())
             })?;
-            let mut body = self.configure_body_for_existing_row(
-                &source,
-                &proxy_token,
-                &ingest_token,
-                &state_sync_token,
-            );
+            let mut body = self
+                .configure_body_for_existing_row(
+                    owner_id,
+                    &source,
+                    &runtime_tokens.proxy,
+                    &runtime_tokens.ingest,
+                    &runtime_tokens.state_sync,
+                )
+                .await;
             self.clear_identity_fields_when_mirror_is_authoritative(
                 &mut body,
                 owner_id,
@@ -2049,12 +1956,15 @@ impl InstanceService {
         if replay_state_files.is_none()
             && let Some(reconfigurer) = self.reconfigurer.as_ref()
         {
-            let body = self.configure_body_for_existing_row(
-                &source,
-                &proxy_token,
-                &ingest_token,
-                &state_sync_token,
-            );
+            let body = self
+                .configure_body_for_existing_row(
+                    owner_id,
+                    &source,
+                    &runtime_tokens.proxy,
+                    &runtime_tokens.ingest,
+                    &runtime_tokens.state_sync,
+                )
+                .await;
             if let Err(err) =
                 push_with_retry(reconfigurer.as_ref(), &source.id, &info.sandbox_id, &body).await
             {
@@ -2136,31 +2046,12 @@ impl InstanceService {
             "reset-in-place: starting clean rebuild with sealed state replay"
         );
 
-        let proxy_token = match self.tokens.lookup_by_instance(&source.id).await? {
-            Some(t) => t,
-            None => self.tokens.mint(&source.id, SHARED_PROVIDER).await?,
-        };
-        let ingest_token = match self
-            .tokens
-            .lookup_by_instance_for_provider(&source.id, crate::db::tokens::INGEST_PROVIDER)
-            .await?
-        {
-            Some(t) => t,
-            None => self.tokens.mint_ingest(&source.id).await?,
-        };
-        let state_sync_token = match self
-            .tokens
-            .lookup_by_instance_for_provider(&source.id, crate::db::tokens::STATE_SYNC_PROVIDER)
-            .await?
-        {
-            Some(t) => t,
-            None => self.tokens.mint_state_sync(&source.id).await?,
-        };
+        let runtime_tokens = self.runtime_tokens_for_instance(&source.id).await?;
         let mut managed = managed_env(
             &self.proxy_base,
-            &proxy_token,
-            &ingest_token,
-            &state_sync_token,
+            &runtime_tokens.proxy,
+            &runtime_tokens.ingest,
+            &runtime_tokens.state_sync,
             &source.id,
             &source.bearer_token,
             &source.name,
@@ -2206,43 +2097,15 @@ impl InstanceService {
         }
 
         if let Some(reconfigurer) = self.reconfigurer.as_ref() {
-            let mut body = ReconfigureBody {
-                name: Some(source.name.clone()).filter(|s| !s.is_empty()),
-                task: Some(source.task.clone()).filter(|s| !s.is_empty()),
-                models: source.models.clone(),
-                instance_id: Some(source.id.clone()),
-                proxy_token: Some(proxy_token.clone()),
-                proxy_base: Some(format!(
-                    "{}/openrouter",
-                    self.proxy_base.trim_end_matches('/')
-                )),
-                ingest_url: {
-                    let u = build_ingest_url(&self.proxy_base);
-                    if u.is_empty() { None } else { Some(u) }
-                },
-                ingest_token: Some(ingest_token.clone()),
-                state_sync_url: {
-                    let u = build_state_sync_url(&self.proxy_base);
-                    if u.is_empty() { None } else { Some(u) }
-                },
-                state_sync_token: Some(state_sync_token.clone()),
-                image_provider_name: self
-                    .image_gen_defaults
-                    .as_ref()
-                    .map(|d| d.provider_name.clone()),
-                image_provider_block: self
-                    .image_gen_defaults
-                    .as_ref()
-                    .map(|d| d.provider_block(&self.image_proxy_base(), &proxy_token)),
-                image_generation_provider: self
-                    .image_gen_defaults
-                    .as_ref()
-                    .map(|d| d.provider_name.clone()),
-                image_generation_model: self.image_gen_defaults.as_ref().map(|d| d.model.clone()),
-                reset_skills: source.tools.is_empty(),
-                tools: (!source.tools.is_empty()).then(|| source.tools.clone()),
-                mcp_servers: None,
-            };
+            let mut body = self
+                .configure_body_for_existing_row(
+                    owner_id,
+                    &source,
+                    &runtime_tokens.proxy,
+                    &runtime_tokens.ingest,
+                    &runtime_tokens.state_sync,
+                )
+                .await;
             self.clear_identity_fields_when_mirror_is_authoritative(
                 &mut body,
                 owner_id,
@@ -2480,7 +2343,7 @@ impl InstanceService {
                         tracing::warn!(
                             clone = %created.id,
                             error = %err,
-                            "clone-empty: mcp sync push failed; the rewire-image-gen sweep will retry on next swarm restart"
+                            "clone-empty: mcp sync push failed; the runtime config sync sweep will retry on next swarm restart"
                         );
                     } else {
                         tracing::info!(
@@ -2579,8 +2442,8 @@ impl InstanceService {
         // the agent's mcp_servers config still references
         // /mcp/<source_id>/<name> URLs — which the proxy 404s because
         // the source's user_secrets rows aren't keyed for the clone.
-        // Best-effort: a failure here is logged; the rewire-image-gen
-        // sweep retries on next swarm restart.
+        // Best-effort: a failure here is logged; the runtime config
+        // sync sweep retries on next swarm restart.
         if let Some(secrets) = self.mcp_secrets.as_ref() {
             match mcp_servers::copy_all(secrets, owner_id, &source.id, &created.id).await {
                 Ok(n) if n > 0 => {
@@ -2594,7 +2457,7 @@ impl InstanceService {
                         tracing::warn!(
                             clone = %created.id,
                             error = %err,
-                            "clone: mcp sync push failed; the rewire-image-gen sweep will retry on next swarm restart"
+                            "clone: mcp sync push failed; the runtime config sync sweep will retry on next swarm restart"
                         );
                     } else {
                         tracing::info!(
@@ -3992,6 +3855,39 @@ impl InstanceService {
             .update_status(&id, InstanceStatus::Live)
             .await?;
 
+        // A restored sandbox may inherit dyson.json from the snapshot
+        // it booted from. Re-project the fresh swarm id, bearer-side
+        // runtime tokens, models, tools, and any desired MCP block so a
+        // clone/restore never keeps pointing at the source instance's
+        // config.
+        if let Some(reconfigurer) = self.reconfigurer.as_ref() {
+            let row = self
+                .instances
+                .get_for_owner(owner_id, &id)
+                .await?
+                .ok_or(SwarmError::NotFound)?;
+            let body = self
+                .configure_body_for_existing_row(
+                    owner_id,
+                    &row,
+                    &proxy_token,
+                    &ingest_token,
+                    &state_sync_token,
+                )
+                .await;
+            push_with_retry(reconfigurer.as_ref(), &id, &info.sandbox_id, &body)
+                .await
+                .map_err(|err| {
+                    tracing::warn!(
+                        error = %err,
+                        instance = %id,
+                        sandbox = %info.sandbox_id,
+                        "restore: configure-push failed after snapshot restore"
+                    );
+                    SwarmError::Internal(format!("restore configure-push failed: {err}"))
+                })?;
+        }
+
         Ok(CreatedInstance {
             id,
             url: info.url,
@@ -5051,7 +4947,7 @@ mod tests {
     }
 
     /// Helper: stand up an InstanceService backed by sqlx stores and a
-    /// recording reconfigurer.  Used by the image-gen rewire tests
+    /// recording reconfigurer. Used by runtime config sync tests
     /// below; folded into a helper because every test needs the same
     /// 6-line dance.
     async fn build_with_recorder() -> (
@@ -6026,12 +5922,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rewire_image_generation_visits_each_live_instance_with_its_token() {
+    async fn startup_runtime_config_sync_visits_each_live_instance_with_its_token() {
         // Hire two dysons.  After the create-time pushes drain, run
-        // the sweep — it must visit each one and stamp the SAME
-        // proxy_token already embedded in the chat path on each
-        // instance's image provider block.  Pre-Stage-8 instances
-        // (no token row) are skipped silently.
+        // the sweep: it must visit each one and stamp the same
+        // desired runtime config the recreate/restore paths use.
         let (svc, _cube, tokens, _instances, recorder) = build_with_recorder().await;
         let a = svc
             .create(
@@ -6076,7 +5970,7 @@ mod tests {
         recorder.pushed.lock().unwrap().clear();
 
         let (visited, succeeded) = svc
-            .rewire_image_generation_all()
+            .sync_runtime_config_all()
             .await
             .expect("sweep must succeed against an in-memory store");
         assert_eq!(visited, 2);
@@ -6101,15 +5995,26 @@ mod tests {
             );
             let block = body.image_provider_block.as_ref().unwrap();
             assert_eq!(block["api_key"], *expect_token);
-            // Sweep pushes ONLY image-gen fields — no chat-side
-            // mutation that could clobber a legitimate operator
-            // override of dyson.json.
-            assert!(
-                body.proxy_token.is_none(),
-                "sweep must not push proxy_token"
+            assert_eq!(
+                body.proxy_token.as_deref(),
+                Some(expect_token.as_str()),
+                "startup sync must repair the chat proxy token too"
             );
-            assert!(body.proxy_base.is_none(), "sweep must not push proxy_base");
-            assert!(body.models.is_empty(), "sweep must not push models");
+            assert_eq!(
+                body.proxy_base.as_deref(),
+                Some("https://dyson.example.com/llm/openrouter")
+            );
+            assert_eq!(
+                body.models,
+                vec!["anthropic/claude-sonnet-4-5".to_string()],
+                "startup sync must replay the DB's model source of truth"
+            );
+            assert!(body.ingest_url.is_some(), "ingest URL must be repaired");
+            assert!(body.ingest_token.is_some(), "ingest token must be repaired");
+            assert!(
+                body.state_sync_url.is_some() && body.state_sync_token.is_some(),
+                "state sync must be repaired"
+            );
         }
         let a_body = by_id.get(&a.id).unwrap();
         assert!(
@@ -6140,10 +6045,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rewire_image_generation_no_op_when_defaults_disabled() {
-        // Operators who manually patched dyson.json get an opt-out:
-        // `with_image_gen_defaults(None)` makes the sweep do nothing
-        // so a swarm restart doesn't fight their override.
+    async fn runtime_config_sync_still_runs_when_image_defaults_disabled() {
+        // Disabling image defaults only suppresses the image provider
+        // fields. The startup sync still re-projects the rest of the
+        // durable desired config so redeploys repair drift.
         let (svc, _cube, _tokens, _instances, recorder) = build_with_recorder().await;
         // Rebuild the service with image-gen disabled.  The same
         // recorder + stores are reused, so prior creates still count.
@@ -6169,12 +6074,72 @@ mod tests {
         wait_for_pushes(&recorder, 1).await;
         recorder.pushed.lock().unwrap().clear();
 
-        let (visited, succeeded) = svc.rewire_image_generation_all().await.unwrap();
-        assert_eq!(visited, 0, "disabled defaults must short-circuit the sweep");
-        assert_eq!(succeeded, 0);
+        let (visited, succeeded) = svc.sync_runtime_config_all().await.unwrap();
+        assert_eq!(visited, 1);
+        assert_eq!(succeeded, 1);
+        let pushed = recorder.pushed.lock().unwrap();
+        assert_eq!(pushed.len(), 1);
+        let body = &pushed[0].2;
+        assert!(body.image_provider_name.is_none());
+        assert!(body.image_provider_block.is_none());
+        assert!(body.image_generation_provider.is_none());
+        assert!(body.image_generation_model.is_none());
+        assert!(body.proxy_token.is_some());
+        assert_eq!(body.models, vec!["anthropic/claude-sonnet-4-5".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn recreate_in_place_reprojects_mcp_from_canonical_runtime_config() {
+        let (svc, cube, _tokens, instances, recorder, _user_secrets, owner) =
+            build_with_mcp_secrets().await;
+        let created = hire_minimal(&svc, &owner).await;
+        wait_for_pushes(&recorder, 1).await;
+
+        svc.put_mcp_server(
+            &owner,
+            &created.id,
+            McpServerSpec {
+                name: "mcp_massive".into(),
+                url: "https://8.8.8.8/mcp".into(),
+                auth: crate::mcp_servers::McpAuthSpec::Bearer {
+                    token: "massive_secret".into(),
+                },
+                enabled_tools: None,
+            },
+        )
+        .await
+        .unwrap();
+        recorder.pushed.lock().unwrap().clear();
+
+        let row = svc
+            .recreate_in_place(&owner, &created.id, "tpl-v2", None)
+            .await
+            .unwrap();
+        assert_eq!(row.id, created.id);
+        assert_eq!(row.template_id, "tpl-v2");
+        assert_eq!(cube.last_create().template_id, "tpl-v2");
+        assert_eq!(
+            instances
+                .get_for_owner(&owner, &created.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            InstanceStatus::Live
+        );
+
+        let pushed = recorder.pushed.lock().unwrap();
+        assert_eq!(pushed.len(), 1);
+        let body = &pushed[0].2;
+        assert_eq!(body.instance_id.as_deref(), Some(created.id.as_str()));
+        let mcp_block = body
+            .mcp_servers
+            .as_ref()
+            .expect("recreate configure must preserve attached MCP servers");
         assert!(
-            recorder.pushed.lock().unwrap().is_empty(),
-            "no pushes should fire when image_gen_defaults is None"
+            mcp_block.contains_key("mcp_massive"),
+            "rendered mcp_servers block must include attached MCP servers, got keys {:?}",
+            mcp_block.keys().collect::<Vec<_>>()
         );
     }
 
@@ -7144,10 +7109,11 @@ mod tests {
 
     #[tokio::test]
     async fn restore_snapshot_in_place_preserves_identity_and_uses_snapshot() {
-        let (isvc, ssvc, cube, instances, _users, _recorder) = build_with_snapshot().await;
+        let (isvc, ssvc, cube, instances, user_secrets, recorder, owner) =
+            build_with_snapshot_and_mcp().await;
         let created = isvc
             .create(
-                "legacy",
+                &owner,
                 CreateRequest {
                     template_id: "tpl-old".into(),
                     name: Some("TARS".into()),
@@ -7160,12 +7126,28 @@ mod tests {
             )
             .await
             .unwrap();
+        crate::mcp_servers::put_all(
+            &user_secrets,
+            &owner,
+            &created.id,
+            vec![crate::mcp_servers::McpServerSpec {
+                name: "mcp_massive".into(),
+                url: "https://8.8.8.8/mcp".into(),
+                auth: crate::mcp_servers::McpAuthSpec::Bearer {
+                    token: "massive_secret".into(),
+                },
+                enabled_tools: None,
+            }],
+        )
+        .await
+        .unwrap();
+        recorder.pushed.lock().unwrap().clear();
         let before = instances.get(&created.id).await.unwrap().unwrap();
         let old_sandbox = before.cube_sandbox_id.clone().unwrap();
-        let snap = ssvc.snapshot("legacy", &created.id).await.unwrap();
+        let snap = ssvc.snapshot(&owner, &created.id).await.unwrap();
 
         let recovered = ssvc
-            .restore_in_place("legacy", &created.id, &snap.id, None)
+            .restore_in_place(&owner, &created.id, &snap.id, None)
             .await
             .unwrap();
 
@@ -7197,6 +7179,18 @@ mod tests {
         assert!(
             cube.destroyed.lock().unwrap().contains(&old_sandbox),
             "old sandbox should be best-effort destroyed after pointer swap"
+        );
+        let pushed = recorder.pushed.lock().unwrap();
+        assert_eq!(pushed.len(), 1);
+        let mcp_block = pushed[0]
+            .2
+            .mcp_servers
+            .as_ref()
+            .expect("restore-in-place configure must preserve attached MCP servers");
+        assert!(
+            mcp_block.contains_key("mcp_massive"),
+            "rendered mcp_servers block must include attached MCP servers, got keys {:?}",
+            mcp_block.keys().collect::<Vec<_>>()
         );
     }
 
@@ -7688,6 +7682,18 @@ mod tests {
             crate::db::test_system_cipher(),
         ));
         let recorder = Arc::new(RecordingReconfigurer::default());
+        let state_root = tempfile::tempdir().unwrap();
+        let keys = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+        let ciphers: Arc<dyn crate::envelope::CipherDirectory> =
+            Arc::new(crate::envelope::AgeCipherDirectory::new(keys.path()).unwrap());
+        let user_secrets_store: Arc<dyn crate::traits::UserSecretStore> =
+            Arc::new(crate::db::secrets::SqlxUserSecretStore::new(pool.clone()));
+        let user_secrets = Arc::new(UserSecretsService::new(user_secrets_store, ciphers.clone()));
+        let state_files = crate::state_files::StateFileService::new(
+            pool.clone(),
+            state_root.path().into(),
+            ciphers,
+        );
         let isvc = Arc::new(
             InstanceService::new(
                 cube.clone(),
@@ -7695,16 +7701,8 @@ mod tests {
                 tokens,
                 "https://swarm.test/llm",
             )
-            .with_reconfigurer(recorder.clone()),
-        );
-        let state_root = tempfile::tempdir().unwrap();
-        let keys = Box::leak(Box::new(tempfile::tempdir().unwrap()));
-        let ciphers: Arc<dyn crate::envelope::CipherDirectory> =
-            Arc::new(crate::envelope::AgeCipherDirectory::new(keys.path()).unwrap());
-        let state_files = crate::state_files::StateFileService::new(
-            pool.clone(),
-            state_root.path().into(),
-            ciphers,
+            .with_reconfigurer(recorder.clone())
+            .with_mcp_secrets(user_secrets.clone()),
         );
 
         let src = isvc
@@ -7722,6 +7720,21 @@ mod tests {
             )
             .await
             .unwrap();
+        crate::mcp_servers::put_all(
+            &user_secrets,
+            &owner,
+            &src.id,
+            vec![crate::mcp_servers::McpServerSpec {
+                name: "mcp_massive".into(),
+                url: "https://8.8.8.8/mcp".into(),
+                auth: crate::mcp_servers::McpAuthSpec::Bearer {
+                    token: "massive_secret".into(),
+                },
+                enabled_tools: None,
+            }],
+        )
+        .await
+        .unwrap();
         recorder.pushed.lock().unwrap().clear();
         recorder.restored.lock().unwrap().clear();
         recorder.events.lock().unwrap().clear();
@@ -7856,6 +7869,16 @@ mod tests {
         assert!(
             pushed[0].2.name.is_none() && pushed[0].2.task.is_none(),
             "post-replay configure must not overwrite mirrored IDENTITY.md with row metadata"
+        );
+        let mcp_block = pushed[0]
+            .2
+            .mcp_servers
+            .as_ref()
+            .expect("post-replay reset configure must preserve attached MCP servers");
+        assert!(
+            mcp_block.contains_key("mcp_massive"),
+            "rendered mcp_servers block must include attached MCP servers, got keys {:?}",
+            mcp_block.keys().collect::<Vec<_>>()
         );
         drop(pushed);
 

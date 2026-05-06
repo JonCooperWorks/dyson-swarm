@@ -921,11 +921,11 @@ impl InstanceService {
         }
     }
 
-    /// Re-push the per-instance `name` to every Live instance.  The
-    /// dyson side rewrites IDENTITY.md when name lands, so this fixes
+    /// Re-push the per-instance identity to every Live instance.  The
+    /// dyson side rewrites IDENTITY.md when identity lands, so this fixes
     /// any running dyson whose IDENTITY.md fell out of sync with the
     /// swarm-side row (typical cause: the row was renamed while the
-    /// instance was offline, or the instance pre-dates the name push).
+    /// instance was offline, or a previous configure push failed).
     /// Idempotent — `/api/admin/configure` returns the same shape and
     /// the dyson handler short-circuits when the merged IDENTITY.md
     /// matches what's already on disk.  Returns `(visited, succeeded)`
@@ -947,7 +947,8 @@ impl InstanceService {
         let mut succeeded = 0usize;
         for row in &live {
             let name = row.name.trim();
-            if name.is_empty() {
+            let task = row.task.trim();
+            if name.is_empty() && task.is_empty() {
                 continue;
             }
             let Some(sandbox_id) = &row.cube_sandbox_id else {
@@ -958,10 +959,12 @@ impl InstanceService {
                 continue;
             };
             let body = ReconfigureBody {
-                name: Some(name.to_owned()),
+                name: Some(name.to_owned()).filter(|s| !s.is_empty()),
+                task: Some(task.to_owned()).filter(|s| !s.is_empty()),
+                instance_id: Some(row.id.clone()),
                 ..Default::default()
             };
-            match reconfigurer.push(&row.id, sandbox_id, &body).await {
+            match push_with_retry(reconfigurer.as_ref(), &row.id, sandbox_id, &body).await {
                 Ok(()) => {
                     succeeded += 1;
                     tracing::debug!(instance = %row.id, name = %name, "push-names: pushed");
@@ -3043,14 +3046,12 @@ impl InstanceService {
                 proxy_base: None,
                 ..Default::default()
             };
-            let r = r.clone();
-            let id_owned = id.to_owned();
-            let sb_owned = sb.to_owned();
-            tokio::spawn(async move {
-                if let Err(err) = push_with_retry(&*r, &id_owned, &sb_owned, &body).await {
-                    tracing::warn!(error = %err, instance = %id_owned, "rename: reconfigure push failed");
-                }
-            });
+            push_with_retry(r.as_ref(), id, sb, &body)
+                .await
+                .map_err(|err| {
+                    tracing::warn!(error = %err, instance = %id, "rename: reconfigure push failed");
+                    SwarmError::Internal(format!("identity configure-push failed: {err}"))
+                })?;
         }
         Ok(row)
     }
@@ -5069,6 +5070,75 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
+    }
+
+    #[tokio::test]
+    async fn push_names_all_pushes_full_identity() {
+        let (svc, _cube, _tokens, _instances, recorder) = build_with_recorder().await;
+        let created = svc
+            .create(
+                "legacy",
+                CreateRequest {
+                    template_id: "tpl".into(),
+                    name: Some("axelrod".into()),
+                    task: Some("write investment memos".into()),
+                    env: env_with_model(),
+                    ttl_seconds: None,
+                    network_policy: NetworkPolicy::default(),
+                    mcp_servers: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+        recorder.pushed.lock().unwrap().clear();
+
+        let (visited, succeeded) = svc.push_names_all().await.unwrap();
+
+        assert_eq!(visited, 1);
+        assert_eq!(succeeded, 1);
+        let pushed = recorder.pushed.lock().unwrap();
+        assert_eq!(pushed.len(), 1);
+        let (instance_id, _sandbox_id, body) = &pushed[0];
+        assert_eq!(instance_id, &created.id);
+        assert_eq!(body.name.as_deref(), Some("axelrod"));
+        assert_eq!(body.task.as_deref(), Some("write investment memos"));
+        assert_eq!(body.instance_id.as_deref(), Some(created.id.as_str()));
+        assert!(
+            body.models.is_empty(),
+            "identity sweep must not touch models"
+        );
+    }
+
+    #[tokio::test]
+    async fn rename_waits_for_identity_reconfigure() {
+        let (svc, _cube, _tokens, _instances, recorder) = build_with_recorder().await;
+        let created = svc
+            .create(
+                "legacy",
+                CreateRequest {
+                    template_id: "tpl".into(),
+                    name: Some("old".into()),
+                    task: Some("old task".into()),
+                    env: env_with_model(),
+                    ttl_seconds: None,
+                    network_policy: NetworkPolicy::default(),
+                    mcp_servers: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+        recorder.pushed.lock().unwrap().clear();
+
+        svc.rename("legacy", &created.id, "new", "new task")
+            .await
+            .unwrap();
+
+        let pushed = recorder.pushed.lock().unwrap();
+        assert_eq!(pushed.len(), 1, "rename should finish after configure push");
+        let (_instance_id, _sandbox_id, body) = &pushed[0];
+        assert_eq!(body.name.as_deref(), Some("new"));
+        assert_eq!(body.task.as_deref(), Some("new task"));
+        assert_eq!(body.instance_id.as_deref(), Some(created.id.as_str()));
     }
 
     #[tokio::test]

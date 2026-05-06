@@ -393,7 +393,7 @@ export async function handleCallback(cfg, discovery) {
   url.search = '';
   url.hash = pending.returnTo || '';
   window.history.replaceState(null, '', url.toString());
-  return tokens;
+  return stored;
 }
 
 function toStorageShape(t) {
@@ -485,10 +485,12 @@ export async function bootstrapAuth() {
   // Dyson subdomain.
   const returnToUrl = readReturnToFromQuery();
 
-  let tokens = readTokens();
-  if (!tokens) {
-    tokens = await handleCallback(cfg, discovery);
-  }
+  // The IdP callback is authoritative.  Handle it before consulting
+  // cached tokens so an expired/stale `swarm:auth` entry cannot make
+  // the SPA ignore a fresh `?code=&state=` and immediately start a
+  // brand-new authorize round-trip.
+  let tokens = await handleCallback(cfg, discovery);
+  if (!tokens) tokens = readTokens();
   if (tokens && tokens.expires_at - Date.now() < REFRESH_LEEWAY_S * 1000) {
     tokens = await refreshTokens(cfg, discovery);
   }

@@ -8,6 +8,7 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
 import {
+  bootstrapAuth,
   computeCookieDomain,
   computeCookieAttributes,
   cookieDomainsToClear,
@@ -17,6 +18,7 @@ import {
 
 afterEach(() => {
   sessionStorage.clear();
+  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
@@ -223,5 +225,70 @@ describe('handleCallback', () => {
     expect(fetch).toHaveBeenCalledWith('/auth/session', expect.objectContaining({
       method: 'DELETE',
     }));
+  });
+});
+
+describe('bootstrapAuth', () => {
+  test('redeems a fresh callback before consulting stale cached tokens', async () => {
+    vi.useFakeTimers();
+    window.history.pushState(null, '', '/?code=fresh-code&state=fresh-state');
+    sessionStorage.setItem('swarm:auth:pending', JSON.stringify({
+      verifier: 'fresh-verifier',
+      state: 'fresh-state',
+      returnTo: '#/',
+      issuedAt: Date.now(),
+    }));
+    sessionStorage.setItem('swarm:auth', JSON.stringify({
+      access_token: 'stale-token',
+      refresh_token: null,
+      expires_at: Date.now() - 60_000,
+      token_type: 'Bearer',
+    }));
+
+    const fetch = vi.fn(async (url, opts = {}) => {
+      if (url === '/auth/config') {
+        return new Response(JSON.stringify({
+          mode: 'oidc',
+          issuer: 'https://issuer.example',
+          audience: 'swarm',
+          client_id: 'spa-client',
+          required_scopes: [],
+        }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+      if (url === 'https://issuer.example/.well-known/openid-configuration') {
+        return new Response(JSON.stringify({
+          authorization_endpoint: 'https://issuer.example/authorize',
+          token_endpoint: 'https://issuer.example/token',
+        }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+      if (url === 'https://issuer.example/token') {
+        expect(opts.method).toBe('POST');
+        expect(String(opts.body)).toContain('grant_type=authorization_code');
+        expect(String(opts.body)).toContain('code=fresh-code');
+        expect(String(opts.body)).toContain('code_verifier=fresh-verifier');
+        return new Response(JSON.stringify({
+          access_token: 'fresh-token',
+          refresh_token: 'fresh-refresh',
+          expires_in: 3600,
+          token_type: 'Bearer',
+        }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+      if (url === '/auth/session') {
+        expect(opts.headers.Authorization).toBe('Bearer fresh-token');
+        return new Response(null, { status: 204 });
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    });
+    vi.stubGlobal('fetch', fetch);
+
+    const auth = await bootstrapAuth();
+
+    expect(auth.getToken()).toBe('fresh-token');
+    expect(window.location.search).toBe('');
+    expect(sessionStorage.getItem('swarm:auth:pending')).toBeNull();
+    expect(fetch).toHaveBeenCalledWith(
+      'https://issuer.example/token',
+      expect.objectContaining({ method: 'POST' }),
+    );
   });
 });

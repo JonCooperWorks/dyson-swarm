@@ -921,6 +921,37 @@ impl InstanceService {
         }
     }
 
+    async fn mcp_servers_block_for_instance(
+        &self,
+        owner_id: &str,
+        instance_id: &str,
+        proxy_token: &str,
+    ) -> Option<serde_json::Map<String, serde_json::Value>> {
+        let Some(secrets) = self.mcp_secrets.as_ref() else {
+            return None;
+        };
+        let names = match mcp_servers::list_names(secrets, owner_id, instance_id).await {
+            Ok(names) if !names.is_empty() => names,
+            Ok(_) => return None,
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    instance = %instance_id,
+                    "mcp sync: list failed; skipping mcp_servers configure block"
+                );
+                return None;
+            }
+        };
+        let mut block = serde_json::Map::with_capacity(names.len());
+        for name in names {
+            block.insert(
+                name.clone(),
+                mcp_servers::dyson_json_block(instance_id, &name, &self.proxy_base, proxy_token),
+            );
+        }
+        Some(block)
+    }
+
     async fn clear_identity_fields_when_mirror_is_authoritative(
         &self,
         body: &mut ReconfigureBody,
@@ -1027,36 +1058,11 @@ impl InstanceService {
                 }
             };
             // Re-render the mcp_servers block on every sweep so any
-            // change to the proxied URL (e.g. swarm hostname rotation,
-            // the `/llm` strip fix) propagates into running dysons
-            // without operator intervention.  When the instance has
-            // no attached MCP servers and no mcp_secrets store is
-            // configured, this stays None and the dyson handler skips
-            // the patch.
-            let mcp_servers = self.mcp_secrets.as_ref().map(|secrets| async {
-                match mcp_servers::list_names(secrets, &row.owner_id, &row.id).await {
-                    Ok(names) if !names.is_empty() => {
-                        let mut block = serde_json::Map::with_capacity(names.len());
-                        for name in names {
-                            block.insert(
-                                name.clone(),
-                                mcp_servers::dyson_json_block(
-                                    &row.id,
-                                    &name,
-                                    &self.proxy_base,
-                                    &token,
-                                ),
-                            );
-                        }
-                        Some(block)
-                    }
-                    _ => None,
-                }
-            });
-            let mcp_servers = match mcp_servers {
-                Some(fut) => fut.await,
-                None => None,
-            };
+            // change to the proxied URL propagates into running dysons
+            // without operator intervention.
+            let mcp_servers = self
+                .mcp_servers_block_for_instance(&row.owner_id, &row.id, &token)
+                .await;
             let body = ReconfigureBody {
                 image_provider_name: Some(defaults.provider_name.clone()),
                 image_provider_block: Some(defaults.provider_block(&proxy_base, &token)),
@@ -1573,6 +1579,9 @@ impl InstanceService {
                 state_files,
             )
             .await?;
+            body.mcp_servers = self
+                .mcp_servers_block_for_instance(owner_id, &source.id, &proxy_token)
+                .await;
             if let Err(err) =
                 push_with_retry(reconfigurer.as_ref(), &source.id, &info.sandbox_id, &body).await
             {
@@ -1633,12 +1642,15 @@ impl InstanceService {
         if replay_state_files.is_none()
             && let Some(reconfigurer) = self.reconfigurer.as_ref()
         {
-            let body = self.configure_body_for_existing_row(
+            let mut body = self.configure_body_for_existing_row(
                 &source,
                 &proxy_token,
                 &ingest_token,
                 &state_sync_token,
             );
+            body.mcp_servers = self
+                .mcp_servers_block_for_instance(owner_id, &source.id, &proxy_token)
+                .await;
             if let Err(err) =
                 push_with_retry(reconfigurer.as_ref(), &source.id, &info.sandbox_id, &body).await
             {
@@ -1802,7 +1814,7 @@ impl InstanceService {
         }
 
         if let Some(reconfigurer) = self.reconfigurer.as_ref() {
-            let body = ReconfigureBody {
+            let mut body = ReconfigureBody {
                 name: Some(source.name.clone()).filter(|s| !s.is_empty()),
                 task: Some(source.task.clone()).filter(|s| !s.is_empty()),
                 models: source.models.clone(),
@@ -1839,6 +1851,9 @@ impl InstanceService {
                 tools: (!source.tools.is_empty()).then(|| source.tools.clone()),
                 mcp_servers: None,
             };
+            body.mcp_servers = self
+                .mcp_servers_block_for_instance(owner_id, &source.id, &proxy_token)
+                .await;
             if let Err(err) =
                 push_with_retry(reconfigurer.as_ref(), &source.id, &info.sandbox_id, &body).await
             {
@@ -7886,8 +7901,11 @@ mod tests {
         let state_files = Arc::new(crate::state_files::StateFileService::new(
             pool.clone(),
             state_root.path().into(),
-            ciphers,
+            ciphers.clone(),
         ));
+        let user_secrets_store: Arc<dyn crate::traits::UserSecretStore> =
+            Arc::new(crate::db::secrets::SqlxUserSecretStore::new(pool.clone()));
+        let user_secrets = Arc::new(UserSecretsService::new(user_secrets_store, ciphers));
         let isvc = Arc::new(
             InstanceService::new(
                 cube.clone(),
@@ -7896,7 +7914,8 @@ mod tests {
                 "https://swarm.test/llm",
             )
             .with_reconfigurer(recorder.clone())
-            .with_state_files(state_files.clone()),
+            .with_state_files(state_files.clone())
+            .with_mcp_secrets(user_secrets.clone()),
         );
         let backup: Arc<dyn BackupSink> = Arc::new(LocalDiskBackupSink::new(cube.clone()));
         let ssvc = Arc::new(SnapshotService::new(
@@ -7922,6 +7941,21 @@ mod tests {
             )
             .await
             .unwrap();
+        crate::mcp_servers::put_all(
+            &user_secrets,
+            &owner,
+            &src.id,
+            vec![crate::mcp_servers::McpServerSpec {
+                name: "mcp_massive".into(),
+                url: "https://8.8.8.8/mcp".into(),
+                auth: crate::mcp_servers::McpAuthSpec::Bearer {
+                    token: "massive_secret".into(),
+                },
+                enabled_tools: None,
+            }],
+        )
+        .await
+        .unwrap();
         recorder.pushed.lock().unwrap().clear();
         recorder.restored.lock().unwrap().clear();
         recorder.events.lock().unwrap().clear();
@@ -8019,6 +8053,21 @@ mod tests {
         assert!(
             pushed[0].2.name.is_none() && pushed[0].2.task.is_none(),
             "redeploy configure must not overwrite mirrored IDENTITY.md with row metadata"
+        );
+        let mcp_block = pushed[0]
+            .2
+            .mcp_servers
+            .as_ref()
+            .expect("post-replay configure must preserve attached MCP servers");
+        assert!(
+            mcp_block.contains_key("mcp_massive"),
+            "rendered mcp_servers block must include attached MCP servers, got keys {:?}",
+            mcp_block.keys().collect::<Vec<_>>()
+        );
+        let mcp_url = mcp_block["mcp_massive"]["url"].as_str().unwrap();
+        assert!(
+            mcp_url.contains(&src.id),
+            "mcp proxy URL must reference the rotated instance id, got {mcp_url}"
         );
         drop(pushed);
 

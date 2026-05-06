@@ -1062,13 +1062,14 @@ impl InstanceService {
                 image_provider_block: Some(defaults.provider_block(&proxy_base, &token)),
                 image_generation_provider: Some(defaults.provider_name.clone()),
                 image_generation_model: Some(defaults.model.clone()),
-                // Flip the skills block back to defaults on every sweep
-                // — undoes the explicit-empty-array bug that shipped
-                // toolless dysons.  Idempotent on instances whose
-                // dyson.json already lacks the block (the dyson handler
-                // returns `skills_reset: false` and the JSON file
-                // doesn't get rewritten).
-                reset_skills: true,
+                // Preserve the admin-selected built-in tool allowlist
+                // during the startup rewire sweep.  Empty row.tools is
+                // still the legacy/default sentinel, so those instances
+                // get reset back to Dyson defaults; non-empty rows must
+                // be pushed as an explicit allowlist or a redeploy
+                // re-enables tools the operator deliberately disabled.
+                reset_skills: row.tools.is_empty(),
+                tools: (!row.tools.is_empty()).then(|| row.tools.clone()),
                 state_sync_url: {
                     let u = build_state_sync_url(&self.proxy_base);
                     if u.is_empty() { None } else { Some(u) }
@@ -6032,6 +6033,13 @@ mod tests {
             )
             .await
             .unwrap();
+        let explicit_tools = vec![
+            "read_file".to_string(),
+            "write_file".to_string(),
+            "search_files".to_string(),
+        ];
+        let mut b_env = env_with_model();
+        b_env.insert(ENV_TOOLS.into(), explicit_tools.join(","));
         let b = svc
             .create(
                 "legacy",
@@ -6039,7 +6047,7 @@ mod tests {
                     template_id: "tpl".into(),
                     name: None,
                     task: None,
-                    env: env_with_model(),
+                    env: b_env,
                     ttl_seconds: None,
                     network_policy: NetworkPolicy::default(),
                     mcp_servers: Vec::new(),
@@ -6087,11 +6095,26 @@ mod tests {
             );
             assert!(body.proxy_base.is_none(), "sweep must not push proxy_base");
             assert!(body.models.is_empty(), "sweep must not push models");
-            // Skills reset rides on every sweep push so toolless
-            // instances self-heal whether they were created before
-            // or after the boot-writer fix.
-            assert!(body.reset_skills, "sweep must flip reset_skills");
         }
+        let a_body = by_id.get(&a.id).unwrap();
+        assert!(
+            a_body.reset_skills,
+            "default-tool instances still self-heal to dyson defaults"
+        );
+        assert!(
+            a_body.tools.is_none(),
+            "default-tool instances should not push an explicit allowlist"
+        );
+        let b_body = by_id.get(&b.id).unwrap();
+        assert!(
+            !b_body.reset_skills,
+            "explicit tool allowlists must not be reset on sweep"
+        );
+        assert_eq!(
+            b_body.tools.as_deref(),
+            Some(explicit_tools.as_slice()),
+            "sweep must preserve the admin-selected tool allowlist"
+        );
         // Verify the token-store reverse lookup returns each token —
         // the sweep depends on this and a regression here would make
         // the sweep silently skip every instance.

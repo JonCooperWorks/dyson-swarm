@@ -1120,6 +1120,81 @@ describe('NewInstanceForm MCP setup', () => {
     expect(client.probeInstance).toHaveBeenCalledWith('inst-1');
   });
 
+  test('lets a new agent request a Docker MCP image from extras', async () => {
+    const dockerConfig = {
+      servers: {
+        brave: {
+          type: 'stdio',
+          command: 'docker',
+          args: ['run', '--rm', '-i', '-e', 'BRAVE_API_KEY', 'ghcr.io/example/brave-mcp'],
+          env: { BRAVE_API_KEY: '{{placeholder.brave_api_key}}' },
+        },
+      },
+    };
+    const client = {
+      createInstance: vi.fn(),
+      requestMcpDockerCatalogServer: vi.fn().mockResolvedValue({ status: 'pending' }),
+      probeInstance: vi.fn().mockResolvedValue({ status: 'healthy' }),
+      listMcpDockerCatalog: vi.fn().mockResolvedValue({ allow_raw_json: false, servers: [] }),
+    };
+
+    render(React.createElement(
+      ApiProvider,
+      {
+        client,
+        auth: {
+          config: {
+            default_models: ['openai/gpt-5.1'],
+            default_template_id: 'tpl-default',
+            cube_profiles: [],
+          },
+        },
+      },
+      React.createElement(NewInstanceForm),
+    ));
+
+    fireEvent.change(screen.getByPlaceholderText('PR reviewer for foo/bar'), {
+      target: { value: 'MCP request agent' },
+    });
+    fireEvent.change(screen.getByPlaceholderText(/What this agent should do/i), {
+      target: { value: 'Needs Brave once the Docker image is approved.' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'next' }));
+    fireEvent.click(screen.getByRole('button', { name: 'next' }));
+    fireEvent.click(screen.getByRole('button', { name: 'next' }));
+    fireEvent.click(screen.getByRole('button', { name: 'next' }));
+
+    fireEvent.click(screen.getByRole('button', { name: /add MCP server/i }));
+    expect(screen.getByRole('option', { name: 'Request Docker image' })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('MCP server type'), { target: { value: 'docker_request' } });
+    fireEvent.change(screen.getByLabelText('catalog request id'), { target: { value: 'brave' } });
+    fireEvent.change(screen.getByLabelText('catalog request label'), { target: { value: 'Brave Search' } });
+    fireEvent.change(screen.getByLabelText('catalog request description'), {
+      target: { value: 'Brave MCP image' },
+    });
+    fireEvent.change(screen.getByLabelText('MCP JSON config'), {
+      target: { value: JSON.stringify(dockerConfig, null, 2) },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'submit request' }));
+
+    await waitFor(() => expect(client.requestMcpDockerCatalogServer).toHaveBeenCalledTimes(1));
+    expect(client.requestMcpDockerCatalogServer).toHaveBeenCalledWith('brave', {
+      label: 'Brave Search',
+      description: 'Brave MCP image',
+      template: JSON.stringify(dockerConfig, null, 2),
+      placeholders: [{
+        id: 'brave_api_key',
+        label: 'brave_api_key',
+        description: null,
+        required: true,
+        secret: true,
+        placeholder: null,
+      }],
+    });
+    expect(await screen.findByText(/was sent to admins for approval/)).toBeInTheDocument();
+    expect(client.createInstance).not.toHaveBeenCalled();
+  });
+
   test('sends a custom image model when image_generate is selected', async () => {
     const client = {
       createInstance: vi.fn().mockResolvedValue({

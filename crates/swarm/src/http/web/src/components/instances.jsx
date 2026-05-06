@@ -748,6 +748,18 @@ export function NewInstanceForm() {
   const prevStep = NEW_INSTANCE_STEPS[activeStepIndex - 1]?.key || null;
   const nextStep = NEW_INSTANCE_STEPS[activeStepIndex + 1]?.key || null;
 
+  const submitMcpDockerCatalogRequest = React.useCallback(async (preset) => {
+    if (!client.requestMcpDockerCatalogServer) {
+      throw new Error('Docker image requests are not available on this swarm.');
+    }
+    return client.requestMcpDockerCatalogServer(preset.id, {
+      label: preset.label,
+      description: preset.description,
+      template: preset.template,
+      placeholders: preset.placeholders,
+    });
+  }, [client]);
+
   const submit = async (e) => {
     e.preventDefault();
     if (!canCreate) return;
@@ -916,11 +928,14 @@ export function NewInstanceForm() {
               value={mcpServers}
               onChange={setMcpServers}
               dockerCatalog={mcpDockerCatalog}
+              onSubmitCatalogRequest={
+                client.requestMcpDockerCatalogServer ? submitMcpDockerCatalogRequest : null
+              }
             />
             <span className="hint muted small">
-              Add remote MCP servers or admin-curated Docker. Swarm
-              seals upstream URLs and secrets; the agent only sees a
-              swarm proxy URL.
+              Add remote MCP servers, admin-curated Docker, or request a
+              Docker image for admin approval. Swarm seals upstream URLs
+              and secrets; the agent only sees a swarm proxy URL.
             </span>
             <div className="wizard-runtime-block">
               {cubeProfiles.length >= 1 ? (
@@ -1018,8 +1033,9 @@ function SetupSummary({
   const profile = findCubeProfile(templateId, cubeProfiles);
   const agentLabel = name.trim() || 'Unnamed agent';
   const networkLabel = POLICY_OPTIONS.find(p => p.kind === networkPolicy.kind)?.label || networkPolicy.kind;
-  const dockerCount = (mcpServers || []).filter(r => (r.serverType || 'remote') === 'docker').length;
-  const remoteCount = (mcpServers || []).filter(r => (r.serverType || 'remote') !== 'docker').length;
+  const configuredMcp = configuredMcpSetupRows(mcpServers);
+  const dockerCount = configuredMcp.filter(r => ['docker', 'docker_catalog'].includes(r.serverType || 'remote')).length;
+  const remoteCount = configuredMcp.filter(r => (r.serverType || 'remote') === 'remote').length;
   const mcpCount = dockerCount + remoteCount;
   const toolCount = tools.length;
   const lockedDown = networkPolicy.kind === 'airgap' && toolCount === 0 && mcpCount === 0;
@@ -1180,7 +1196,7 @@ function newInstanceReview({
       label: 'MCP',
       required: false,
       ok: true,
-      message: `${(mcpServers || []).length} configured`,
+      message: `${configuredMcpSetupRows(mcpServers).length} configured`,
     },
   ];
   return { required, optional };
@@ -1433,6 +1449,10 @@ function serializeNetworkPolicy(p) {
   return { kind: p.kind, entries: p.entries || [] };
 }
 
+function configuredMcpSetupRows(rows) {
+  return (rows || []).filter(r => (r.serverType || 'remote') !== 'docker_request');
+}
+
 // ── MCP servers ──────────────────────────────────────────────────
 //
 // Wire shape mirrors `McpServerSpec` / `McpAuthSpec` in
@@ -1546,10 +1566,14 @@ function freshMcpRow(serverType = 'remote') {
     jsonText: '',
     catalogId: '',
     placeholders: {},
+    requestId: '',
+    requestLabel: '',
+    requestDescription: '',
+    requestSent: false,
   };
 }
 
-function McpServersEditor({ value, onChange, dockerCatalog = null }) {
+function McpServersEditor({ value, onChange, dockerCatalog = null, onSubmitCatalogRequest = null }) {
   const rows = value || [];
   const catalog = normalizeDockerCatalog(dockerCatalog);
   const update = (id, patch) =>
@@ -1583,6 +1607,7 @@ function McpServersEditor({ value, onChange, dockerCatalog = null }) {
           key={row.id}
           row={row}
           dockerCatalog={catalog}
+          onSubmitCatalogRequest={onSubmitCatalogRequest}
           onChange={patch => update(row.id, patch)}
           onChangeAuth={patch => updateAuth(row.id, patch)}
           onRemove={() => remove(row.id)}
@@ -1595,24 +1620,77 @@ function McpServersEditor({ value, onChange, dockerCatalog = null }) {
   );
 }
 
-function McpServerCard({ row, dockerCatalog, onChange, onChangeAuth, onRemove }) {
+function McpServerCard({
+  row,
+  dockerCatalog,
+  onSubmitCatalogRequest,
+  onChange,
+  onChangeAuth,
+  onRemove,
+}) {
   const serverType = row.serverType || 'remote';
   const authKind = row.auth?.kind || 'none';
   const catalogServers = dockerCatalog?.servers || [];
   const selectedCatalog = catalogServers.find(s => s.id === row.catalogId) || null;
+  const [requestBusy, setRequestBusy] = React.useState(false);
+  const [requestErr, setRequestErr] = React.useState(null);
+  const [requestNotice, setRequestNotice] = React.useState(null);
   const parsedDockerName = serverType === 'docker'
     ? mcpServerNameFromText(row.jsonText || '')
     : null;
   const parsedCatalogName = serverType === 'docker_catalog' && selectedCatalog
     ? mcpServerNameFromText(selectedCatalog.template || '')
     : null;
+  const isDockerLike = ['docker', 'docker_catalog', 'docker_request'].includes(serverType);
   const displayName = serverType === 'docker'
     ? (parsedDockerName || 'docker config')
     : (serverType === 'docker_catalog'
       ? (parsedCatalogName || selectedCatalog?.label || 'docker')
-      : (row.name?.trim() || 'unnamed'));
+      : (serverType === 'docker_request'
+        ? (row.requestLabel?.trim() || row.requestId?.trim() || 'Docker image request')
+        : (row.name?.trim() || 'unnamed')));
   const setPlaceholder = (id, value) =>
     onChange({ placeholders: { ...(row.placeholders || {}), [id]: value } });
+  const submitDockerRequest = async () => {
+    setRequestErr(null);
+    setRequestNotice(null);
+    if (!onSubmitCatalogRequest) {
+      setRequestErr('Docker image requests are not available on this swarm.');
+      return;
+    }
+    const id = (row.requestId || '').trim();
+    if (!MCP_CATALOG_REQUEST_ID_RE.test(id)) {
+      setRequestErr('id must match [A-Za-z0-9_-]+');
+      return;
+    }
+    const label = (row.requestLabel || '').trim();
+    if (!label) {
+      setRequestErr('label is required');
+      return;
+    }
+    try {
+      parseMcpCliJsonConfig(row.jsonText || '');
+    } catch (e) {
+      setRequestErr(e?.message || 'The configuration is not valid JSON.');
+      return;
+    }
+    setRequestBusy(true);
+    try {
+      await onSubmitCatalogRequest({
+        id,
+        label,
+        description: (row.requestDescription || '').trim() || null,
+        template: row.jsonText || '',
+        placeholders: placeholderSpecsFromMcpTemplate(row.jsonText || ''),
+      });
+      onChange({ requestSent: true });
+      setRequestNotice(`Docker MCP request "${label || id}" was sent to admins for approval.`);
+    } catch (e) {
+      setRequestErr(e?.detail || e?.message || 'request failed');
+    } finally {
+      setRequestBusy(false);
+    }
+  };
   return (
     <div className="mcp-card panel">
       <div className="mcp-card-head">
@@ -1620,8 +1698,8 @@ function McpServerCard({ row, dockerCatalog, onChange, onChangeAuth, onRemove })
           <code className="mcp-card-name">
             {displayName}
           </code>
-          <span className={`mcp-auth-pill mcp-auth-${serverType === 'docker' || serverType === 'docker_catalog' ? 'docker' : authKind}`}>
-            {serverType === 'docker' || serverType === 'docker_catalog' ? 'docker' : authKind}
+          <span className={`mcp-auth-pill mcp-auth-${isDockerLike ? 'docker' : authKind}`}>
+            {serverType === 'docker_request' ? 'request' : (isDockerLike ? 'docker' : authKind)}
           </span>
         </div>
         <button
@@ -1641,8 +1719,10 @@ function McpServerCard({ row, dockerCatalog, onChange, onChangeAuth, onRemove })
             serverType: next,
             catalogId: next === 'docker_catalog' ? '' : row.catalogId,
             placeholders: next === 'docker_catalog' ? {} : row.placeholders,
+            requestSent: next === 'docker_request' ? row.requestSent : false,
           })}
           dockerCatalog={dockerCatalog}
+          allowRequests={Boolean(onSubmitCatalogRequest)}
         />
         {serverType === 'docker_catalog' ? (
           <>
@@ -1695,6 +1775,62 @@ function McpServerCard({ row, dockerCatalog, onChange, onChangeAuth, onRemove })
               value={row.jsonText || ''}
               onChange={jsonText => onChange({ jsonText })}
             />
+          </>
+        ) : serverType === 'docker_request' ? (
+          <>
+            <p className="muted small mcp-card-note">
+              Request a Docker-backed MCP image for admins to review.
+              It appears in the admin Docker MCP templates panel as pending.
+            </p>
+            <label className="field">
+              <span>id</span>
+              <input
+                value={row.requestId || ''}
+                onChange={e => onChange({ requestId: e.target.value, requestSent: false })}
+                placeholder="github"
+                autoComplete="off"
+                disabled={requestBusy}
+                aria-label="catalog request id"
+              />
+              <span className="hint muted small">Stable catalog id. Use letters, numbers, underscores, or dashes.</span>
+            </label>
+            <label className="field">
+              <span>label</span>
+              <input
+                value={row.requestLabel || ''}
+                onChange={e => onChange({ requestLabel: e.target.value, requestSent: false })}
+                placeholder="GitHub"
+                autoComplete="off"
+                disabled={requestBusy}
+                aria-label="catalog request label"
+              />
+            </label>
+            <label className="field">
+              <span>description</span>
+              <textarea
+                value={row.requestDescription || ''}
+                onChange={e => onChange({ requestDescription: e.target.value, requestSent: false })}
+                placeholder="Docker-backed GitHub MCP server"
+                rows={3}
+                disabled={requestBusy}
+                aria-label="catalog request description"
+              />
+            </label>
+            <McpDockerJsonField
+              value={row.jsonText || ''}
+              onChange={jsonText => onChange({ jsonText, requestSent: false })}
+              disabled={requestBusy}
+            />
+            {requestErr ? <div className="error">{requestErr}</div> : null}
+            {requestNotice ? <div className="banner banner-info">{requestNotice}</div> : null}
+            <button
+              type="button"
+              className="btn btn-primary btn-sm"
+              onClick={submitDockerRequest}
+              disabled={requestBusy}
+            >
+              {requestBusy ? 'submitting…' : (row.requestSent ? 'request again' : 'submit request')}
+            </button>
           </>
         ) : (
           <>

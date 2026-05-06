@@ -1566,8 +1566,7 @@ function freshMcpRow(serverType = 'remote') {
     jsonText: '',
     catalogId: '',
     placeholders: {},
-    requestId: '',
-    requestLabel: '',
+    requestImage: '',
     requestDescription: '',
     requestSent: false,
   };
@@ -1641,16 +1640,40 @@ function McpServerCard({
   const parsedCatalogName = serverType === 'docker_catalog' && selectedCatalog
     ? mcpServerNameFromText(selectedCatalog.template || '')
     : null;
+  const parsedRequestName = serverType === 'docker_request'
+    ? mcpServerNameFromText(row.jsonText || '')
+    : null;
   const isDockerLike = ['docker', 'docker_catalog', 'docker_request'].includes(serverType);
   const displayName = serverType === 'docker'
     ? (parsedDockerName || 'docker config')
     : (serverType === 'docker_catalog'
       ? (parsedCatalogName || selectedCatalog?.label || 'docker')
       : (serverType === 'docker_request'
-        ? (row.requestLabel?.trim() || row.requestId?.trim() || 'Docker image request')
+        ? (normalizedDockerRequestImage(row.requestImage) || parsedRequestName || 'Docker image request')
         : (row.name?.trim() || 'unnamed')));
   const setPlaceholder = (id, value) =>
     onChange({ placeholders: { ...(row.placeholders || {}), [id]: value } });
+  const selectDockerCatalog = (server) => onChange({
+    serverType: 'docker_catalog',
+    catalogId: server.id,
+    placeholders: {},
+    requestImage: '',
+    requestSent: false,
+  });
+  const selectDockerRequest = (image) => onChange({
+    serverType: 'docker_request',
+    catalogId: '',
+    placeholders: {},
+    requestImage: normalizedDockerRequestImage(image),
+    requestSent: false,
+  });
+  const clearDockerPicker = () => onChange({
+    serverType: 'docker_catalog',
+    catalogId: '',
+    placeholders: {},
+    requestImage: '',
+    requestSent: false,
+  });
   const submitDockerRequest = async () => {
     setRequestErr(null);
     setRequestNotice(null);
@@ -1658,18 +1681,11 @@ function McpServerCard({
       setRequestErr('Docker image requests are not available on this swarm.');
       return;
     }
-    const id = (row.requestId || '').trim();
-    if (!MCP_CATALOG_REQUEST_ID_RE.test(id)) {
-      setRequestErr('id must match [A-Za-z0-9_-]+');
-      return;
-    }
-    const label = (row.requestLabel || '').trim();
-    if (!label) {
-      setRequestErr('label is required');
-      return;
-    }
+    let config;
+    let identity;
     try {
-      parseMcpCliJsonConfig(row.jsonText || '');
+      config = parseMcpCliJsonConfig(row.jsonText || '');
+      identity = dockerCatalogRequestIdentity(config, row.requestImage || '');
     } catch (e) {
       setRequestErr(e?.message || 'The configuration is not valid JSON.');
       return;
@@ -1677,14 +1693,14 @@ function McpServerCard({
     setRequestBusy(true);
     try {
       await onSubmitCatalogRequest({
-        id,
-        label,
+        id: identity.id,
+        label: identity.label,
         description: (row.requestDescription || '').trim() || null,
         template: row.jsonText || '',
         placeholders: placeholderSpecsFromMcpTemplate(row.jsonText || ''),
       });
       onChange({ requestSent: true });
-      setRequestNotice(`Docker MCP request "${label || id}" was sent to admins for approval.`);
+      setRequestNotice(`Docker MCP request "${identity.label || identity.id}" was sent to admins for approval.`);
     } catch (e) {
       setRequestErr(e?.detail || e?.message || 'request failed');
     } finally {
@@ -1719,34 +1735,64 @@ function McpServerCard({
             serverType: next,
             catalogId: next === 'docker_catalog' ? '' : row.catalogId,
             placeholders: next === 'docker_catalog' ? {} : row.placeholders,
-            requestSent: next === 'docker_request' ? row.requestSent : false,
+            requestImage: next === 'docker_catalog' ? '' : row.requestImage,
+            requestSent: false,
           })}
           dockerCatalog={dockerCatalog}
           allowRequests={Boolean(onSubmitCatalogRequest)}
         />
-        {serverType === 'docker_catalog' ? (
+        {serverType === 'docker_catalog' || serverType === 'docker_request' ? (
           <>
-            <label className="field">
-              <span>Docker</span>
-              <select
-                value={selectedCatalog?.id || ''}
-                onChange={e => onChange({ catalogId: e.target.value, placeholders: {} })}
-                aria-label="Docker server"
-              >
-                <option value="">Pick a Docker server…</option>
-                {catalogServers.map(server => (
-                  <option key={server.id} value={server.id}>
-                    {server.label || server.id}
-                  </option>
-                ))}
-              </select>
-              {selectedCatalog?.description ? (
+            <DockerServerPicker
+              catalogServers={catalogServers}
+              selectedCatalog={selectedCatalog}
+              mode={serverType}
+              requestImage={row.requestImage || ''}
+              allowRequests={Boolean(onSubmitCatalogRequest)}
+              onSelectCatalog={selectDockerCatalog}
+              onRequestImage={selectDockerRequest}
+              onClear={clearDockerPicker}
+            >
+              {serverType === 'docker_catalog' && selectedCatalog?.description ? (
                 <MarkdownBody markdown={selectedCatalog.description} className="md-body md-body-compact mcp-description-markdown"/>
-              ) : !selectedCatalog ? (
+              ) : serverType === 'docker_catalog' && !selectedCatalog ? (
                 <span className="hint muted small">Pick a server to see its details and required fields.</span>
               ) : null}
-            </label>
-            {selectedCatalog ? (
+            </DockerServerPicker>
+            {serverType === 'docker_request' ? (
+              <>
+                <p className="muted small mcp-card-note">
+                  Request a Docker-backed MCP image for admins to review.
+                  It appears in the admin Docker MCP templates panel as pending.
+                </p>
+                <label className="field">
+                  <span>description</span>
+                  <textarea
+                    value={row.requestDescription || ''}
+                    onChange={e => onChange({ requestDescription: e.target.value, requestSent: false })}
+                    placeholder="Docker-backed GitHub MCP server"
+                    rows={3}
+                    disabled={requestBusy}
+                    aria-label="catalog request description"
+                  />
+                </label>
+                <McpDockerJsonField
+                  value={row.jsonText || ''}
+                  onChange={jsonText => onChange({ jsonText, requestSent: false })}
+                  disabled={requestBusy}
+                />
+                {requestErr ? <div className="error">{requestErr}</div> : null}
+                {requestNotice ? <div className="banner banner-info">{requestNotice}</div> : null}
+                <button
+                  type="button"
+                  className="btn btn-primary btn-sm"
+                  onClick={submitDockerRequest}
+                  disabled={requestBusy}
+                >
+                  {requestBusy ? 'submitting…' : (row.requestSent ? 'request again' : 'submit request')}
+                </button>
+              </>
+            ) : selectedCatalog ? (
               <>
                 <McpCatalogPlaceholderFields
                   server={selectedCatalog}
@@ -1775,62 +1821,6 @@ function McpServerCard({
               value={row.jsonText || ''}
               onChange={jsonText => onChange({ jsonText })}
             />
-          </>
-        ) : serverType === 'docker_request' ? (
-          <>
-            <p className="muted small mcp-card-note">
-              Request a Docker-backed MCP image for admins to review.
-              It appears in the admin Docker MCP templates panel as pending.
-            </p>
-            <label className="field">
-              <span>id</span>
-              <input
-                value={row.requestId || ''}
-                onChange={e => onChange({ requestId: e.target.value, requestSent: false })}
-                placeholder="github"
-                autoComplete="off"
-                disabled={requestBusy}
-                aria-label="catalog request id"
-              />
-              <span className="hint muted small">Stable catalog id. Use letters, numbers, underscores, or dashes.</span>
-            </label>
-            <label className="field">
-              <span>label</span>
-              <input
-                value={row.requestLabel || ''}
-                onChange={e => onChange({ requestLabel: e.target.value, requestSent: false })}
-                placeholder="GitHub"
-                autoComplete="off"
-                disabled={requestBusy}
-                aria-label="catalog request label"
-              />
-            </label>
-            <label className="field">
-              <span>description</span>
-              <textarea
-                value={row.requestDescription || ''}
-                onChange={e => onChange({ requestDescription: e.target.value, requestSent: false })}
-                placeholder="Docker-backed GitHub MCP server"
-                rows={3}
-                disabled={requestBusy}
-                aria-label="catalog request description"
-              />
-            </label>
-            <McpDockerJsonField
-              value={row.jsonText || ''}
-              onChange={jsonText => onChange({ jsonText, requestSent: false })}
-              disabled={requestBusy}
-            />
-            {requestErr ? <div className="error">{requestErr}</div> : null}
-            {requestNotice ? <div className="banner banner-info">{requestNotice}</div> : null}
-            <button
-              type="button"
-              className="btn btn-primary btn-sm"
-              onClick={submitDockerRequest}
-              disabled={requestBusy}
-            >
-              {requestBusy ? 'submitting…' : (row.requestSent ? 'request again' : 'submit request')}
-            </button>
           </>
         ) : (
           <>
@@ -1917,21 +1907,21 @@ function McpServerTypeField({
 }) {
   const catalog = normalizeDockerCatalog(dockerCatalog);
   const hasCatalog = catalog.servers.length > 0;
+  const selectValue = value === 'docker_request' ? 'docker_catalog' : value;
   return (
     <label className="field">
       <span>type</span>
       <select
-        value={value}
+        value={selectValue}
         onChange={e => onChange(e.target.value)}
         disabled={disabled}
         aria-label="MCP server type"
       >
         <option value="remote">remote HTTP/SSE</option>
-        {hasCatalog ? <option value="docker_catalog">Docker</option> : null}
+        {hasCatalog || allowRequests ? <option value="docker_catalog">Docker</option> : null}
         {catalog.allow_raw_json || value === 'docker' ? (
           <option value="docker">Docker JSON</option>
         ) : null}
-        {allowRequests ? <option value="docker_request">Request Docker image</option> : null}
       </select>
     </label>
   );
@@ -1942,6 +1932,181 @@ function normalizeDockerCatalog(catalog) {
     allow_raw_json: catalog?.allow_raw_json === true,
     servers: Array.isArray(catalog?.servers) ? catalog.servers : [],
   };
+}
+
+function dockerCatalogDisplayValue(server) {
+  return server?.label || server?.id || '';
+}
+
+function normalizedDockerRequestImage(value) {
+  const trimmed = String(value || '').trim();
+  return trimmed === DOCKER_REQUEST_OPTION_LABEL ? '' : trimmed;
+}
+
+function dockerCatalogOptionValues(server) {
+  const values = [dockerCatalogDisplayValue(server), server?.id]
+    .map(value => String(value || '').trim())
+    .filter(Boolean);
+  return Array.from(new Set(values));
+}
+
+function matchDockerCatalogInput(value, catalogServers) {
+  const trimmed = String(value || '').trim();
+  if (!trimmed) return null;
+  const lower = trimmed.toLowerCase();
+  return (catalogServers || []).find(server => {
+    const candidates = dockerCatalogOptionValues(server);
+    return candidates.some(candidate => candidate.toLowerCase() === lower);
+  }) || null;
+}
+
+function dockerImageNameFromValue(value) {
+  let text = normalizedDockerRequestImage(value);
+  if (!text) return '';
+  text = text.split('@')[0];
+  const tagIndex = text.lastIndexOf(':');
+  const slashIndex = text.lastIndexOf('/');
+  if (tagIndex > slashIndex) text = text.slice(0, tagIndex);
+  const parts = text.split('/').map(part => part.trim()).filter(Boolean);
+  return parts[parts.length - 1] || text;
+}
+
+function titleizeCatalogRequestLabel(value) {
+  const base = dockerImageNameFromValue(value) || String(value || '').trim();
+  const words = base
+    .replace(/[_-]+/g, ' ')
+    .replace(/[^A-Za-z0-9 ]+/g, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (words.length === 0) return 'Docker image request';
+  return words.map(word => {
+    if (/^(mcp|api|http|sse|json)$/i.test(word)) return word.toUpperCase();
+    return word.charAt(0).toUpperCase() + word.slice(1);
+  }).join(' ');
+}
+
+function slugifyMcpCatalogRequestId(value) {
+  return String(value || '')
+    .trim()
+    .replace(/[:@.]+/g, '-')
+    .replace(/[^A-Za-z0-9_-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^[-_]+|[-_]+$/g, '')
+    .slice(0, 64);
+}
+
+function dockerImageFromMcpConfig(config) {
+  const servers = mcpServerMapFromConfig(config);
+  const server = Object.values(servers)[0];
+  const args = Array.isArray(server?.args) ? server.args : [];
+  for (let i = args.length - 1; i >= 0; i -= 1) {
+    const arg = String(args[i] || '').trim();
+    if (arg && !arg.startsWith('-')) return arg;
+  }
+  return '';
+}
+
+function dockerCatalogRequestIdentity(config, requestImage) {
+  const serverName = mcpServerNameFromConfig(config);
+  const image = normalizedDockerRequestImage(requestImage) || dockerImageFromMcpConfig(config);
+  const id = slugifyMcpCatalogRequestId(serverName || image);
+  if (!MCP_CATALOG_REQUEST_ID_RE.test(id)) {
+    throw new Error('Could not derive a request id from the Docker config.');
+  }
+  const labelSource = serverName || image || id;
+  return {
+    id,
+    label: titleizeCatalogRequestLabel(labelSource),
+  };
+}
+
+function DockerServerPicker({
+  catalogServers,
+  selectedCatalog,
+  mode,
+  requestImage = '',
+  allowRequests = false,
+  disabled = false,
+  onSelectCatalog,
+  onRequestImage,
+  onClear,
+  children,
+}) {
+  const listId = React.useId();
+  const currentValue = mode === 'docker_request'
+    ? (normalizedDockerRequestImage(requestImage) || DOCKER_REQUEST_OPTION_LABEL)
+    : (selectedCatalog ? dockerCatalogDisplayValue(selectedCatalog) : '');
+  const [inputValue, setInputValue] = React.useState(currentValue);
+
+  React.useEffect(() => {
+    setInputValue(currentValue);
+  }, [currentValue]);
+
+  const applyInput = (value, { allowFreeform = false } = {}) => {
+    const trimmed = String(value || '').trim();
+    if (!trimmed) {
+      onClear?.();
+      return true;
+    }
+    if (allowRequests && trimmed === DOCKER_REQUEST_OPTION_LABEL) {
+      onRequestImage?.('');
+      return true;
+    }
+    const match = matchDockerCatalogInput(trimmed, catalogServers);
+    if (match) {
+      onSelectCatalog?.(match);
+      return true;
+    }
+    if (allowRequests && allowFreeform) {
+      onRequestImage?.(trimmed);
+      return true;
+    }
+    return false;
+  };
+
+  const onInputChange = (e) => {
+    const next = e.target.value;
+    setInputValue(next);
+    applyInput(next, {
+      allowFreeform: mode === 'docker_request' || catalogServers.length === 0,
+    });
+  };
+
+  return (
+    <label className="field">
+      <span>Docker</span>
+      <input
+        value={inputValue}
+        onChange={onInputChange}
+        onBlur={() => {
+          if (!applyInput(inputValue, { allowFreeform: true })) {
+            setInputValue(currentValue);
+          }
+        }}
+        onKeyDown={e => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            applyInput(inputValue, { allowFreeform: true });
+          }
+        }}
+        list={listId}
+        placeholder="Pick or type a Docker image"
+        autoComplete="off"
+        disabled={disabled}
+        aria-label="Docker server"
+      />
+      <datalist id={listId}>
+        {(catalogServers || []).flatMap(server =>
+          dockerCatalogOptionValues(server).map(value => (
+            <option key={`${server.id}:${value}`} value={value}/>
+          )),
+        )}
+        {allowRequests ? <option value={DOCKER_REQUEST_OPTION_LABEL}/> : null}
+      </datalist>
+      {children}
+    </label>
+  );
 }
 
 function McpDockerJsonField({ value, onChange, disabled = false, autoFocus = false }) {
@@ -3270,6 +3435,7 @@ const MCP_JSON_CONFIG_EXAMPLE = `{
 }`;
 const MCP_TEMPLATE_PLACEHOLDER_RE = /{{\s*placeholders?\.([A-Za-z0-9_-]+)\s*}}/g;
 const MCP_CATALOG_REQUEST_ID_RE = /^[A-Za-z0-9_-]+$/;
+const DOCKER_REQUEST_OPTION_LABEL = 'Request Docker image';
 
 // ─── MCP servers panel (instance detail) ──────────────────────────
 //
@@ -3840,8 +4006,7 @@ function McpServerEditModal({
   const [jsonText, setJsonText] = React.useState(
     initialIsDocker && initial?.raw_config ? JSON.stringify(initial.raw_config, null, 2) : ''
   );
-  const [requestId, setRequestId] = React.useState('');
-  const [requestLabel, setRequestLabel] = React.useState('');
+  const [requestImage, setRequestImage] = React.useState('');
   const [requestDescription, setRequestDescription] = React.useState('');
   const [catalogId, setCatalogId] = React.useState(initial?.docker_catalog_id || initialCatalog?.id || '');
   const [catalogPlaceholders, setCatalogPlaceholders] = React.useState(() => {
@@ -3853,6 +4018,24 @@ function McpServerEditModal({
   const isDockerCatalogMode = (isNew && serverType === 'docker_catalog') || (!isNew && initialIsCatalog);
   const isDockerRequestMode = isNew && serverType === 'docker_request';
   const selectedCatalog = catalog.servers.find(s => s.id === catalogId) || null;
+  const selectDockerCatalog = (server) => {
+    setServerType('docker_catalog');
+    setCatalogId(server.id);
+    setCatalogPlaceholders({});
+    setRequestImage('');
+  };
+  const selectDockerRequest = (image) => {
+    setServerType('docker_request');
+    setCatalogId('');
+    setCatalogPlaceholders({});
+    setRequestImage(normalizedDockerRequestImage(image));
+  };
+  const clearDockerPicker = () => {
+    setServerType('docker_catalog');
+    setCatalogId('');
+    setCatalogPlaceholders({});
+    setRequestImage('');
+  };
 
   // Auth kind changed mid-edit → drop any "keep existing" sentinels.
   // Switching shape clears the stored creds anyway (server-side), so
@@ -3909,24 +4092,18 @@ function McpServerEditModal({
       return;
     }
     if (isDockerRequestMode) {
-      const id = requestId.trim();
-      if (!MCP_CATALOG_REQUEST_ID_RE.test(id)) {
-        setErr('id must match [A-Za-z0-9_-]+');
-        return;
-      }
-      if (!requestLabel.trim()) {
-        setErr('label is required');
-        return;
-      }
+      let config;
+      let identity;
       try {
-        parseMcpCliJsonConfig(jsonText);
+        config = parseMcpCliJsonConfig(jsonText);
+        identity = dockerCatalogRequestIdentity(config, requestImage);
       } catch (e) {
         setErr(e?.message || 'The configuration is not valid JSON.');
         return;
       }
       onSubmitCatalogRequest({
-        id,
-        label: requestLabel.trim(),
+        id: identity.id,
+        label: identity.label,
         description: requestDescription.trim() || null,
         template: jsonText,
         placeholders: placeholderSpecsFromMcpTemplate(jsonText),
@@ -4003,43 +4180,67 @@ function McpServerEditModal({
           {isNew ? (
             <McpServerTypeField
               value={serverType}
-              onChange={setServerType}
+              onChange={next => {
+                setServerType(next);
+                if (next === 'docker_catalog') {
+                  setCatalogId('');
+                  setCatalogPlaceholders({});
+                  setRequestImage('');
+                }
+              }}
               dockerCatalog={catalog}
               allowRequests={Boolean(onSubmitCatalogRequest)}
             />
           ) : null}
-          {isDockerCatalogMode ? (
+          {isDockerCatalogMode || isDockerRequestMode ? (
             <>
               {isNew ? null : (
                 <p className="muted small">
                   This Docker MCP server comes from an admin template.
                 </p>
               )}
-              <label className="field">
-                <span>Docker</span>
-                <select
-                  value={selectedCatalog?.id || ''}
-                  onChange={e => {
-                    setCatalogId(e.target.value);
-                    setCatalogPlaceholders({});
-                  }}
-                  disabled={busy || !isNew}
-                  aria-label="Docker server"
-                >
-                  {isNew ? <option value="">Pick a Docker server…</option> : null}
-                  {catalog.servers.map(server => (
-                    <option key={server.id} value={server.id}>
-                      {server.label || server.id}
-                    </option>
-                  ))}
-                </select>
-                {selectedCatalog?.description ? (
+              <DockerServerPicker
+                catalogServers={catalog.servers}
+                selectedCatalog={selectedCatalog}
+                mode={serverType}
+                requestImage={requestImage}
+                allowRequests={isNew && Boolean(onSubmitCatalogRequest)}
+                disabled={busy || !isNew}
+                onSelectCatalog={selectDockerCatalog}
+                onRequestImage={selectDockerRequest}
+                onClear={clearDockerPicker}
+              >
+                {isDockerCatalogMode && selectedCatalog?.description ? (
                   <MarkdownBody markdown={selectedCatalog.description} className="md-body md-body-compact mcp-description-markdown"/>
-                ) : !selectedCatalog ? (
+                ) : isDockerCatalogMode && !selectedCatalog ? (
                   <span className="hint muted small">Pick a server to see its details and required fields.</span>
                 ) : null}
-              </label>
-              {selectedCatalog ? (
+              </DockerServerPicker>
+              {isDockerRequestMode ? (
+                <>
+                  <p className="muted small">
+                    Request a Docker-backed MCP image for admins to review.
+                    It appears in the admin Docker MCP templates panel as pending.
+                  </p>
+                  <label className="field">
+                    <span>description</span>
+                    <textarea
+                      value={requestDescription}
+                      onChange={e => setRequestDescription(e.target.value)}
+                      placeholder="Docker-backed GitHub MCP server"
+                      rows={3}
+                      disabled={busy}
+                      aria-label="catalog request description"
+                    />
+                  </label>
+                  <McpDockerJsonField
+                    value={jsonText}
+                    onChange={setJsonText}
+                    disabled={busy}
+                    autoFocus
+                  />
+                </>
+              ) : selectedCatalog ? (
                 <>
                   <McpCatalogPlaceholderFields
                     server={selectedCatalog}
@@ -4053,53 +4254,6 @@ function McpServerEditModal({
               ) : (
                 <p className="muted small">Choose a Docker server to continue.</p>
               )}
-            </>
-          ) : isDockerRequestMode ? (
-            <>
-              <p className="muted small">
-                Request a Docker-backed MCP image for admins to review.
-                It appears in the admin Docker MCP templates panel as pending.
-              </p>
-              <label className="field">
-                <span>id</span>
-                <input
-                  value={requestId}
-                  onChange={e => setRequestId(e.target.value)}
-                  placeholder="github"
-                  autoComplete="off"
-                  disabled={busy}
-                  aria-label="catalog request id"
-                />
-                <span className="hint muted small">Stable catalog id. Use letters, numbers, underscores, or dashes.</span>
-              </label>
-              <label className="field">
-                <span>label</span>
-                <input
-                  value={requestLabel}
-                  onChange={e => setRequestLabel(e.target.value)}
-                  placeholder="GitHub"
-                  autoComplete="off"
-                  disabled={busy}
-                  aria-label="catalog request label"
-                />
-              </label>
-              <label className="field">
-                <span>description</span>
-                <textarea
-                  value={requestDescription}
-                  onChange={e => setRequestDescription(e.target.value)}
-                  placeholder="Docker-backed GitHub MCP server"
-                  rows={3}
-                  disabled={busy}
-                  aria-label="catalog request description"
-                />
-              </label>
-              <McpDockerJsonField
-                value={jsonText}
-                onChange={setJsonText}
-                disabled={busy}
-                autoFocus
-              />
             </>
           ) : isDockerJsonMode ? (
             <>

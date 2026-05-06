@@ -417,9 +417,12 @@ describe('McpServersPanel', () => {
 
     await screen.findByText('no MCP servers attached.');
     fireEvent.click(screen.getByRole('button', { name: 'add' }));
-    fireEvent.change(screen.getByLabelText('MCP server type'), { target: { value: 'docker_request' } });
-    fireEvent.change(screen.getByLabelText('catalog request id'), { target: { value: 'brave' } });
-    fireEvent.change(screen.getByLabelText('catalog request label'), { target: { value: 'Brave Search' } });
+    fireEvent.change(screen.getByLabelText('MCP server type'), { target: { value: 'docker_catalog' } });
+    fireEvent.change(screen.getByLabelText('Docker server'), {
+      target: { value: 'Request Docker image' },
+    });
+    expect(screen.queryByLabelText('catalog request id')).toBeNull();
+    expect(screen.queryByLabelText('catalog request label')).toBeNull();
     fireEvent.change(screen.getByLabelText('catalog request description'), { target: { value: 'Brave MCP image' } });
     fireEvent.change(screen.getByLabelText('MCP JSON config'), {
       target: { value: JSON.stringify(config, null, 2) },
@@ -428,7 +431,7 @@ describe('McpServersPanel', () => {
 
     await waitFor(() => expect(client.requestMcpDockerCatalogServer).toHaveBeenCalledTimes(1));
     expect(client.requestMcpDockerCatalogServer).toHaveBeenCalledWith('brave', {
-      label: 'Brave Search',
+      label: 'Brave',
       description: 'Brave MCP image',
       template: JSON.stringify(config, null, 2),
       placeholders: [{
@@ -605,7 +608,7 @@ describe('McpServersPanel', () => {
       putMcpJsonConfig: vi.fn(),
       putMcpServer: vi.fn(),
     };
-    renderPanel(client);
+    const { container } = renderPanel(client);
 
     await screen.findByText('no MCP servers attached.');
     fireEvent.click(screen.getByRole('button', { name: 'add' }));
@@ -615,7 +618,10 @@ describe('McpServersPanel', () => {
     expect(screen.queryByText('GitHub MCP tools')).toBeNull();
     expect(screen.queryByLabelText('Read-only MCP JSON template')).toBeNull();
     expect(screen.queryByDisplayValue(/ghcr\.io\/example\/github-mcp/)).toBeNull();
-    fireEvent.change(screen.getByLabelText('Docker server'), { target: { value: 'github' } });
+    const optionValues = Array.from(container.querySelectorAll('datalist option'))
+      .map(option => option.getAttribute('value'));
+    expect(optionValues.at(-1)).toBe('Request Docker image');
+    fireEvent.change(screen.getByLabelText('Docker server'), { target: { value: 'GitHub' } });
     expect(await screen.findByRole('link', { name: 'docs' })).toHaveAttribute('href', 'https://example.test/github');
     fireEvent.change(screen.getByLabelText('GitHub token'), { target: { value: 'ghp_secret' } });
     expect(screen.queryByText(/credential/i)).toBeNull();
@@ -1165,10 +1171,13 @@ describe('NewInstanceForm MCP setup', () => {
     fireEvent.click(screen.getByRole('button', { name: 'next' }));
 
     fireEvent.click(screen.getByRole('button', { name: /add MCP server/i }));
-    expect(screen.getByRole('option', { name: 'Request Docker image' })).toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText('MCP server type'), { target: { value: 'docker_request' } });
-    fireEvent.change(screen.getByLabelText('catalog request id'), { target: { value: 'brave' } });
-    fireEvent.change(screen.getByLabelText('catalog request label'), { target: { value: 'Brave Search' } });
+    expect(screen.queryByRole('option', { name: 'Request Docker image' })).toBeNull();
+    fireEvent.change(screen.getByLabelText('MCP server type'), { target: { value: 'docker_catalog' } });
+    fireEvent.change(screen.getByLabelText('Docker server'), {
+      target: { value: 'Request Docker image' },
+    });
+    expect(screen.queryByLabelText('catalog request id')).toBeNull();
+    expect(screen.queryByLabelText('catalog request label')).toBeNull();
     fireEvent.change(screen.getByLabelText('catalog request description'), {
       target: { value: 'Brave MCP image' },
     });
@@ -1179,7 +1188,7 @@ describe('NewInstanceForm MCP setup', () => {
 
     await waitFor(() => expect(client.requestMcpDockerCatalogServer).toHaveBeenCalledTimes(1));
     expect(client.requestMcpDockerCatalogServer).toHaveBeenCalledWith('brave', {
-      label: 'Brave Search',
+      label: 'Brave',
       description: 'Brave MCP image',
       template: JSON.stringify(dockerConfig, null, 2),
       placeholders: [{

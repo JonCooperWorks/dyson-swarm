@@ -206,8 +206,9 @@ pub fn router(
         ));
 
     // Static assets (SPA bundle) are merged last so the API routes win
-    // every match.  The static router owns the fallback, which serves
-    // `/`, `/assets/*`, and 404s anything else — no auth, no logging.
+    // every concrete match.  Its fallback serves `/`, `/assets/*`, and
+    // browser document navigations for SPA deep links while keeping
+    // API-like prefixes and missing assets as 404s.
     //
     // `instances::internal_router` mounts `/v1/internal/tls-allowlist`
     // unauthenticated for Caddy's `on_demand_tls.ask` probe.  Caddy
@@ -895,6 +896,38 @@ mod tests {
         .await;
         let r = reqwest::get(format!("{base}/no-such-asset")).await.unwrap();
         assert_eq!(r.status(), 404);
+    }
+
+    #[tokio::test]
+    async fn browser_deep_link_refresh_serves_spa_index_html() {
+        let (state, users) = build_state().await;
+        let base = spawn(
+            state,
+            AuthState::enforced(crate::config::OidcRoles {
+                claim: "https://test/roles".into(),
+                admin: "rol_admin".into(),
+            }),
+            deny_user_auth(users),
+        )
+        .await;
+        let r = reqwest::Client::new()
+            .get(format!("{base}/i/fluffy-otter-042/model"))
+            .header(
+                reqwest::header::ACCEPT,
+                "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            )
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let ct = r
+            .headers()
+            .get("content-type")
+            .map(|v| v.to_str().unwrap().to_string())
+            .unwrap_or_default();
+        assert!(ct.starts_with("text/html"), "content-type was {ct:?}");
+        let body = r.text().await.unwrap();
+        assert!(body.contains("<div id=\"root\">"));
     }
 
     #[tokio::test]

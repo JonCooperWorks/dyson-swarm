@@ -2201,7 +2201,7 @@ impl InstanceService {
                 &source.id,
                 &info.sandbox_id,
                 state_files,
-                false,
+                true,
             )
             .await
         {
@@ -2336,7 +2336,7 @@ impl InstanceService {
                             instance = %instance_id,
                             namespace = %row.namespace,
                             path = %row.path,
-                            "state-replay: skipping unreadable mirror row; cube snapshot remains authoritative"
+                            "state-replay: skipping unreadable mirror row; continuing with readable mirrored state"
                         );
                         continue;
                     }
@@ -2352,7 +2352,7 @@ impl InstanceService {
                             namespace = %row.namespace,
                             path = %row.path,
                             error = %e,
-                            "state-replay: skipping unreadable mirror row; cube snapshot remains authoritative"
+                            "state-replay: skipping unreadable mirror row; continuing with readable mirrored state"
                         );
                         continue;
                     }
@@ -7650,6 +7650,26 @@ mod tests {
             )
             .await
             .unwrap();
+        let unreadable = state_files
+            .ingest(
+                crate::state_files::StateFileMeta {
+                    instance_id: &src.id,
+                    owner_id: &owner,
+                    namespace: "chats",
+                    path: "c-0001/artefacts/a1.body",
+                    mime: Some("application/octet-stream"),
+                    updated_at: 1_777_700_003,
+                },
+                b"sealed then corrupted",
+            )
+            .await
+            .unwrap();
+        tokio::fs::write(
+            state_files.body_path_for(&unreadable),
+            b"legacy plaintext body",
+        )
+        .await
+        .unwrap();
 
         let row = isvc
             .reset_in_place_from_state(&owner, &src.id, "tpl-v2", &state_files)
@@ -7669,6 +7689,12 @@ mod tests {
 
         let restored = recorder.restored.lock().unwrap();
         assert_eq!(restored.len(), 3);
+        assert!(
+            restored
+                .iter()
+                .all(|(_, _, b)| b.path != "c-0001/artefacts/a1.body"),
+            "reset should skip unreadable legacy mirror rows without aborting"
+        );
         assert!(
             restored.iter().any(|(_, _, b)| b.namespace == "workspace"
                 && b.path == "skills/review/SKILL.md"

@@ -9,6 +9,7 @@
 import React from 'react';
 import { useAppState } from '../hooks/useAppState.js';
 import { setView, parseHashView } from '../store/app.js';
+import { canonicalizePathRoute } from '../routing.js';
 import { TopBar } from './topbar.jsx';
 import { InstancesView, NewInstancePage } from './instances.jsx';
 import { AdminView } from './admin.jsx';
@@ -23,6 +24,7 @@ export function App() {
   // re-running it on each hashchange is cheap.
   React.useEffect(() => {
     const onHash = () => setView(parseHashView());
+    canonicalizePathRoute();
     window.addEventListener('hashchange', onHash);
     onHash(); // sync once on mount in case the hash changed during boot
     return () => window.removeEventListener('hashchange', onHash);

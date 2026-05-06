@@ -49,6 +49,23 @@ describe('parseHashView', () => {
     });
   });
 
+  test('clean browser subpage paths route like their hash equivalents', () => {
+    window.history.pushState(null, '', '/i/abc/tools');
+    expect(parseHashView()).toEqual({ name: 'instance-tools', id: 'abc' });
+
+    window.history.pushState(null, '', '/admin/mcp-catalog/github');
+    expect(parseHashView()).toEqual({
+      name: 'admin-mcp-catalog-edit',
+      id: null,
+      catalogId: 'github',
+    });
+  });
+
+  test('hash routes win when both path and hash are present', () => {
+    window.history.pushState(null, '', '/i/abc/tools#/admin');
+    expect(parseHashView()).toEqual({ name: 'admin', id: null });
+  });
+
   test('every per-section URL gets its own view name', () => {
     const cases = {
       identity: 'instance-identity',

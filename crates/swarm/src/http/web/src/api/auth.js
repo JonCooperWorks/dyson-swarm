@@ -30,6 +30,8 @@
  *   server-side fetch with attacker-influenced URLs.
  */
 
+import { routeHashFromLocation } from '../routing.js';
+
 const STORAGE_KEY = 'swarm:auth';
 const PENDING_KEY = 'swarm:auth:pending';
 const REFRESH_LEEWAY_S = 60;
@@ -312,7 +314,7 @@ async function startAuthorizationFlow(cfg, discovery, opts = {}) {
   writePending({
     verifier,
     state,
-    returnTo: window.location.hash || '#/',
+    returnTo: routeHashFromLocation(window.location),
     returnToUrl: opts.returnToUrl || null,
     issuedAt: Date.now(),
   });

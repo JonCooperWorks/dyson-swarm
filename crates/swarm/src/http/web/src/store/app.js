@@ -10,6 +10,7 @@
  */
 
 import { createStore } from './createStore.js';
+import { routeHashFromLocation } from '../routing.js';
 
 const initial = {
   meta: {
@@ -224,7 +225,7 @@ const SECTION_VIEW_NAMES = {
 
 export function parseHashView() {
   if (typeof window === 'undefined') return { name: 'instances', id: null };
-  const h = window.location.hash || '#/';
+  const h = routeHashFromLocation(window.location);
   // Audit subroutes are checked before /tasks/new and /tasks/<name> —
   // `audit` is a reserved task slug (the validator forbids slashes,
   // but we still want a stable URL when someone hand-edits it).

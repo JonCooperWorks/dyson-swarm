@@ -1554,7 +1554,13 @@ impl InstanceService {
 
         if let Some(state_files) = replay_state_files.as_ref() {
             if let Err(err) = self
-                .replay_state_files_to_sandbox(owner_id, &source.id, &info.sandbox_id, state_files)
+                .replay_state_files_to_sandbox(
+                    owner_id,
+                    &source.id,
+                    &info.sandbox_id,
+                    state_files,
+                    true,
+                )
                 .await
             {
                 if quiesced {
@@ -1984,7 +1990,13 @@ impl InstanceService {
 
         if let Some(state_files) = replay_state_files.as_ref() {
             if let Err(err) = self
-                .replay_state_files_to_sandbox(owner_id, &source.id, &info.sandbox_id, state_files)
+                .replay_state_files_to_sandbox(
+                    owner_id,
+                    &source.id,
+                    &info.sandbox_id,
+                    state_files,
+                    false,
+                )
                 .await
             {
                 let _ = self.cube.destroy_sandbox(&info.sandbox_id).await;
@@ -2167,7 +2179,13 @@ impl InstanceService {
         );
 
         if let Err(err) = self
-            .replay_state_files_to_sandbox(owner_id, &source.id, &info.sandbox_id, state_files)
+            .replay_state_files_to_sandbox(
+                owner_id,
+                &source.id,
+                &info.sandbox_id,
+                state_files,
+                false,
+            )
             .await
         {
             let _ = self.cube.destroy_sandbox(&info.sandbox_id).await;
@@ -2270,6 +2288,7 @@ impl InstanceService {
         instance_id: &str,
         sandbox_id: &str,
         state_files: &crate::state_files::StateFileService,
+        allow_unreadable_rows: bool,
     ) -> Result<usize, SwarmError> {
         let rows = state_files
             .list_for_instance(instance_id)
@@ -2293,16 +2312,37 @@ impl InstanceService {
             let (deleted, body_b64) = if row.deleted_at.is_some() {
                 (true, None)
             } else {
-                let plain = state_files
-                    .read_body(&row)
-                    .await
-                    .map_err(|e| SwarmError::Internal(format!("open state file: {e}")))?
-                    .ok_or_else(|| {
-                        SwarmError::Internal(format!(
+                let plain = match state_files.read_body(&row).await {
+                    Ok(Some(plain)) => plain,
+                    Ok(None) if allow_unreadable_rows => {
+                        tracing::warn!(
+                            instance = %instance_id,
+                            namespace = %row.namespace,
+                            path = %row.path,
+                            "state-replay: skipping unreadable mirror row; cube snapshot remains authoritative"
+                        );
+                        continue;
+                    }
+                    Ok(None) => {
+                        return Err(SwarmError::Internal(format!(
                             "state file body missing or unsealed for {}:{}",
                             row.namespace, row.path
-                        ))
-                    })?;
+                        )));
+                    }
+                    Err(e) if allow_unreadable_rows => {
+                        tracing::warn!(
+                            instance = %instance_id,
+                            namespace = %row.namespace,
+                            path = %row.path,
+                            error = %e,
+                            "state-replay: skipping unreadable mirror row; cube snapshot remains authoritative"
+                        );
+                        continue;
+                    }
+                    Err(e) => {
+                        return Err(SwarmError::Internal(format!("open state file: {e}")));
+                    }
+                };
                 (false, Some(B64.encode(plain)))
             };
             let body = RestoreStateFileBody {
@@ -7708,6 +7748,151 @@ mod tests {
                 .iter()
                 .all(|event| event.starts_with("restore:")),
             "all state replay calls must happen before configure enables state sync: {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn binary_rotation_tolerates_unreadable_mirror_rows_from_snapshot() {
+        let pool = open_in_memory().await.unwrap();
+        let owner = "deadcafe".repeat(4);
+        sqlx::query(
+            "INSERT INTO users (id, subject, status, created_at) VALUES (?, ?, 'active', ?)",
+        )
+        .bind(&owner)
+        .bind(&owner)
+        .bind(0i64)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let cube = MockCube::new();
+        let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(
+            pool.clone(),
+            crate::db::test_system_cipher(),
+        ));
+        let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(
+            pool.clone(),
+            crate::db::test_system_cipher(),
+        ));
+        let snaps: Arc<dyn SnapshotStore> = Arc::new(SqliteSnapshotStore::new(pool.clone()));
+        let recorder = Arc::new(RecordingReconfigurer::default());
+        let state_root = tempfile::tempdir().unwrap();
+        let keys = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+        let ciphers: Arc<dyn crate::envelope::CipherDirectory> =
+            Arc::new(crate::envelope::AgeCipherDirectory::new(keys.path()).unwrap());
+        let state_files = Arc::new(crate::state_files::StateFileService::new(
+            pool.clone(),
+            state_root.path().into(),
+            ciphers,
+        ));
+        let isvc = Arc::new(
+            InstanceService::new(
+                cube.clone(),
+                instances.clone(),
+                tokens,
+                "https://swarm.test/llm",
+            )
+            .with_reconfigurer(recorder.clone())
+            .with_state_files(state_files.clone()),
+        );
+        let backup: Arc<dyn BackupSink> = Arc::new(LocalDiskBackupSink::new(cube.clone()));
+        let ssvc = Arc::new(SnapshotService::new(
+            cube.clone(),
+            instances.clone(),
+            snaps,
+            backup,
+            isvc.clone(),
+        ));
+
+        let src = isvc
+            .create(
+                &owner,
+                CreateRequest {
+                    template_id: "tpl-v1".into(),
+                    name: Some("legacy-mirror".into()),
+                    task: Some("keep sandbox state".into()),
+                    env: env_with_model(),
+                    ttl_seconds: None,
+                    network_policy: NetworkPolicy::Open,
+                    mcp_servers: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+        recorder.pushed.lock().unwrap().clear();
+        recorder.restored.lock().unwrap().clear();
+        recorder.events.lock().unwrap().clear();
+
+        state_files
+            .ingest(
+                crate::state_files::StateFileMeta {
+                    instance_id: &src.id,
+                    owner_id: &owner,
+                    namespace: "workspace",
+                    path: "memory/SOUL.md",
+                    mime: Some("text/markdown"),
+                    updated_at: 1_777_720_000,
+                },
+                b"restored from mirror",
+            )
+            .await
+            .unwrap();
+        let unreadable = state_files
+            .ingest(
+                crate::state_files::StateFileMeta {
+                    instance_id: &src.id,
+                    owner_id: &owner,
+                    namespace: "chats",
+                    path: "c-legacy/activity.jsonl",
+                    mime: Some("application/jsonl"),
+                    updated_at: 1_777_720_001,
+                },
+                br#"{"event":"legacy"}"#,
+            )
+            .await
+            .unwrap();
+        std::fs::write(
+            state_files.body_path_for(&unreadable),
+            b"legacy plaintext cache row",
+        )
+        .unwrap();
+
+        let report = isvc.rotate_binary_all(&ssvc, "tpl-v2").await.unwrap();
+        assert_eq!(report.visited, 1);
+        assert_eq!(report.rotated, 1);
+        assert!(
+            report.failed.is_empty(),
+            "snapshot-backed rotation must not fail on unreadable mirror rows: {:?}",
+            report.failed
+        );
+
+        let row = instances
+            .get_for_owner(&owner, &src.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.id, src.id);
+        assert_eq!(row.template_id, "tpl-v2");
+
+        let captured = cube.last_create();
+        assert!(
+            captured.from_snapshot.is_some(),
+            "rotation must keep using the cube snapshot as the authoritative state source"
+        );
+
+        let restored = recorder.restored.lock().unwrap();
+        assert_eq!(restored.len(), 1);
+        assert!(
+            restored
+                .iter()
+                .any(|(_, _, b)| b.namespace == "workspace" && b.path == "memory/SOUL.md"),
+            "readable mirror rows should still be replayed"
+        );
+        assert!(
+            restored
+                .iter()
+                .all(|(_, _, b)| b.path != "c-legacy/activity.jsonl"),
+            "unreadable mirror rows should be skipped because the snapshot carries their state"
         );
     }
 

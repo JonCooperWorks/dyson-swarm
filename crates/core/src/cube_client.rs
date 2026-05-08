@@ -10,11 +10,12 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use reqwest::{Client, StatusCode};
+use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 
 use crate::config::CubeConfig;
 use crate::error::CubeError;
+use crate::http::InternalHttpClient;
 use crate::traits::{CreateSandboxArgs, CubeClient, SandboxInfo, SnapshotInfo};
 
 const MAX_ATTEMPTS: u32 = 3;
@@ -25,15 +26,12 @@ pub struct HttpCubeClient {
     base: String,
     api_key: String,
     sandbox_domain: String,
-    http: Client,
+    http: InternalHttpClient,
 }
 
 impl HttpCubeClient {
     pub fn new(cfg: &CubeConfig) -> Result<Self, CubeError> {
-        let http = Client::builder()
-            .pool_idle_timeout(Some(Duration::from_secs(90)))
-            .build()
-            .map_err(|e| CubeError::Transport(e.to_string()))?;
+        let http = InternalHttpClient::new().map_err(|e| CubeError::Transport(e.to_string()))?;
         Ok(Self {
             base: cfg.url.trim_end_matches('/').to_owned(),
             api_key: cfg.api_key.clone(),
@@ -43,7 +41,7 @@ impl HttpCubeClient {
     }
 
     /// Override the http client (used by tests with a custom timeout).
-    pub fn with_client(mut self, http: Client) -> Self {
+    pub fn with_client(mut self, http: InternalHttpClient) -> Self {
         self.http = http;
         self
     }
@@ -292,7 +290,7 @@ impl CubeClient for HttpCubeClient {
 /// `CubeError` otherwise. The boolean tells the retry loop whether the
 /// failure is retryable.
 async fn send_json<B: Serialize + ?Sized>(
-    http: &Client,
+    http: &InternalHttpClient,
     method: reqwest::Method,
     url: &str,
     api_key: &str,

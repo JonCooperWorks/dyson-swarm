@@ -208,7 +208,7 @@ struct HttpStreamableSession {
     url: String,
     headers: BTreeMap<String, String>,
     auth_bearer_env: Option<String>,
-    client: reqwest::Client,
+    client: dyson_swarm_core::http::InternalHttpClient,
     session_id: Mutex<Option<String>>,
     protocol_version: Mutex<Option<String>>,
     send_lock: Mutex<()>,
@@ -661,9 +661,7 @@ impl HttpStreamableSession {
         auth_bearer_env: Option<String>,
         fingerprint: String,
     ) -> Result<Self, String> {
-        let client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
+        let client = dyson_swarm_core::http::InternalHttpClient::new()
             .map_err(|e| format!("build HTTP client: {e}"))?;
         Ok(Self {
             fingerprint,

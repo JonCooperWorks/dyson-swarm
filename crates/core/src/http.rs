@@ -24,14 +24,17 @@ const USER_AGENT: &str = concat!("dyson-swarm/", env!("CARGO_PKG_VERSION"));
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 const POOL_IDLE: Duration = Duration::from_secs(90);
 
-fn shared_defaults(b: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
+fn shared_common(b: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
     b.user_agent(USER_AGENT)
-        .timeout(DEFAULT_TIMEOUT)
         .pool_idle_timeout(Some(POOL_IDLE))
         .redirect(reqwest::redirect::Policy::none())
 }
 
-#[derive(Clone)]
+fn shared_defaults(b: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
+    shared_common(b).timeout(DEFAULT_TIMEOUT)
+}
+
+#[derive(Debug, Clone)]
 pub struct InternalHttpClient {
     inner: reqwest::Client,
 }
@@ -40,6 +43,16 @@ impl InternalHttpClient {
     pub fn new() -> Result<Self, reqwest::Error> {
         Ok(Self {
             inner: shared_defaults(reqwest::Client::builder()).build()?,
+        })
+    }
+
+    pub fn with_timeout(timeout: Duration) -> Result<Self, reqwest::Error> {
+        Self::from_builder(reqwest::Client::builder().timeout(timeout))
+    }
+
+    pub fn from_builder(builder: reqwest::ClientBuilder) -> Result<Self, reqwest::Error> {
+        Ok(Self {
+            inner: shared_common(builder).build()?,
         })
     }
 
@@ -55,6 +68,14 @@ impl InternalHttpClient {
         self.inner.post(url)
     }
 
+    pub fn patch(&self, url: impl reqwest::IntoUrl) -> reqwest::RequestBuilder {
+        self.inner.patch(url)
+    }
+
+    pub fn delete(&self, url: impl reqwest::IntoUrl) -> reqwest::RequestBuilder {
+        self.inner.delete(url)
+    }
+
     pub fn request(
         &self,
         method: reqwest::Method,
@@ -64,7 +85,7 @@ impl InternalHttpClient {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct ExternalHttpClient {
     policy: Arc<OutboundUrlPolicy>,
 }

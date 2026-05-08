@@ -345,7 +345,7 @@ async fn build() -> Fixture {
 /// local TLS terminator?  That's a lot.  Simplest: register a hosts
 /// entry pointing the constructed name at 127.0.0.1, which we can do
 /// with reqwest's `resolve_to_addr` builder.
-fn build_test_http_client() -> reqwest::Client {
+fn build_test_http_client() -> dyson_swarm_core::http::InternalHttpClient {
     // The instance_client builds:
     //   https://{port}-{sandbox_id}.{sandbox_domain}/...
     // With sandbox_id="sb-test", sandbox_domain="127.0.0.1",
@@ -359,10 +359,10 @@ fn build_test_http_client() -> reqwest::Client {
     // from the client side, we accept this test exercises the
     // connection-build path but not the actual fetch.  See
     // `share_full_lifecycle_does_not_panic` below.
-    reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .build()
-        .unwrap()
+    dyson_swarm_core::http::InternalHttpClient::from_builder(
+        reqwest::Client::builder().danger_accept_invalid_certs(true),
+    )
+    .unwrap()
 }
 
 // ── tests ────────────────────────────────────────────────────────────

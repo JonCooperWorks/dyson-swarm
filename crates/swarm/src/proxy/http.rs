@@ -282,10 +282,11 @@ async fn handle(
     } else {
         body_bytes.clone()
     };
-    let request_client = pinned_byo_client.as_ref().unwrap_or(&state.http);
-    let mut req_builder = request_client
-        .request(method, upstream_uri.to_string())
-        .body(outbound_body);
+    let mut req_builder = match pinned_byo_client.as_ref() {
+        Some(client) => client.request(method, upstream_uri.to_string()),
+        None => state.http.request(method, upstream_uri.to_string()),
+    }
+    .body(outbound_body);
     for (k, v) in &parts.headers {
         if !is_hop_by_hop(k) {
             req_builder = req_builder.header(k.as_str(), v);

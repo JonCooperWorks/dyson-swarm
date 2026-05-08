@@ -32,6 +32,7 @@ use uuid::Uuid;
 
 use crate::envelope::CipherDirectory;
 use crate::error::StoreError;
+use crate::http::InternalHttpClient;
 use crate::instance::InstanceService;
 use crate::secrets::{SecretsError, UserSecretsService};
 use crate::traits::{
@@ -185,12 +186,12 @@ impl WebhookDispatcher for NullWebhookDispatcher {
 /// Default dispatcher: hits the cubeproxy hostname with the instance
 /// bearer.  Mirrors how `dyson_proxy::forward` reaches the agent.
 pub struct HttpWebhookDispatcher {
-    http: reqwest::Client,
+    http: InternalHttpClient,
     sandbox_domain: String,
 }
 
 impl HttpWebhookDispatcher {
-    pub fn new(http: reqwest::Client, sandbox_domain: impl Into<String>) -> Self {
+    pub fn new(http: InternalHttpClient, sandbox_domain: impl Into<String>) -> Self {
         Self {
             http,
             sandbox_domain: sandbox_domain.into(),

@@ -25,7 +25,7 @@ use crate::config::{ByoConfig, ProviderConfig, Providers};
 use crate::proxy::policy_check::{InstancePolicy, UsageSnapshot};
 use crate::proxy::upstream_policy::policy_from_byo;
 use crate::traits::{AuditStore, InstanceStore, PolicyStore, ProviderAdapter, TokenStore};
-use dyson_swarm_core::http::ExternalHttpClient;
+use dyson_swarm_core::http::{ExternalHttpClient, InternalHttpClient};
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 
 /// Wires the proxy together. Cheap to clone — every field is `Arc` or
@@ -41,7 +41,7 @@ pub struct ProxyService {
     pub audit: Arc<dyn AuditStore>,
     pub providers: Providers,
     pub adapters: HashMap<&'static str, Arc<dyn ProviderAdapter>>,
-    pub http: reqwest::Client,
+    pub http: InternalHttpClient,
     pub external_http: Arc<ExternalHttpClient>,
     pub default_policy: InstancePolicy,
     /// Optional Stage-6 per-user OpenRouter bearer resolver.  When
@@ -70,10 +70,7 @@ impl ProxyService {
         providers: Providers,
         default_policy: InstancePolicy,
     ) -> Result<Self, reqwest::Error> {
-        let http = reqwest::Client::builder()
-            .pool_idle_timeout(Some(Duration::from_secs(90)))
-            .redirect(reqwest::redirect::Policy::none())
-            .build()?;
+        let http = InternalHttpClient::new()?;
         Ok(Self {
             tokens,
             instances,

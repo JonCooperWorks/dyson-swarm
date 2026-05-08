@@ -7,8 +7,10 @@
 //! row via the SPA and export it as `SWARM_API_KEY=...` for the CLI to
 //! pick up via [`build_api_client`] in `main.rs`.
 
-use reqwest::{Client, Method, StatusCode};
+use reqwest::{Method, StatusCode};
 use serde::Serialize;
+
+use crate::http::InternalHttpClient;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {
@@ -24,12 +26,12 @@ pub enum ApiError {
 pub struct ApiClient {
     base: String,
     bearer: Option<String>,
-    http: Client,
+    http: InternalHttpClient,
 }
 
 impl ApiClient {
     pub fn new(base: impl Into<String>, bearer: Option<String>) -> Result<Self, ApiError> {
-        let http = Client::builder().build().map_err(ApiError::Build)?;
+        let http = InternalHttpClient::new().map_err(ApiError::Build)?;
         Ok(Self {
             base: normalize_base(base.into()),
             bearer,

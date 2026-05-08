@@ -14,6 +14,7 @@
 //! per-instance secret swarm minted at create time and dyson hashes on
 //! first sighting (TOFU + argon2id).
 
+use crate::http::InternalHttpClient;
 use crate::traits::InstanceRow;
 
 #[derive(Debug, thiserror::Error)]
@@ -33,7 +34,7 @@ pub enum InstanceFetchError {
 /// dyson sets its own `Content-Type` and we want it preserved on the
 /// public share response.
 pub async fn fetch_artefact(
-    http: &reqwest::Client,
+    http: &InternalHttpClient,
     sandbox_domain: &str,
     instance: &InstanceRow,
     path: &str,
@@ -100,7 +101,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_sandbox_id_is_not_ready() {
-        let client = reqwest::Client::new();
+        let client = InternalHttpClient::new().unwrap();
         let err = fetch_artefact(&client, "cube.test", &instance(None), "/api/foo")
             .await
             .unwrap_err();
@@ -109,7 +110,7 @@ mod tests {
 
     #[tokio::test]
     async fn empty_sandbox_id_is_not_ready() {
-        let client = reqwest::Client::new();
+        let client = InternalHttpClient::new().unwrap();
         let err = fetch_artefact(&client, "cube.test", &instance(Some("")), "/api/foo")
             .await
             .unwrap_err();

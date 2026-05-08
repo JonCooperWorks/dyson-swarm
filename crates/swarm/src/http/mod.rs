@@ -76,9 +76,9 @@ pub struct AppState {
     /// [`crate::config::Config`] at startup; the SPA hits this endpoint
     /// before mounting React to decide whether to start a PKCE flow.
     pub auth_config: Arc<auth_config::AuthConfig>,
-    /// Shared `reqwest::Client` for the host-based reverse proxy.  One
-    /// per process so connection pooling survives across requests.
-    pub dyson_http: reqwest::Client,
+    /// Shared internal HTTP client for the host-based reverse proxy. One per
+    /// process so connection pooling survives across requests.
+    pub dyson_http: dyson_swarm_core::http::InternalHttpClient,
     /// Upstream URL (e.g. `https://openrouter.ai/api`) for the LLM
     /// provider the agents talk through.  `GET /v1/models` proxies to
     /// `<upstream>/v1/models` and exposes the catalogue to the SPA's

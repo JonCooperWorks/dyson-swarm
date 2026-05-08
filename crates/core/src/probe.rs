@@ -18,16 +18,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use reqwest::Client;
 use tokio::sync::Mutex;
 
+use crate::http::InternalHttpClient;
 use crate::traits::{
     HealthProber, InstanceRow, InstanceStatus, InstanceStore, ListFilter, ProbeResult,
 };
 
 #[derive(Clone)]
 pub struct HttpHealthProber {
-    http: Client,
+    http: InternalHttpClient,
     /// Public hostname swarm answers on (e.g. `swarm.myprivate.network`).
     /// We probe `https://<instance_id>.<hostname>/healthz` so the prober
     /// exercises the same chain the user's browser does — Caddy →
@@ -43,7 +43,7 @@ impl HttpHealthProber {
         // with a Let's Encrypt cert, so no custom CA is needed here.
         // (The cube-internal probe path used to require the mkcert root
         // CA; we no longer hit cubeproxy directly.)
-        let http = Client::builder().timeout(timeout).build()?;
+        let http = InternalHttpClient::with_timeout(timeout)?;
         Ok(Self { http, hostname })
     }
 

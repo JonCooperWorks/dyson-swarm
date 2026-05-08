@@ -617,7 +617,7 @@ fn is_hop_by_hop(name: &HeaderName) -> bool {
     )
 }
 
-/// Build the shared reqwest::Client used by the dyson proxy.
+/// Build the shared internal HTTP client used by the dyson proxy.
 ///
 /// CubeSandbox's cubeproxy serves `*.cube.app` with TLS issued by a
 /// per-host mkcert root that isn't in reqwest's webpki bundle. Set
@@ -626,7 +626,7 @@ fn is_hop_by_hop(name: &HeaderName) -> bool {
 /// the proxy will trust it as an additional root. Verification stays
 /// on; the only thing changing is which CAs the client treats as
 /// authoritative for cubeproxy's hostnames.
-pub fn build_client() -> Result<reqwest::Client, reqwest::Error> {
+pub fn build_client() -> Result<dyson_swarm_core::http::InternalHttpClient, reqwest::Error> {
     let b = reqwest::Client::builder()
         // This client is for host-side cubeproxy traffic only: the
         // reverse proxy, webhooks, and artefact fetches must not inherit
@@ -637,7 +637,7 @@ pub fn build_client() -> Result<reqwest::Client, reqwest::Error> {
     let root_ca = dyson_swarm_core::dyson_reconfig::cube_root_ca_path_from_env();
     let b =
         dyson_swarm_core::dyson_reconfig::add_cube_root_ca(b, root_ca.as_deref(), "dyson_proxy");
-    b.build()
+    dyson_swarm_core::http::InternalHttpClient::from_builder(b)
 }
 
 /// True when an unauthenticated request looks like a browser top-level

@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::http::InternalHttpClient;
 use crate::instance::{
     DysonReconfigurer, InstallSkillBody, InstallSkillResponse, ReconfigureBody,
     RestoreStateFileBody, configure_secret_name,
@@ -216,7 +217,7 @@ fn require_applied(label: &str, requested: bool, observed: Option<bool>) -> Resu
 /// configure secret.
 #[derive(Clone)]
 pub struct DysonReconfigurerHttp {
-    http: reqwest::Client,
+    http: InternalHttpClient,
     /// Cube-internal sandbox suffix, e.g. `cube.app:8443`.  Mirrors
     /// `[cube] sandbox_domain` in swarm config.
     sandbox_domain: String,
@@ -262,7 +263,7 @@ impl DysonReconfigurerHttp {
             "reconfigurer",
         );
         Ok(Self {
-            http: b.build()?,
+            http: InternalHttpClient::from_builder(b)?,
             sandbox_domain: sandbox_domain.into(),
             system_secrets,
             mint_locks: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),

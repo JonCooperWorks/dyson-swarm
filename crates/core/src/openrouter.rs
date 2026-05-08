@@ -22,6 +22,7 @@
 
 use std::time::Duration;
 
+use crate::http::InternalHttpClient;
 use serde::{Deserialize, Serialize};
 
 /// Live OpenRouter Provisioning client.
@@ -29,7 +30,7 @@ use serde::{Deserialize, Serialize};
 pub struct OpenRouterProvisioning {
     upstream: String,
     provisioning_key: String,
-    http: reqwest::Client,
+    http: InternalHttpClient,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -117,9 +118,7 @@ impl OpenRouterProvisioning {
         upstream: impl Into<String>,
         provisioning_key: impl Into<String>,
     ) -> Result<Self, reqwest::Error> {
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(20))
-            .build()?;
+        let http = InternalHttpClient::with_timeout(Duration::from_secs(20))?;
         Ok(Self {
             upstream: upstream.into(),
             provisioning_key: provisioning_key.into(),

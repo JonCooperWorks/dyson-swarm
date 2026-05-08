@@ -170,6 +170,48 @@ impl StateFileService {
         Ok(Some(plain))
     }
 
+    pub async fn read_body_for_replay(
+        &self,
+        row: &StateFileRow,
+    ) -> Result<Option<Vec<u8>>, StateFileError> {
+        if row.deleted_at.is_some() {
+            return Ok(None);
+        }
+        let path = self.body_path_for(row);
+        let bytes = match fs::read(&path).await {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        let cipher = self
+            .ciphers
+            .for_user(&row.owner_id)
+            .map_err(|e| StateFileError::Io(format!("owner cipher: {e}")))?;
+        if bytes.starts_with(AGE_ARMOR_PREFIX) {
+            let plain = cipher
+                .open(&bytes)
+                .map_err(|e| StateFileError::Io(format!("open: {e}")))?;
+            return Ok(Some(plain));
+        }
+
+        tracing::warn!(
+            instance = %row.instance_id,
+            namespace = %row.namespace,
+            path = %row.path,
+            "state file cache: replaying legacy unsealed body and re-sealing it",
+        );
+        let sealed = cipher
+            .seal(&bytes)
+            .map_err(|e| StateFileError::Io(format!("seal legacy body: {e}")))?;
+        if !sealed.starts_with(AGE_ARMOR_PREFIX) {
+            return Err(StateFileError::Io(
+                "sealed legacy body missing age armor".into(),
+            ));
+        }
+        self.write_body(&row.body_path, &sealed).await?;
+        Ok(Some(bytes))
+    }
+
     async fn write_body(&self, rel_path: &str, bytes: &[u8]) -> Result<(), StateFileError> {
         let abs = self.root.join(rel_path);
         if let Some(parent) = abs.parent() {

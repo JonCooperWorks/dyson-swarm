@@ -3881,7 +3881,7 @@ async fn reset_replays_sealed_state_before_enabling_sync() {
         .unwrap();
     tokio::fs::write(
         state_files.body_path_for(&unreadable),
-        b"legacy plaintext body",
+        b"-----BEGIN AGE ENCRYPTED FILE-----\nnot a valid sealed body\n",
     )
     .await
     .unwrap();
@@ -4087,6 +4087,118 @@ async fn runtime_config_sync_replays_sealed_chats_before_enabling_sync() {
             .iter()
             .all(|event| event.starts_with("restore:")),
         "all replay calls must happen before configure enables state sync: {events:?}"
+    );
+}
+
+#[tokio::test]
+async fn runtime_config_sync_replays_legacy_plaintext_chats_and_reseals() {
+    let pool = open_in_memory().await.unwrap();
+    let owner = "cab0feed".repeat(4);
+    sqlx::query("INSERT INTO users (id, subject, status, created_at) VALUES (?, ?, 'active', ?)")
+        .bind(&owner)
+        .bind(&owner)
+        .bind(0i64)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let cube = MockCube::new();
+    let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(
+        pool.clone(),
+        crate::db::test_system_cipher(),
+    ));
+    let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(
+        pool.clone(),
+        crate::db::test_system_cipher(),
+    ));
+    let recorder = Arc::new(RecordingReconfigurer::default());
+    let state_root = tempfile::tempdir().unwrap();
+    let keys = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+    let ciphers: Arc<dyn crate::envelope::CipherDirectory> =
+        Arc::new(crate::envelope::AgeCipherDirectory::new(keys.path()).unwrap());
+    let state_files = Arc::new(crate::state_files::StateFileService::new(
+        pool.clone(),
+        state_root.path().into(),
+        ciphers.clone(),
+    ));
+    let user_secrets_store: Arc<dyn crate::traits::UserSecretStore> =
+        Arc::new(crate::db::secrets::SqlxUserSecretStore::new(pool.clone()));
+    let user_secrets = Arc::new(UserSecretsService::new(user_secrets_store, ciphers));
+    let isvc = Arc::new(
+        InstanceService::new(
+            cube.clone(),
+            instances.clone(),
+            tokens,
+            "https://swarm.test/llm",
+        )
+        .with_reconfigurer(recorder.clone())
+        .with_state_files(state_files.clone())
+        .with_mcp_secrets(user_secrets),
+    );
+
+    let src = isvc
+        .create(
+            &owner,
+            CreateRequest {
+                template_id: "tpl-v1".into(),
+                name: Some("legacy-live-mirror".into()),
+                task: Some("keep old chat history".into()),
+                env: env_with_model(),
+                ttl_seconds: None,
+                network_policy: NetworkPolicy::Open,
+                mcp_servers: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+    recorder.pushed.lock().unwrap().clear();
+    recorder.restored.lock().unwrap().clear();
+    recorder.events.lock().unwrap().clear();
+
+    let transcript = state_files
+        .ingest(
+            crate::state_files::StateFileMeta {
+                instance_id: &src.id,
+                owner_id: &owner,
+                namespace: "chats",
+                path: "c-legacy/transcript.json",
+                mime: Some("application/json"),
+                updated_at: 1_777_740_001,
+            },
+            br#"[{"role":"user","content":"legacy mirror"}]"#,
+        )
+        .await
+        .unwrap();
+    tokio::fs::write(
+        state_files.body_path_for(&transcript),
+        br#"[{"role":"user","content":"legacy mirror"}]"#,
+    )
+    .await
+    .unwrap();
+
+    let (visited, succeeded) = isvc.sync_runtime_config_all().await.unwrap();
+    assert_eq!((visited, succeeded), (1, 1));
+
+    let restored = recorder.restored.lock().unwrap();
+    assert!(
+        restored.iter().any(|(_, _, b)| b.namespace == "chats"
+            && b.path == "c-legacy/transcript.json"
+            && b.body_b64.as_deref()
+                == Some("W3sicm9sZSI6InVzZXIiLCJjb250ZW50IjoibGVnYWN5IG1pcnJvciJ9XQ==")),
+        "legacy plaintext mirrored transcripts must still replay"
+    );
+    drop(restored);
+
+    let on_disk = tokio::fs::read(state_files.body_path_for(&transcript))
+        .await
+        .unwrap();
+    assert!(
+        on_disk.starts_with(crate::webhooks::AGE_ARMOR_PREFIX),
+        "legacy plaintext mirror body should be re-sealed after replay"
+    );
+    assert_eq!(
+        state_files.read_body(&transcript).await.unwrap().unwrap(),
+        br#"[{"role":"user","content":"legacy mirror"}]"#
     );
 }
 
@@ -4400,7 +4512,7 @@ async fn binary_rotation_tolerates_unreadable_mirror_rows_from_snapshot() {
         .unwrap();
     std::fs::write(
         state_files.body_path_for(&unreadable),
-        b"legacy plaintext cache row",
+        b"-----BEGIN AGE ENCRYPTED FILE-----\nnot a valid sealed body\n",
     )
     .unwrap();
 

@@ -1682,7 +1682,7 @@ impl InstanceService {
             let (deleted, body_b64) = if row.deleted_at.is_some() {
                 (true, None)
             } else {
-                let plain = match state_files.read_body(&row).await {
+                let plain = match state_files.read_body_for_replay(&row).await {
                     Ok(Some(plain)) => plain,
                     Ok(None) if allow_unreadable_rows => {
                         tracing::warn!(

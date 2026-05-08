@@ -101,12 +101,19 @@ async fn skill_content(
     Extension(caller): Extension<CallerIdentity>,
     Path((marketplace, skill)): Path<(String, String)>,
 ) -> impl IntoResponse {
-    if is_agent_marketplace(&marketplace) {
-        return json_result(
-            agent_skill_content(&state, &caller.user_id, &marketplace, &skill).await,
-        );
+    json_result(skill_content_for_owner(&state, &caller.user_id, &marketplace, &skill).await)
+}
+
+pub(crate) async fn skill_content_for_owner(
+    state: &AppState,
+    owner_id: &str,
+    marketplace: &str,
+    skill: &str,
+) -> Result<SkillPackageBody, SkillMarketplaceError> {
+    if is_agent_marketplace(marketplace) {
+        return agent_skill_content(state, owner_id, marketplace, skill).await;
     }
-    json_result(state.skill_marketplace.content(&marketplace, &skill).await)
+    state.skill_marketplace.content(marketplace, skill).await
 }
 
 async fn internal_list_sources(
@@ -152,10 +159,9 @@ async fn internal_skill_content(
     Path((marketplace, skill)): Path<(String, String)>,
 ) -> impl IntoResponse {
     match authorize_state_token_owner(&state, &headers).await {
-        Ok(owner_id) if is_agent_marketplace(&marketplace) => {
-            json_result(agent_skill_content(&state, &owner_id, &marketplace, &skill).await)
+        Ok(owner_id) => {
+            json_result(skill_content_for_owner(&state, &owner_id, &marketplace, &skill).await)
         }
-        Ok(_) => json_result(state.skill_marketplace.content(&marketplace, &skill).await),
         Err(status) => status.into_response(),
     }
 }

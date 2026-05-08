@@ -31,6 +31,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/v1/instances/:id/url", get(instance_url))
         .route("/v1/instances/:id/skills", get(instance_skills))
+        .route(
+            "/v1/instances/:id/skills/install",
+            post(install_instance_skill),
+        )
         .route("/v1/instances/:id/probe", post(probe_instance))
         .route("/v1/instances/:id/change-network", post(change_network))
         .route("/v1/instances/:id/rotate-template", post(rotate_template))
@@ -560,6 +564,247 @@ async fn instance_skills(
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct InstallInstanceSkillBody {
+    marketplace: String,
+    skill: String,
+    #[serde(default)]
+    force: bool,
+}
+
+async fn install_instance_skill(
+    State(state): State<AppState>,
+    Extension(caller): Extension<CallerIdentity>,
+    Path(id): Path<String>,
+    Json(body): Json<InstallInstanceSkillBody>,
+) -> impl IntoResponse {
+    let row = match state.instances.get_unscoped(&id).await {
+        Ok(row) => row,
+        Err(SwarmError::NotFound) => {
+            return install_error(StatusCode::NOT_FOUND, "instance_not_found", None);
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                instance = %id,
+                "skill install: instance lookup failed"
+            );
+            return install_error(swarm_err_to_status(e), "instance_lookup_failed", None);
+        }
+    };
+    if row.owner_id != caller.user_id {
+        return install_error(StatusCode::FORBIDDEN, "forbidden", None);
+    }
+    if !matches!(row.status, InstanceStatus::Live)
+        || row
+            .cube_sandbox_id
+            .as_deref()
+            .is_none_or(|s| s.trim().is_empty())
+    {
+        return install_error(StatusCode::SERVICE_UNAVAILABLE, "instance_not_live", None);
+    }
+
+    let marketplace = body.marketplace.trim();
+    let skill = body.skill.trim();
+    if marketplace.is_empty() || skill.is_empty() {
+        return install_error(StatusCode::BAD_REQUEST, "invalid_request", None);
+    }
+
+    let package = match super::skill_marketplace::skill_content_for_owner(
+        &state,
+        &caller.user_id,
+        marketplace,
+        skill,
+    )
+    .await
+    {
+        Ok(package) => package,
+        Err(
+            crate::skill_marketplace::SkillMarketplaceError::MarketplaceNotFound(_)
+            | crate::skill_marketplace::SkillMarketplaceError::SkillNotFound { .. },
+        ) => return install_error(StatusCode::NOT_FOUND, "skill_not_found", None),
+        Err(crate::skill_marketplace::SkillMarketplaceError::Invalid(msg)) => {
+            tracing::debug!(
+                error = %msg,
+                marketplace,
+                skill,
+                "skill install: invalid marketplace package"
+            );
+            return install_error(StatusCode::BAD_REQUEST, "invalid_skill_package", None);
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                marketplace,
+                skill,
+                "skill install: package fetch failed"
+            );
+            return install_error(StatusCode::BAD_GATEWAY, "skill_fetch_failed", None);
+        }
+    };
+
+    let computed = crate::skill_marketplace::skill_body_sha256(&package.skill_md);
+    if computed != package.computed_sha256
+        || package
+            .declared_sha256
+            .as_deref()
+            .is_some_and(|declared| !declared.eq_ignore_ascii_case(&computed))
+    {
+        tracing::warn!(
+            marketplace,
+            skill,
+            declared_sha256 = ?package.declared_sha256,
+            computed_sha256 = %package.computed_sha256,
+            local_sha256 = %computed,
+            "skill install: server-side package hash verification failed"
+        );
+        return install_error(StatusCode::BAD_GATEWAY, "skill_hash_mismatch", None);
+    }
+
+    match installed_skill_version(&state, &id, skill).await {
+        Ok(Some(current_version)) if !body.force => {
+            return install_error(
+                StatusCode::CONFLICT,
+                "already_installed",
+                Some(current_version),
+            );
+        }
+        Ok(_) => {}
+        Err(status) => return install_error(status, "skill_inventory_failed", None),
+    }
+
+    let package_for_mirror = package.clone();
+    let outcome = match state
+        .instances
+        .install_skill_on_live(&row, marketplace, skill, package, body.force)
+        .await
+    {
+        Ok(outcome) => outcome,
+        Err(SwarmError::BadRequest(msg)) if msg == "instance_not_live" => {
+            return install_error(StatusCode::SERVICE_UNAVAILABLE, "instance_not_live", None);
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                instance = %id,
+                marketplace,
+                skill,
+                "skill install: dyson agent rejected install"
+            );
+            return install_error(StatusCode::BAD_GATEWAY, "agent_unreachable", None);
+        }
+    };
+
+    tracing::info!(
+        instance = %row.id,
+        owner = %row.owner_id,
+        marketplace,
+        skill,
+        sha256 = %outcome.sha256,
+        source = "ui",
+        "skill install audit"
+    );
+    if let Err(e) =
+        mirror_installed_skill(&state, &row, marketplace, &package_for_mirror, &outcome).await
+    {
+        tracing::warn!(
+            error = %e,
+            instance = %row.id,
+            marketplace,
+            skill,
+            "skill install: immediate state-file mirror update failed"
+        );
+    }
+    Json(outcome).into_response()
+}
+
+fn install_error(
+    status: StatusCode,
+    error: &'static str,
+    current_version: Option<String>,
+) -> axum::response::Response {
+    let mut body = serde_json::json!({ "error": error });
+    if let Some(version) = current_version {
+        body["current_version"] = serde_json::Value::String(version);
+    }
+    (status, Json(body)).into_response()
+}
+
+async fn installed_skill_version(
+    state: &AppState,
+    instance_id: &str,
+    skill: &str,
+) -> Result<Option<String>, StatusCode> {
+    let skills =
+        crate::skill_inventory::list_instance_skills(state.state_files.as_ref(), instance_id)
+            .await
+            .map_err(|e| {
+                tracing::warn!(
+                    error = %e,
+                    instance = %instance_id,
+                    "skill install: inventory derivation failed"
+                );
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+    Ok(skills
+        .into_iter()
+        .find(|entry| entry.skill == skill)
+        .and_then(|entry| entry.version))
+}
+
+async fn mirror_installed_skill(
+    state: &AppState,
+    row: &InstanceRow,
+    marketplace: &str,
+    package: &crate::skill_marketplace::SkillPackageBody,
+    outcome: &crate::instance::InstallSkillResponse,
+) -> Result<(), String> {
+    let now = crate::now_secs();
+    let skill_path = format!("skills/{}/SKILL.md", package.name);
+    let metadata_path = format!("skills/{}/dyson-skill.json", package.name);
+    let skill_meta = crate::state_files::StateFileMeta {
+        instance_id: &row.id,
+        owner_id: &row.owner_id,
+        namespace: "workspace",
+        path: &skill_path,
+        mime: Some("text/markdown"),
+        updated_at: now,
+    };
+    state
+        .state_files
+        .ingest(skill_meta, package.skill_md.as_bytes())
+        .await
+        .map_err(|e| e.to_string())?;
+    let metadata = serde_json::json!({
+        "schema_version": 1,
+        "name": &package.name,
+        "version": &outcome.version,
+        "description": &package.description,
+        "origin": {
+            "kind": "marketplace",
+            "marketplace_id": marketplace,
+            "marketplace_name": &package.marketplace_name,
+            "sha256": &outcome.sha256,
+        },
+        "installed_at": now.to_string(),
+    });
+    let metadata_body = serde_json::to_vec_pretty(&metadata).map_err(|e| e.to_string())?;
+    let metadata_meta = crate::state_files::StateFileMeta {
+        instance_id: &row.id,
+        owner_id: &row.owner_id,
+        namespace: "workspace",
+        path: &metadata_path,
+        mime: Some("application/json"),
+        updated_at: now,
+    };
+    state
+        .state_files
+        .ingest(metadata_meta, &metadata_body)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// Public view of an instance — strips the bearer token (returned only at

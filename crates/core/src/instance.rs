@@ -426,6 +426,18 @@ pub trait DysonReconfigurer: Send + Sync {
     async fn unquiesce(&self, _instance_id: &str, _sandbox_id: &str) -> Result<(), String> {
         Ok(())
     }
+
+    /// Install a validated marketplace skill into a running dyson's
+    /// workspace. Default error keeps tests and deployments without
+    /// runtime reconfiguration from silently claiming success.
+    async fn install_skill(
+        &self,
+        _instance_id: &str,
+        _sandbox_id: &str,
+        _body: &InstallSkillBody,
+    ) -> Result<InstallSkillResponse, String> {
+        Err("dyson skill install reconfigurer is not configured".into())
+    }
 }
 
 /// Build the orchestrator-managed env envelope that gets handed to the
@@ -703,6 +715,21 @@ pub struct RestoreStateFileBody {
     pub deleted: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body_b64: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InstallSkillBody {
+    pub marketplace: String,
+    pub skill: String,
+    pub force: bool,
+    pub package: crate::skill_marketplace::SkillPackageBody,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct InstallSkillResponse {
+    pub installed: bool,
+    pub version: String,
+    pub sha256: String,
 }
 
 /// Image-generation defaults a swarm-managed dyson should run with.
@@ -2847,6 +2874,42 @@ impl InstanceService {
     /// owner-filter that the per-handler `get` enforces.
     pub async fn get_unscoped(&self, id: &str) -> Result<InstanceRow, SwarmError> {
         self.instances.get(id).await?.ok_or(SwarmError::NotFound)
+    }
+
+    /// Push a validated marketplace skill install into a Live dyson.
+    /// Ownership is enforced by the caller-provided row lookup; this
+    /// method only checks runtime viability before crossing into dyson.
+    pub async fn install_skill_on_live(
+        &self,
+        row: &InstanceRow,
+        marketplace: &str,
+        skill: &str,
+        package: crate::skill_marketplace::SkillPackageBody,
+        force: bool,
+    ) -> Result<InstallSkillResponse, SwarmError> {
+        if !matches!(row.status, InstanceStatus::Live) {
+            return Err(SwarmError::BadRequest("instance_not_live".into()));
+        }
+        let sandbox_id = row
+            .cube_sandbox_id
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| SwarmError::BadRequest("instance_not_live".into()))?;
+        let Some(reconfigurer) = self.reconfigurer.as_ref() else {
+            return Err(SwarmError::Internal(
+                "dyson skill install reconfigurer is not configured".into(),
+            ));
+        };
+        let body = InstallSkillBody {
+            marketplace: marketplace.to_owned(),
+            skill: skill.to_owned(),
+            force,
+            package,
+        };
+        reconfigurer
+            .install_skill(&row.id, sandbox_id, &body)
+            .await
+            .map_err(|err| SwarmError::Internal(format!("agent_unreachable: {err}")))
     }
 
     /// Mint an instance id (`<adj>-<noun>-<NNN>-<user-slug>`) that is

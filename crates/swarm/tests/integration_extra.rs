@@ -42,10 +42,13 @@ use dyson_swarm::{
     db::{instances::SqlxInstanceStore, tokens::SqlxTokenStore},
     envelope::{AgeCipherDirectory, CipherDirectory},
     http,
-    instance::InstanceService,
+    instance::{
+        DysonReconfigurer, InstallSkillBody, InstallSkillResponse, InstanceService, ReconfigureBody,
+    },
     openrouter::{MintedKey, OpenRouterError, Provisioning, UserOrKeyResolver},
     proxy::{self, ProxyService, policy_check::InstancePolicy},
     secrets::{SystemSecretsService, UserSecretsService},
+    skill_marketplace::{SkillMarketplaceService, SkillMarketplaceSourceConfig, skill_body_sha256},
     snapshot::SnapshotService,
     traits::{
         AuditStore, BackupSink, CubeClient, HealthProber, InstanceRow, InstanceStore, PolicyStore,
@@ -134,6 +137,36 @@ impl HealthProber for StubProber {
     }
 }
 
+#[derive(Clone, Default)]
+struct RecordingReconfigurer {
+    installs: Arc<Mutex<Vec<(String, String, InstallSkillBody)>>>,
+}
+
+#[async_trait::async_trait]
+impl DysonReconfigurer for RecordingReconfigurer {
+    async fn push(&self, _: &str, _: &str, _: &ReconfigureBody) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn install_skill(
+        &self,
+        instance_id: &str,
+        sandbox_id: &str,
+        body: &InstallSkillBody,
+    ) -> Result<InstallSkillResponse, String> {
+        self.installs.lock().unwrap().push((
+            instance_id.to_owned(),
+            sandbox_id.to_owned(),
+            body.clone(),
+        ));
+        Ok(InstallSkillResponse {
+            installed: true,
+            version: body.package.version.clone(),
+            sha256: body.package.computed_sha256.clone(),
+        })
+    }
+}
+
 /// `(name, label, limit_usd)` recorded for every mint call.
 type MintCall = (String, Option<String>, f64);
 
@@ -198,6 +231,8 @@ struct Stack {
     llm: LlmState,
     or_prov: Arc<RecordingProvisioning>,
     users: Arc<dyn UserStore>,
+    skill_marketplace: Arc<SkillMarketplaceService>,
+    reconfigurer: Arc<RecordingReconfigurer>,
 }
 
 /// Build a swarm whose user-auth chain is the production wiring: a
@@ -240,12 +275,16 @@ async fn build_stack(subject_for_no_bearer: &str) -> Stack {
         system_secrets_store,
         cipher_dir.clone(),
     ));
-    let instance_svc = Arc::new(InstanceService::new(
-        cube.clone(),
-        instances_store.clone(),
-        tokens_store.clone(),
-        "http://swarm.test/llm",
-    ));
+    let reconfigurer = Arc::new(RecordingReconfigurer::default());
+    let instance_svc = Arc::new(
+        InstanceService::new(
+            cube.clone(),
+            instances_store.clone(),
+            tokens_store.clone(),
+            "http://swarm.test/llm",
+        )
+        .with_reconfigurer(reconfigurer.clone()),
+    );
     let backup: Arc<dyn BackupSink> = Arc::new(LocalDiskBackupSink::new(cube.clone()));
     let snapshots_store: Arc<dyn SnapshotStore> = Arc::new(
         dyson_swarm::db::snapshots::SqliteSnapshotStore::new(pool.clone()),
@@ -374,6 +413,10 @@ async fn build_stack(subject_for_no_bearer: &str) -> Stack {
         cipher_dir.clone(),
     ));
     std::mem::forget(cache_dir);
+    let skill_marketplace_store = Arc::new(
+        dyson_swarm::db::skill_marketplace::SqlxSkillMarketplaceSourceStore::new(pool.clone()),
+    );
+    let skill_marketplace = Arc::new(SkillMarketplaceService::new(skill_marketplace_store));
     let app_state = http::AppState {
         user_secrets: user_secrets_svc,
         system_secrets: system_secrets_svc,
@@ -396,10 +439,8 @@ async fn build_stack(subject_for_no_bearer: &str) -> Stack {
         webhooks: webhooks_svc,
         shares: shares_svc,
         artefact_cache,
-        state_files,
-        skill_marketplace: Arc::new(
-            dyson_swarm::skill_marketplace::SkillMarketplaceService::empty(),
-        ),
+        state_files: state_files.clone(),
+        skill_marketplace: skill_marketplace.clone(),
         mcp_runtime_socket: None,
     };
     let app = http::router(
@@ -421,6 +462,8 @@ async fn build_stack(subject_for_no_bearer: &str) -> Stack {
         llm: llm_state,
         or_prov,
         users: users_store,
+        skill_marketplace,
+        reconfigurer,
     }
 }
 
@@ -732,9 +775,191 @@ async fn llm_proxy_forwards_path_with_single_v1() {
     );
 }
 
+#[tokio::test]
+async fn skill_install_endpoint_validates_ownership_status_and_collisions() {
+    let stack = build_stack("system-admin").await;
+    let admin = reqwest::Client::new();
+    add_test_marketplace(&stack, "team-skills", "code-review", "1.0.0").await;
+
+    let alice_id = create_user(&admin, &stack.base, "alice-skill", true).await;
+    let bob_id = create_user(&admin, &stack.base, "bob-skill", true).await;
+    let alice_token = mint_api_key(&admin, &stack.base, &alice_id).await;
+    let bob_token = mint_api_key(&admin, &stack.base, &bob_id).await;
+    let instance_id = create_live_instance(&admin, &stack.base, &alice_token).await;
+
+    let install_body = json!({
+        "marketplace": "team-skills",
+        "skill": "code-review",
+        "force": false,
+    });
+    let r = admin
+        .post(format!(
+            "{}/v1/instances/{instance_id}/skills/install",
+            stack.base
+        ))
+        .bearer_auth(&alice_token)
+        .json(&install_body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let installed: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(installed["installed"], true);
+    assert_eq!(installed["version"], "1.0.0");
+    assert!(installed["sha256"].as_str().unwrap().len() == 64);
+    assert_eq!(stack.reconfigurer.installs.lock().unwrap().len(), 1);
+
+    let skills = admin
+        .get(format!("{}/v1/instances/{instance_id}/skills", stack.base))
+        .bearer_auth(&alice_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(skills.status(), 200);
+    let skills: Vec<serde_json::Value> = skills.json().await.unwrap();
+    assert!(skills.iter().any(|row| row["skill"] == "code-review"));
+
+    let r = admin
+        .post(format!(
+            "{}/v1/instances/{instance_id}/skills/install",
+            stack.base
+        ))
+        .bearer_auth(&alice_token)
+        .json(&install_body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 409);
+    let conflict: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(conflict["error"], "already_installed");
+    assert_eq!(conflict["current_version"], "1.0.0");
+
+    let r = admin
+        .post(format!(
+            "{}/v1/instances/{instance_id}/skills/install",
+            stack.base
+        ))
+        .bearer_auth(&alice_token)
+        .json(&json!({
+            "marketplace": "team-skills",
+            "skill": "code-review",
+            "force": true,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(stack.reconfigurer.installs.lock().unwrap().len(), 2);
+
+    let r = admin
+        .post(format!(
+            "{}/v1/instances/{instance_id}/skills/install",
+            stack.base
+        ))
+        .bearer_auth(&alice_token)
+        .json(&json!({
+            "marketplace": "team-skills",
+            "skill": "missing-skill",
+            "force": false,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 404);
+    let missing: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(missing["error"], "skill_not_found");
+
+    let r = admin
+        .post(format!(
+            "{}/v1/instances/{instance_id}/skills/install",
+            stack.base
+        ))
+        .bearer_auth(&bob_token)
+        .json(&install_body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 403);
+
+    let destroyed_id = create_live_instance(&admin, &stack.base, &alice_token).await;
+    let r = admin
+        .delete(format!("{}/v1/instances/{destroyed_id}", stack.base))
+        .bearer_auth(&alice_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 204);
+    let r = admin
+        .post(format!(
+            "{}/v1/instances/{destroyed_id}/skills/install",
+            stack.base
+        ))
+        .bearer_auth(&alice_token)
+        .json(&install_body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 503);
+    let not_live: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(not_live["error"], "instance_not_live");
+}
+
 // ---------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------
+
+async fn add_test_marketplace(stack: &Stack, id: &str, skill: &str, version: &str) {
+    let dir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+    let skill_md = format!(
+        "---\ndescription: Review code changes.\n---\n# Code Review\n\nUse this skill to review patches.\n"
+    );
+    let sha256 = skill_body_sha256(&skill_md);
+    let index_path = dir.path().join("index.json");
+    let index = json!({
+        "schema_version": 1,
+        "marketplace": {
+            "id": id,
+            "name": "Team Skills"
+        },
+        "skills": [{
+            "name": skill,
+            "version": version,
+            "description": "Review code changes.",
+            "tags": ["review", "code"],
+            "license": "MIT",
+            "sha256": sha256,
+            "content": {
+                "type": "inline",
+                "skill_md": skill_md
+            }
+        }]
+    });
+    std::fs::write(&index_path, serde_json::to_vec_pretty(&index).unwrap()).unwrap();
+    stack
+        .skill_marketplace
+        .upsert_source(
+            SkillMarketplaceSourceConfig::File {
+                id: id.to_owned(),
+                path: index_path,
+            },
+            true,
+        )
+        .await
+        .unwrap();
+}
+
+async fn create_live_instance(client: &reqwest::Client, base: &str, token: &str) -> String {
+    let r = client
+        .post(format!("{base}/v1/instances"))
+        .bearer_auth(token)
+        .json(&json!({"template_id": "tpl", "env": {"SWARM_MODEL": "m"}}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 201, "create_live_instance failed");
+    let v: serde_json::Value = r.json().await.unwrap();
+    v["id"].as_str().unwrap().to_string()
+}
 
 async fn create_user(
     client: &reqwest::Client,

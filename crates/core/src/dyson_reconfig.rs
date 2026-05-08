@@ -22,7 +22,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::instance::{
-    DysonReconfigurer, ReconfigureBody, RestoreStateFileBody, configure_secret_name,
+    DysonReconfigurer, InstallSkillBody, InstallSkillResponse, ReconfigureBody,
+    RestoreStateFileBody, configure_secret_name,
 };
 use crate::secrets::SystemSecretsService;
 
@@ -470,6 +471,35 @@ impl DysonReconfigurer for DysonReconfigurerHttp {
             return Err(format!("dyson /api/admin/state/file {status}: {resp_body}"));
         }
         Ok(())
+    }
+
+    async fn install_skill(
+        &self,
+        instance_id: &str,
+        sandbox_id: &str,
+        body: &InstallSkillBody,
+    ) -> Result<InstallSkillResponse, String> {
+        let secret = self.ensure_secret(instance_id).await?;
+        let url = self.admin_url(sandbox_id, "skills/install");
+        let resp = self
+            .http
+            .post(&url)
+            .header(CONFIGURE_HEADER, &secret)
+            .header(CSRF_HEADER, "swarm-internal")
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| format!("send: {e}"))?;
+        let status = resp.status();
+        let resp_body = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(format!(
+                "dyson /api/admin/skills/install {status}: {resp_body}"
+            ));
+        }
+        serde_json::from_str(&resp_body).map_err(|e| {
+            format!("dyson /api/admin/skills/install response parse: {e}: {resp_body}")
+        })
     }
 
     async fn is_idle(&self, instance_id: &str, sandbox_id: &str) -> Result<(bool, u32), String> {

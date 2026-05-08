@@ -914,12 +914,10 @@ async fn skill_install_endpoint_validates_ownership_status_and_collisions() {
 // ---------------------------------------------------------------------
 
 async fn add_test_marketplace(stack: &Stack, id: &str, skill: &str, version: &str) {
-    let dir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
     let skill_md = format!(
         "---\ndescription: Review code changes.\n---\n# Code Review\n\nUse this skill to review patches.\n"
     );
     let sha256 = skill_body_sha256(&skill_md);
-    let index_path = dir.path().join("index.json");
     let index = json!({
         "schema_version": 1,
         "marketplace": {
@@ -939,13 +937,12 @@ async fn add_test_marketplace(stack: &Stack, id: &str, skill: &str, version: &st
             }
         }]
     });
-    std::fs::write(&index_path, serde_json::to_vec_pretty(&index).unwrap()).unwrap();
     stack
         .skill_marketplace
         .upsert_source(
-            SkillMarketplaceSourceConfig::File {
+            SkillMarketplaceSourceConfig::Inline {
                 id: id.to_owned(),
-                path: index_path,
+                index_json: serde_json::to_string_pretty(&index).unwrap(),
             },
             true,
         )

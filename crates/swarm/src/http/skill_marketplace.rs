@@ -556,14 +556,19 @@ fn source_from_admin_body(
     body: AdminPutSkillMarketplaceSourceBody,
 ) -> Result<SkillMarketplaceSourceConfig, SkillMarketplaceError> {
     let source = match body.source_type.trim().to_ascii_lowercase().as_str() {
-        "file" => SkillMarketplaceSourceConfig::File {
+        "inline" => SkillMarketplaceSourceConfig::Inline {
             id,
-            path: body.location.into(),
+            index_json: body.location,
         },
         "http" => SkillMarketplaceSourceConfig::Http {
             id,
             url: body.location,
         },
+        "file" => {
+            return Err(SkillMarketplaceError::Invalid(
+                "file marketplace sources removed for safety; use type: inline".into(),
+            ));
+        }
         other => {
             return Err(SkillMarketplaceError::Invalid(format!(
                 "unsupported marketplace source_type {other:?}"
@@ -684,5 +689,20 @@ mod tests {
     fn installed_marketplace_skills_are_not_republished_as_agent_created() {
         assert!(!is_agent_created_skill(&skill("marketplace")));
         assert!(is_agent_created_skill(&skill("local")));
+    }
+
+    #[test]
+    fn admin_body_rejects_file_marketplace_source_type() {
+        let err = source_from_admin_body(
+            "local".into(),
+            AdminPutSkillMarketplaceSourceBody {
+                source_type: "file".into(),
+                location: "/etc/passwd".into(),
+                enabled: true,
+            },
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("file marketplace sources removed"));
     }
 }

@@ -3,7 +3,6 @@
 //! Swarm owns discovery and validation of shared marketplace indexes; Dyson
 //! owns installing validated `SKILL.md` bodies into its local workspace.
 
-use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use crate::db::skill_marketplace::{SkillMarketplaceSourceRow, SqlxSkillMarketplaceSourceStore};
@@ -19,27 +18,34 @@ const MAX_SKILL_BYTES: usize = 64 * 1024;
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum SkillMarketplaceSourceConfig {
-    File { id: String, path: PathBuf },
+    Inline { id: String, index_json: String },
     Http { id: String, url: String },
 }
 
 impl SkillMarketplaceSourceConfig {
     pub fn id(&self) -> &str {
         match self {
-            Self::File { id, .. } | Self::Http { id, .. } => id,
+            Self::Inline { id, .. } | Self::Http { id, .. } => id,
         }
     }
 
     pub fn source_type(&self) -> &'static str {
         match self {
-            Self::File { .. } => "file",
+            Self::Inline { .. } => "inline",
             Self::Http { .. } => "http",
         }
     }
 
     pub fn location(&self) -> String {
         match self {
-            Self::File { path, .. } => path.display().to_string(),
+            Self::Inline { index_json, .. } => truncate_inline_location(index_json),
+            Self::Http { url, .. } => url.clone(),
+        }
+    }
+
+    pub fn stored_location(&self) -> String {
+        match self {
+            Self::Inline { index_json, .. } => index_json.clone(),
             Self::Http { url, .. } => url.clone(),
         }
     }
@@ -445,11 +451,8 @@ impl SkillMarketplaceService {
         source: &SkillMarketplaceSourceConfig,
     ) -> Result<LoadedIndex, SkillMarketplaceError> {
         let bytes = match source {
-            SkillMarketplaceSourceConfig::File { path, .. } => {
-                let path = expand_tilde(path);
-                tokio::fs::read(&path)
-                    .await
-                    .map_err(|e| SkillMarketplaceError::Io(format!("{}: {e}", path.display())))?
+            SkillMarketplaceSourceConfig::Inline { index_json, .. } => {
+                normalized_inline_index_bytes(index_json)?
             }
             SkillMarketplaceSourceConfig::Http { url, .. } => {
                 let (http, url) = self
@@ -501,18 +504,10 @@ impl SkillMarketplaceService {
         let body = match &package.content {
             SkillPackageContent::Inline { skill_md } => skill_md.clone(),
             SkillPackageContent::Url { url } => match source {
-                SkillMarketplaceSourceConfig::File { path, .. } => {
-                    let root = expand_tilde(path)
-                        .parent()
-                        .map(Path::to_path_buf)
-                        .unwrap_or_else(|| PathBuf::from("."));
-                    let rel = clean_relative_content_path(url)?;
-                    let path = root.join(rel);
-                    let bytes = tokio::fs::read(&path).await.map_err(|e| {
-                        SkillMarketplaceError::Io(format!("{}: {e}", path.display()))
-                    })?;
-                    String::from_utf8(bytes)
-                        .map_err(|e| SkillMarketplaceError::Invalid(format!("utf8: {e}")))?
+                SkillMarketplaceSourceConfig::Inline { .. } => {
+                    return Err(SkillMarketplaceError::Invalid(
+                        "inline marketplace cannot reference external skill content".into(),
+                    ));
                 }
                 SkillMarketplaceSourceConfig::Http { url: index_url, .. } => {
                     let index = reqwest::Url::parse(index_url)
@@ -568,7 +563,7 @@ fn admin_source_view(row: &SkillMarketplaceSourceRow) -> SkillMarketplaceAdminSo
     SkillMarketplaceAdminSourceView {
         id: row.source.id().to_owned(),
         source_type: row.source.source_type().to_owned(),
-        location: row.source.location(),
+        location: row.source.stored_location(),
         enabled: row.enabled,
         created_at: row.created_at,
         updated_at: row.updated_at,
@@ -642,12 +637,16 @@ pub fn validate_marketplace_source_config(
 ) -> Result<(), SkillMarketplaceError> {
     validate_marketplace_id(source.id())?;
     match source {
-        SkillMarketplaceSourceConfig::File { path, .. } => {
-            if path.as_os_str().is_empty() {
-                return Err(SkillMarketplaceError::Invalid(
-                    "file marketplace path is empty".into(),
-                ));
-            }
+        SkillMarketplaceSourceConfig::Inline { index_json, .. } => {
+            let bytes = normalized_inline_index_bytes(index_json)?;
+            let index: MarketplaceIndex = serde_json::from_slice(&bytes).map_err(|e| {
+                SkillMarketplaceError::Invalid(format!(
+                    "inline marketplace index JSON at line {}, column {}: {e}",
+                    e.line(),
+                    e.column()
+                ))
+            })?;
+            validate_index(source, &index)?;
         }
         SkillMarketplaceSourceConfig::Http { url, .. } => {
             let url = reqwest::Url::parse(url)
@@ -660,6 +659,25 @@ pub fn validate_marketplace_source_config(
         }
     }
     Ok(())
+}
+
+fn normalized_inline_index_bytes(index_json: &str) -> Result<Vec<u8>, SkillMarketplaceError> {
+    let normalized = index_json.trim_start_matches('\u{feff}').trim();
+    if normalized.len() > MAX_INDEX_BYTES {
+        return Err(SkillMarketplaceError::Invalid(format!(
+            "index exceeds {MAX_INDEX_BYTES} bytes"
+        )));
+    }
+    Ok(normalized.as_bytes().to_vec())
+}
+
+fn truncate_inline_location(index_json: &str) -> String {
+    let normalized = index_json.trim_start_matches('\u{feff}').trim();
+    let mut out: String = normalized.chars().take(80).collect();
+    if normalized.chars().count() > 80 {
+        out.push('…');
+    }
+    out
 }
 
 fn validate_marketplace_id(id: &str) -> Result<(), SkillMarketplaceError> {
@@ -703,37 +721,6 @@ pub fn validate_skill_body(body: &str) -> Result<(), SkillMarketplaceError> {
         )));
     }
     Ok(())
-}
-
-fn clean_relative_content_path(path: &str) -> Result<PathBuf, SkillMarketplaceError> {
-    let path = Path::new(path);
-    if path.is_absolute() {
-        return Err(SkillMarketplaceError::Invalid(
-            "content path must be relative".into(),
-        ));
-    }
-    let mut out = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::Normal(part) if !part.is_empty() => out.push(part),
-            _ => {
-                return Err(SkillMarketplaceError::Invalid(
-                    "content path must be clean".into(),
-                ));
-            }
-        }
-    }
-    Ok(out)
-}
-
-fn expand_tilde(path: &Path) -> PathBuf {
-    let s = path.to_string_lossy();
-    if let Some(rest) = s.strip_prefix("~/")
-        && let Some(home) = std::env::var_os("HOME")
-    {
-        return PathBuf::from(home).join(rest);
-    }
-    path.to_path_buf()
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -792,22 +779,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn file_marketplace_lists_and_returns_content() {
-        let dir = tempfile::tempdir().unwrap();
+    async fn inline_marketplace_lists_and_returns_content() {
         let skill = "---\ndescription: Review code.\n---\n\nRead the diff.";
         let hash = sha256_hex(skill.as_bytes());
-        std::fs::write(
-            dir.path().join("marketplace.json"),
-            index_json(skill, Some(&hash)),
-        )
-        .unwrap();
         let pool = open_in_memory().await.unwrap();
         let store = Arc::new(SqlxSkillMarketplaceSourceStore::new(pool));
         store
             .upsert(
-                &SkillMarketplaceSourceConfig::File {
+                &SkillMarketplaceSourceConfig::Inline {
                     id: "local".into(),
-                    path: dir.path().join("marketplace.json"),
+                    index_json: index_json(skill, Some(&hash)),
                 },
                 true,
             )
@@ -826,19 +807,13 @@ mod tests {
 
     #[tokio::test]
     async fn disabled_db_sources_do_not_feed_the_catalog() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("marketplace.json"),
-            index_json("body", None),
-        )
-        .unwrap();
         let pool = open_in_memory().await.unwrap();
         let store = Arc::new(SqlxSkillMarketplaceSourceStore::new(pool));
         store
             .upsert(
-                &SkillMarketplaceSourceConfig::File {
+                &SkillMarketplaceSourceConfig::Inline {
                     id: "local".into(),
-                    path: dir.path().join("marketplace.json"),
+                    index_json: index_json("body", None),
                 },
                 false,
             )
@@ -875,13 +850,30 @@ mod tests {
             }],
         };
         let err = validate_index(
-            &SkillMarketplaceSourceConfig::File {
+            &SkillMarketplaceSourceConfig::Inline {
                 id: "local".into(),
-                path: "marketplace.json".into(),
+                index_json: index_json("body", None),
             },
             &idx,
         )
         .unwrap_err();
         assert!(err.to_string().contains("invalid skill name"));
+    }
+
+    #[test]
+    fn validate_inline_rejects_non_json() {
+        let err = validate_marketplace_source_config(&SkillMarketplaceSourceConfig::Inline {
+            id: "local".into(),
+            index_json: "not json".into(),
+        })
+        .unwrap_err();
+
+        assert!(err.to_string().contains("inline marketplace index JSON"));
+    }
+
+    #[test]
+    fn skill_marketplace_module_does_not_read_files() {
+        let source = include_str!("skill_marketplace.rs");
+        assert!(!source.contains(concat!("fs", "::read")));
     }
 }

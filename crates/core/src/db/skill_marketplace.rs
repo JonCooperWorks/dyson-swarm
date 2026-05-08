@@ -3,8 +3,6 @@
 //! Source rows are operator-managed metadata only. Installed skills remain
 //! per-instance Dyson workspace files and flow back through state sync.
 
-use std::path::PathBuf;
-
 use sqlx::{Row, SqlitePool};
 
 use crate::db::map_sqlx;
@@ -48,7 +46,7 @@ impl SqlxSkillMarketplaceSourceStore {
         let mut query = String::from(
             "SELECT id, source_type, location, enabled, created_at, updated_at, last_fetch_at, last_success_at, last_error \
              FROM skill_marketplace_sources \
-             WHERE deleted_at IS NULL",
+             WHERE deleted_at IS NULL AND source_type != 'inline_quarantined'",
         );
         if !include_disabled {
             query.push_str(" AND enabled = 1");
@@ -65,7 +63,7 @@ impl SqlxSkillMarketplaceSourceStore {
         let row = sqlx::query(
             "SELECT id, source_type, location, enabled, created_at, updated_at, last_fetch_at, last_success_at, last_error \
              FROM skill_marketplace_sources \
-             WHERE id = ? AND deleted_at IS NULL",
+             WHERE id = ? AND deleted_at IS NULL AND source_type != 'inline_quarantined'",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -95,7 +93,7 @@ impl SqlxSkillMarketplaceSourceStore {
         )
         .bind(source.id())
         .bind(source.source_type())
-        .bind(source.location())
+        .bind(source.stored_location())
         .bind(enabled)
         .bind(now)
         .bind(now)
@@ -183,9 +181,9 @@ fn source_from_parts(
     location: String,
 ) -> Result<SkillMarketplaceSourceConfig, StoreError> {
     match source_type {
-        "file" => Ok(SkillMarketplaceSourceConfig::File {
+        "inline" => Ok(SkillMarketplaceSourceConfig::Inline {
             id,
-            path: PathBuf::from(location),
+            index_json: location,
         }),
         "http" => Ok(SkillMarketplaceSourceConfig::Http { id, url: location }),
         other => Err(StoreError::Malformed(format!(
@@ -199,10 +197,10 @@ mod tests {
     use super::*;
     use crate::db::open_in_memory;
 
-    fn file_source(id: &str, path: &str) -> SkillMarketplaceSourceConfig {
-        SkillMarketplaceSourceConfig::File {
+    fn inline_source(id: &str, index_json: &str) -> SkillMarketplaceSourceConfig {
+        SkillMarketplaceSourceConfig::Inline {
             id: id.into(),
-            path: PathBuf::from(path),
+            index_json: index_json.into(),
         }
     }
 
@@ -249,25 +247,40 @@ mod tests {
         let pool = open_in_memory().await.unwrap();
         let store = SqlxSkillMarketplaceSourceStore::new(pool);
         store
-            .upsert(&file_source("local", "/tmp/marketplace-v1.json"), true)
+            .upsert(
+                &http_source("local", "https://example.com/marketplace-v1.json"),
+                true,
+            )
             .await
             .unwrap();
         store
-            .upsert(&file_source("local", "/tmp/marketplace-v2.json"), false)
+            .upsert(
+                &http_source("local", "https://example.com/marketplace-v2.json"),
+                false,
+            )
             .await
             .unwrap();
 
         let updated = store.get("local").await.unwrap().unwrap();
-        assert_eq!(updated.source.location(), "/tmp/marketplace-v2.json");
+        assert_eq!(
+            updated.source.location(),
+            "https://example.com/marketplace-v2.json"
+        );
         assert!(!updated.enabled);
 
         assert!(store.delete("local").await.unwrap());
         store
-            .upsert(&file_source("local", "/tmp/marketplace-v3.json"), true)
+            .upsert(
+                &http_source("local", "https://example.com/marketplace-v3.json"),
+                true,
+            )
             .await
             .unwrap();
         let restored = store.get("local").await.unwrap().unwrap();
-        assert_eq!(restored.source.location(), "/tmp/marketplace-v3.json");
+        assert_eq!(
+            restored.source.location(),
+            "https://example.com/marketplace-v3.json"
+        );
         assert!(restored.enabled);
     }
 
@@ -288,7 +301,13 @@ mod tests {
         let pool = open_in_memory().await.unwrap();
         let store = SqlxSkillMarketplaceSourceStore::new(pool);
         store
-            .upsert(&file_source("local", "/tmp/marketplace.json"), true)
+            .upsert(
+                &inline_source(
+                    "local",
+                    r#"{"schema_version":1,"marketplace":{"id":"local","name":"Local"},"skills":[]}"#,
+                ),
+                true,
+            )
             .await
             .unwrap();
         let before = store.get("local").await.unwrap().unwrap().updated_at;

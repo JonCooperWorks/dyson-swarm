@@ -49,6 +49,7 @@ async fn revoke(State(state): State<AppState>, Path(token): Path<String>) -> Sta
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)]
 mod tests {
     use std::sync::Arc;
 

@@ -1,5 +1,7 @@
 //! Shared outbound URL SSRF policy for tenant-supplied upstreams.
 
+#![allow(clippy::disallowed_methods)]
+
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

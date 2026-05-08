@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_methods)]
+
 //! End-to-end walkthrough of the whole orchestration flow against in-process
 //! mocks for Cube and an LLM upstream.
 //!

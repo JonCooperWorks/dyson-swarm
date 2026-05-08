@@ -1,0 +1,4 @@
+disallowed-methods = [
+    { path = "reqwest::Client::new",          reason = "use InternalHttpClient or ExternalHttpClient from core::http" },
+    { path = "reqwest::ClientBuilder::build", reason = "construct via core::http; bare reqwest is how SSRF gets reintroduced" },
+]

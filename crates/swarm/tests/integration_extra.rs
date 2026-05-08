@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_methods)]
+
 //! Integration tests for surfaces that the original `e2e_mock_cube`
 //! walkthrough doesn't cover.  Each test stands up its own swarm using
 //! the same in-process mocks, then exercises one focused behaviour:

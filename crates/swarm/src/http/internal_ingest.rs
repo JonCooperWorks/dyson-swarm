@@ -189,6 +189,7 @@ fn extract_bearer(req: &Request<Body>) -> Option<&str> {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
     use crate::artefacts::ArtefactCacheService;

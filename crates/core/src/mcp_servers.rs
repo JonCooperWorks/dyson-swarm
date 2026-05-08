@@ -1542,6 +1542,7 @@ impl OAuthFlowCache {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)]
 mod tests {
     use std::sync::{
         Arc,

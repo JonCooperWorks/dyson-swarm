@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_methods)]
+
 //! End-to-end test for the anonymous artefact-share flow.
 //!
 //! Stands up swarm in-process with a mock dyson upstream, mints a

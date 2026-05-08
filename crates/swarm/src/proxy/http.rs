@@ -533,6 +533,7 @@ async fn write_audit(state: &ProxyService, entry: AuditEntry) {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
 

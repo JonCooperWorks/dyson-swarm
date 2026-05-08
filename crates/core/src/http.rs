@@ -109,8 +109,8 @@ impl ExternalHttpClient {
         &self,
         validated: &ValidatedOutboundUrl,
     ) -> Result<(reqwest::Client, Url), OutboundUrlError> {
-        let client = shared_defaults(pinned_outbound_client_builder(&validated))
-            .redirect(redirect_pinned_to(&validated))
+        let client = shared_defaults(pinned_outbound_client_builder(validated))
+            .redirect(redirect_pinned_to(validated))
             .build()
             .map_err(|e| OutboundUrlError::Build(e.to_string()))?;
         let url = validated.url.clone();

@@ -16,8 +16,8 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use axum::http::HeaderMap;
+use dyson_swarm_core::http::InternalHttpClient;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
-use reqwest::Client;
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
 use tokio::sync::Mutex;
@@ -59,7 +59,7 @@ impl Default for OidcConfig {
 #[derive(Clone)]
 pub struct OidcAuthenticator {
     cfg: OidcConfig,
-    http: Client,
+    http: InternalHttpClient,
     cache: Arc<Mutex<JwksCache>>,
 }
 
@@ -74,7 +74,7 @@ struct JwksCache {
 
 impl OidcAuthenticator {
     pub fn new(cfg: OidcConfig) -> Result<Self, reqwest::Error> {
-        let http = Client::builder().timeout(Duration::from_secs(5)).build()?;
+        let http = InternalHttpClient::with_timeout(Duration::from_secs(5))?;
         Ok(Self {
             cfg,
             http,
@@ -82,9 +82,9 @@ impl OidcAuthenticator {
         })
     }
 
-    /// Test/builder seam: inject a pre-built reqwest client (e.g. one
+    /// Test/builder seam: inject a pre-built internal client (e.g. one
     /// pointing at a mock IdP).
-    pub fn with_http(mut self, http: Client) -> Self {
+    pub fn with_http(mut self, http: InternalHttpClient) -> Self {
         self.http = http;
         self
     }

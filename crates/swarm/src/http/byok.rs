@@ -318,6 +318,7 @@ async fn delete_byok(
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)]
 mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU16, Ordering};

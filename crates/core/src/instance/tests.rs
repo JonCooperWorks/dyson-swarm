@@ -3963,6 +3963,134 @@ async fn reset_replays_sealed_state_before_enabling_sync() {
 }
 
 #[tokio::test]
+async fn runtime_config_sync_replays_sealed_chats_before_enabling_sync() {
+    let pool = open_in_memory().await.unwrap();
+    let owner = "abbafeed".repeat(4);
+    sqlx::query("INSERT INTO users (id, subject, status, created_at) VALUES (?, ?, 'active', ?)")
+        .bind(&owner)
+        .bind(&owner)
+        .bind(0i64)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let cube = MockCube::new();
+    let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(
+        pool.clone(),
+        crate::db::test_system_cipher(),
+    ));
+    let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(
+        pool.clone(),
+        crate::db::test_system_cipher(),
+    ));
+    let recorder = Arc::new(RecordingReconfigurer::default());
+    let state_root = tempfile::tempdir().unwrap();
+    let keys = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+    let ciphers: Arc<dyn crate::envelope::CipherDirectory> =
+        Arc::new(crate::envelope::AgeCipherDirectory::new(keys.path()).unwrap());
+    let state_files = Arc::new(crate::state_files::StateFileService::new(
+        pool.clone(),
+        state_root.path().into(),
+        ciphers.clone(),
+    ));
+    let user_secrets_store: Arc<dyn crate::traits::UserSecretStore> =
+        Arc::new(crate::db::secrets::SqlxUserSecretStore::new(pool.clone()));
+    let user_secrets = Arc::new(UserSecretsService::new(user_secrets_store, ciphers));
+    let isvc = Arc::new(
+        InstanceService::new(
+            cube.clone(),
+            instances.clone(),
+            tokens,
+            "https://swarm.test/llm",
+        )
+        .with_reconfigurer(recorder.clone())
+        .with_state_files(state_files.clone())
+        .with_mcp_secrets(user_secrets),
+    );
+
+    let src = isvc
+        .create(
+            &owner,
+            CreateRequest {
+                template_id: "tpl-v1".into(),
+                name: Some("live-mirror".into()),
+                task: Some("keep chat history".into()),
+                env: env_with_model(),
+                ttl_seconds: None,
+                network_policy: NetworkPolicy::Open,
+                mcp_servers: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+    recorder.pushed.lock().unwrap().clear();
+    recorder.restored.lock().unwrap().clear();
+    recorder.events.lock().unwrap().clear();
+
+    state_files
+        .ingest(
+            crate::state_files::StateFileMeta {
+                instance_id: &src.id,
+                owner_id: &owner,
+                namespace: "workspace",
+                path: "IDENTITY.md",
+                mime: Some("text/markdown"),
+                updated_at: 1_777_730_000,
+            },
+            b"# IDENTITY.md\n\n- **Name:** live-mirror",
+        )
+        .await
+        .unwrap();
+    state_files
+        .ingest(
+            crate::state_files::StateFileMeta {
+                instance_id: &src.id,
+                owner_id: &owner,
+                namespace: "chats",
+                path: "c-7/transcript.json",
+                mime: Some("application/json"),
+                updated_at: 1_777_730_001,
+            },
+            br#"[{"role":"user","content":"do not vanish"}]"#,
+        )
+        .await
+        .unwrap();
+
+    let (visited, succeeded) = isvc.sync_runtime_config_all().await.unwrap();
+    assert_eq!((visited, succeeded), (1, 1));
+
+    let restored = recorder.restored.lock().unwrap();
+    assert!(
+        restored
+            .iter()
+            .any(|(_, _, b)| b.namespace == "chats" && b.path == "c-7/transcript.json"),
+        "startup/runtime sync must replay mirrored chat transcripts into the live sandbox"
+    );
+    drop(restored);
+
+    let pushed = recorder.pushed.lock().unwrap();
+    assert_eq!(pushed.len(), 1);
+    assert!(
+        pushed[0].2.state_sync_url.is_some() && pushed[0].2.state_sync_token.is_some(),
+        "state sync should be enabled only after replay finishes"
+    );
+    assert!(
+        pushed[0].2.name.is_none() && pushed[0].2.task.is_none(),
+        "post-replay sync configure must not overwrite mirrored IDENTITY.md"
+    );
+    drop(pushed);
+
+    let events = recorder.events.lock().unwrap();
+    assert_eq!(events.last().map(String::as_str), Some("push"));
+    assert!(
+        events[..events.len() - 1]
+            .iter()
+            .all(|event| event.starts_with("restore:")),
+        "all replay calls must happen before configure enables state sync: {events:?}"
+    );
+}
+
+#[tokio::test]
 async fn binary_rotation_replays_sealed_chats_before_enabling_sync() {
     let pool = open_in_memory().await.unwrap();
     let owner = "facefeed".repeat(4);

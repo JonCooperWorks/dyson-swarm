@@ -796,16 +796,32 @@ impl InstanceService {
                     continue;
                 }
             };
-            let body = self
-                .configure_body_for_existing_row(
+            let result = if let Some(state_files) = self.state_files.as_ref() {
+                self.replay_state_files_and_configure(
                     &row.owner_id,
                     row,
-                    &tokens.proxy,
-                    &tokens.ingest,
-                    &tokens.state_sync,
+                    &tokens,
+                    sandbox_id,
+                    state_files,
+                    true,
+                    "runtime-config-sync",
                 )
-                .await;
-            match push_with_retry(reconfigurer.as_ref(), &row.id, sandbox_id, &body).await {
+                .await
+            } else {
+                let body = self
+                    .configure_body_for_existing_row(
+                        &row.owner_id,
+                        row,
+                        &tokens.proxy,
+                        &tokens.ingest,
+                        &tokens.state_sync,
+                    )
+                    .await;
+                push_with_retry(reconfigurer.as_ref(), &row.id, sandbox_id, &body)
+                    .await
+                    .map_err(SwarmError::Internal)
+            };
+            match result {
                 Ok(()) => {
                     succeeded += 1;
                     tracing::debug!(instance = %row.id, "runtime-config-sync: pushed");

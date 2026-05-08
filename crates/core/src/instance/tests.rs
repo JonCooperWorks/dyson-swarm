@@ -3931,34 +3931,42 @@ async fn reset_replays_sealed_state_before_enabling_sync() {
     drop(restored);
 
     let pushed = recorder.pushed.lock().unwrap();
-    assert_eq!(pushed.len(), 1);
+    assert_eq!(pushed.len(), 2);
     assert!(
-        pushed[0].2.state_sync_url.is_some() && pushed[0].2.state_sync_token.is_some(),
+        pushed[0].2.state_sync_url.is_none() && pushed[0].2.state_sync_token.is_none(),
+        "reset must configure paths before replay while state sync is still disabled"
+    );
+    assert!(
+        pushed[1].2.state_sync_url.is_some() && pushed[1].2.state_sync_token.is_some(),
         "state sync should be enabled by the post-replay configure push"
     );
     assert!(
-        pushed[0].2.name.is_none() && pushed[0].2.task.is_none(),
+        pushed
+            .iter()
+            .all(|(_, _, body)| body.name.is_none() && body.task.is_none()),
         "post-replay configure must not overwrite mirrored IDENTITY.md with row metadata"
     );
-    let mcp_block = pushed[0]
-        .2
-        .mcp_servers
-        .as_ref()
-        .expect("post-replay reset configure must preserve attached MCP servers");
-    assert!(
-        mcp_block.contains_key("mcp_massive"),
-        "rendered mcp_servers block must include attached MCP servers, got keys {:?}",
-        mcp_block.keys().collect::<Vec<_>>()
-    );
+    for (_, _, body) in pushed.iter() {
+        let mcp_block = body
+            .mcp_servers
+            .as_ref()
+            .expect("reset configure must preserve attached MCP servers");
+        assert!(
+            mcp_block.contains_key("mcp_massive"),
+            "rendered mcp_servers block must include attached MCP servers, got keys {:?}",
+            mcp_block.keys().collect::<Vec<_>>()
+        );
+    }
     drop(pushed);
 
     let events = recorder.events.lock().unwrap();
+    assert_eq!(events.first().map(String::as_str), Some("push"));
     assert_eq!(events.last().map(String::as_str), Some("push"));
     assert!(
-        events[..events.len() - 1]
+        events[1..events.len() - 1]
             .iter()
             .all(|event| event.starts_with("restore:")),
-        "all replay calls must happen before configure enables state sync: {events:?}"
+        "reset must configure paths, replay state, then configure again to enable state sync: {events:?}"
     );
 }
 

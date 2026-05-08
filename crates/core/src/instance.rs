@@ -535,8 +535,22 @@ impl InstanceService {
         sandbox_id: &str,
         state_files: &crate::state_files::StateFileService,
         allow_unreadable_rows: bool,
+        configure_before_replay: bool,
         operation: &'static str,
     ) -> Result<(), SwarmError> {
+        if configure_before_replay {
+            self.configure_existing_sandbox_for_state_replay(
+                owner_id,
+                source,
+                runtime_tokens,
+                sandbox_id,
+                state_files,
+                false,
+                operation,
+                "before state replay",
+            )
+            .await?;
+        }
         self.replay_state_files_to_sandbox(
             owner_id,
             &source.id,
@@ -545,6 +559,30 @@ impl InstanceService {
             allow_unreadable_rows,
         )
         .await?;
+        self.configure_existing_sandbox_for_state_replay(
+            owner_id,
+            source,
+            runtime_tokens,
+            sandbox_id,
+            state_files,
+            true,
+            operation,
+            "after state replay",
+        )
+        .await
+    }
+
+    async fn configure_existing_sandbox_for_state_replay(
+        &self,
+        owner_id: &str,
+        source: &InstanceRow,
+        runtime_tokens: &RuntimeTokens,
+        sandbox_id: &str,
+        state_files: &crate::state_files::StateFileService,
+        enable_state_sync: bool,
+        operation: &'static str,
+        phase: &'static str,
+    ) -> Result<(), SwarmError> {
         let reconfigurer = self
             .reconfigurer
             .as_ref()
@@ -565,12 +603,14 @@ impl InstanceService {
             state_files,
         )
         .await?;
+        if !enable_state_sync {
+            body.state_sync_url = None;
+            body.state_sync_token = None;
+        }
         push_with_retry(reconfigurer.as_ref(), &source.id, sandbox_id, &body)
             .await
             .map_err(|err| {
-                SwarmError::Internal(format!(
-                    "{operation} configure-push failed after state replay: {err}"
-                ))
+                SwarmError::Internal(format!("{operation} configure-push failed {phase}: {err}"))
             })
     }
 
@@ -804,6 +844,7 @@ impl InstanceService {
                     sandbox_id,
                     state_files,
                     true,
+                    false,
                     "runtime-config-sync",
                 )
                 .await
@@ -1234,6 +1275,7 @@ impl InstanceService {
                     &info.sandbox_id,
                     state_files,
                     true,
+                    false,
                     "rotate",
                 )
                 .await
@@ -1528,6 +1570,7 @@ impl InstanceService {
                     &info.sandbox_id,
                     state_files,
                     false,
+                    true,
                     "recreate",
                 )
                 .await
@@ -1618,6 +1661,7 @@ impl InstanceService {
                 &runtime_tokens,
                 &info.sandbox_id,
                 state_files,
+                true,
                 true,
                 "reset",
             )

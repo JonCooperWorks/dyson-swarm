@@ -111,6 +111,16 @@ describe('parseHashView', () => {
     });
   });
 
+  test('"#/skills/*" routes to marketplace skill details', () => {
+    window.location.hash = '#/skills/team%2Dskills/code%2Dreview';
+    expect(parseHashView()).toEqual({
+      name: 'marketplace-skill-detail',
+      id: null,
+      marketplace: 'team-skills',
+      skill: 'code-review',
+    });
+  });
+
   test('unknown paths fall back to the instances list', () => {
     window.location.hash = '#/something-bogus';
     expect(parseHashView()).toEqual({ name: 'instances', id: null });

@@ -24,7 +24,7 @@ import { TasksListPage, TaskFormPage, AuditListPage, AuditDetailPage } from './t
 import { InstanceArtifactsPage, ArtifactPage } from './artifacts.jsx';
 import { MarkdownBody } from './markdown.jsx';
 import { ShareAccessLogPage } from './shares.jsx';
-import { SkillInventoryList } from './skills.jsx';
+import { InstallSkillModal, SkillInventoryList } from './skills.jsx';
 
 // Links inside task markdown open in a new tab — the task pane is a
 // scratchpad, not a navigation target, and following a link in-place
@@ -2791,6 +2791,7 @@ function SkillsSection({ instance }) {
   const { client } = useApi();
   const cached = useAppState(s => s.skills.byInstance[instance.id] || null);
   const [err, setErr] = React.useState('');
+  const [installOpen, setInstallOpen] = React.useState(false);
 
   React.useEffect(() => {
     let cancelled = false;
@@ -2807,16 +2808,29 @@ function SkillsSection({ instance }) {
 
   return (
     <section className="panel">
-      <div className="panel-title">skills</div>
+      <div className="panel-header">
+        <div className="panel-title">skills</div>
+        <button
+          type="button"
+          className="btn btn-primary btn-sm"
+          onClick={() => setInstallOpen(true)}
+          disabled={instance.status !== 'live'}
+        >
+          Browse marketplace
+        </button>
+      </div>
       {err ? <div className="error">{err}</div> : null}
       {rows === null ? (
         <p className="muted small">loading…</p>
       ) : (
         <SkillInventoryList rows={rows}/>
       )}
-      <p className="muted small" style={{marginTop:12}}>
-        mirrored from this agent's workspace; installable marketplace skills live on the swarm skills page.
-      </p>
+      {installOpen ? (
+        <InstallSkillModal
+          defaultInstanceId={instance.id}
+          onClose={() => setInstallOpen(false)}
+        />
+      ) : null}
     </section>
   );
 }

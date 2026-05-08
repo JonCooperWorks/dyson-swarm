@@ -190,6 +190,20 @@ export class SwarmClient {
     return this._json('/v1/skill-marketplaces/skills', { headers: { Accept: 'application/json' } });
   }
 
+  getMarketplaceSkill(marketplace, skill) {
+    return this._json(
+      `/v1/skill-marketplaces/${encodeURIComponent(marketplace)}/skills/${encodeURIComponent(skill)}`,
+      { headers: { Accept: 'application/json' } },
+    );
+  }
+
+  getMarketplaceSkillContent(marketplace, skill) {
+    return this._json(
+      `/v1/skill-marketplaces/${encodeURIComponent(marketplace)}/skills/${encodeURIComponent(skill)}/content`,
+      { headers: { Accept: 'application/json' } },
+    );
+  }
+
   listSkills() {
     return this._json('/v1/skills', { headers: { Accept: 'application/json' } });
   }
@@ -198,6 +212,17 @@ export class SwarmClient {
     return this._json(
       `/v1/instances/${encodeURIComponent(instanceId)}/skills`,
       { headers: { Accept: 'application/json' } },
+    );
+  }
+
+  installSkillToInstance(instanceId, { marketplace, skill, force = false }) {
+    return this._json(
+      `/v1/instances/${encodeURIComponent(instanceId)}/skills/install`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ marketplace, skill, force: !!force }),
+      },
     );
   }
 

@@ -23,7 +23,7 @@ export function TopBar({ view }) {
   // hiding the navigation surface entirely.
   const onAdminRoute = view?.name === 'admin' || String(view?.name || '').startsWith('admin-');
   const onByokRoute = view?.name === 'byok';
-  const onSkillsRoute = view?.name === 'skills';
+  const onSkillsRoute = view?.name === 'skills' || view?.name === 'marketplace-skill-detail';
   const onArtifactsRoute = view?.name === 'artifacts';
   const onInstancesRoute = !onAdminRoute && !onByokRoute && !onArtifactsRoute && !onSkillsRoute;
   const showAdminLink = auth?.mode === 'oidc' || auth?.mode === 'none';

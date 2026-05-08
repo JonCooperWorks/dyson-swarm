@@ -41,6 +41,7 @@ const initial = {
   // per-agent skills page with the same swept workspace inventory.
   skills: {
     byInstance: {},
+    catalog: { data: null, loadedAt: 0 },
   },
 };
 
@@ -211,6 +212,19 @@ export function setSkillsFor(instanceId, rows) {
   }));
 }
 
+export function setMarketplaceCatalog(catalog) {
+  store.dispatch(s => ({
+    ...s,
+    skills: {
+      ...s.skills,
+      catalog: {
+        data: catalog || { skills: [], sources: [], errors: [] },
+        loadedAt: Date.now(),
+      },
+    },
+  }));
+}
+
 // ─── hash routing ──────────────────────────────────────────────────
 //
 // Hash paths the SPA understands (mirrors what Dyson does — keeps a
@@ -229,6 +243,7 @@ export function setSkillsFor(instanceId, rows) {
 //   #/i/<id>/shares…            → shared links
 //   #/new                       → dedicated hire page (replaces the old CreateModal)
 //   #/skills                    → marketplace catalog + fleet skill inventory
+//   #/skills/<market>/<skill>   → marketplace skill detail
 //   #/admin                     → admin (users, proxy tokens)
 //
 // Anything else falls back to the list.  Order matters: every
@@ -313,6 +328,13 @@ export function parseHashView() {
   }
   if (h.startsWith('#/admin')) return { name: 'admin', id: null };
   if (h.startsWith('#/keys')) return { name: 'byok', id: null };
+  const marketplaceSkill = h.match(/^#\/skills\/([^/?#]+)\/([^/?#]+)/);
+  if (marketplaceSkill) return {
+    name: 'marketplace-skill-detail',
+    id: null,
+    marketplace: decodeURIComponent(marketplaceSkill[1]),
+    skill: decodeURIComponent(marketplaceSkill[2]),
+  };
   if (h.startsWith('#/skills')) return { name: 'skills', id: null };
   if (h.startsWith('#/artifacts')) return { name: 'artifacts', id: null };
   return { name: 'instances', id: null };

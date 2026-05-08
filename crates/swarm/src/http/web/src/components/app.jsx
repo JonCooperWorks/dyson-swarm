@@ -15,7 +15,7 @@ import { InstancesView, NewInstancePage } from './instances.jsx';
 import { AdminView } from './admin.jsx';
 import { ByokView } from './byok.jsx';
 import { MyArtifactsPage } from './artifacts.jsx';
-import { SkillsPage } from './skills.jsx';
+import { MarketplaceSkillDetailPage, SkillsPage } from './skills.jsx';
 
 export function App() {
   const view = useAppState(s => s.meta.view);
@@ -68,6 +68,8 @@ function renderView(view) {
       return <MyArtifactsPage/>;
     case 'skills':
       return <SkillsPage/>;
+    case 'marketplace-skill-detail':
+      return <MarketplaceSkillDetailPage view={view}/>;
     case 'admin':
     case 'admin-mcp-catalog-new':
     case 'admin-mcp-catalog-edit':

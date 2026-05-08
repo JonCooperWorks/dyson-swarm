@@ -202,13 +202,29 @@ describe('SwarmClient', () => {
 
     await client.listSkillMarketplaces();
     await client.listMarketplaceSkills();
+    await client.getMarketplaceSkill('team/skills', 'code/review');
+    await client.getMarketplaceSkillContent('team/skills', 'code/review');
     await client.listSkills();
     await client.listInstanceSkills('inst/1');
+    await client.installSkillToInstance('inst/1', {
+      marketplace: 'team/skills',
+      skill: 'code/review',
+      force: true,
+    });
 
     expect(fetchImpl.mock.calls[0][0]).toBe('/v1/skill-marketplaces');
     expect(fetchImpl.mock.calls[1][0]).toBe('/v1/skill-marketplaces/skills');
-    expect(fetchImpl.mock.calls[2][0]).toBe('/v1/skills');
-    expect(fetchImpl.mock.calls[3][0]).toBe('/v1/instances/inst%2F1/skills');
+    expect(fetchImpl.mock.calls[2][0]).toBe('/v1/skill-marketplaces/team%2Fskills/skills/code%2Freview');
+    expect(fetchImpl.mock.calls[3][0]).toBe('/v1/skill-marketplaces/team%2Fskills/skills/code%2Freview/content');
+    expect(fetchImpl.mock.calls[4][0]).toBe('/v1/skills');
+    expect(fetchImpl.mock.calls[5][0]).toBe('/v1/instances/inst%2F1/skills');
+    expect(fetchImpl.mock.calls[6][0]).toBe('/v1/instances/inst%2F1/skills/install');
+    expect(fetchImpl.mock.calls[6][1].method).toBe('POST');
+    expect(JSON.parse(fetchImpl.mock.calls[6][1].body)).toEqual({
+      marketplace: 'team/skills',
+      skill: 'code/review',
+      force: true,
+    });
   });
 
   test('204 No Content returns null instead of throwing on JSON parse', async () => {

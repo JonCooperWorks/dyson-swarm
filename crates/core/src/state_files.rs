@@ -77,6 +77,7 @@ impl StateFileService {
     ) -> Result<StateFileRow, StateFileError> {
         validate_namespace(meta.namespace)?;
         validate_relative_path(meta.path)?;
+        validate_body(meta.namespace, meta.path, body)?;
         let body_path = relative_body_path(meta.instance_id, meta.namespace, meta.path)?;
         let cipher = self
             .ciphers
@@ -261,6 +262,19 @@ fn validate_relative_path(path: &str) -> Result<(), StateFileError> {
     Ok(())
 }
 
+pub fn is_zero_byte_chat_transcript(namespace: &str, path: &str, body: &[u8]) -> bool {
+    namespace == "chats" && path.ends_with("/transcript.json") && body.is_empty()
+}
+
+fn validate_body(namespace: &str, path: &str, body: &[u8]) -> Result<(), StateFileError> {
+    if is_zero_byte_chat_transcript(namespace, path, body) {
+        return Err(StateFileError::Invalid(
+            "zero-byte chat transcript rejected".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn relative_body_path(
     instance_id: &str,
     namespace: &str,
@@ -320,6 +334,18 @@ mod tests {
         assert!(stored.starts_with(AGE_ARMOR_PREFIX));
         assert_eq!(svc.read_body(&row).await.unwrap().unwrap(), b"");
         assert_eq!(row.bytes, 0);
+    }
+
+    #[tokio::test]
+    async fn rejects_zero_byte_chat_transcripts() {
+        let (svc, _tmp, _keys) = svc().await;
+        let mut chat_meta = meta("c-1/transcript.json");
+        chat_meta.namespace = "chats";
+        chat_meta.mime = Some("application/json");
+
+        let err = svc.ingest(chat_meta, b"").await.unwrap_err();
+
+        assert!(matches!(err, StateFileError::Invalid(_)));
     }
 
     #[tokio::test]

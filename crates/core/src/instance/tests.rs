@@ -3988,6 +3988,7 @@ async fn runtime_config_sync_replays_sealed_chats_before_enabling_sync() {
     let keys = Box::leak(Box::new(tempfile::tempdir().unwrap()));
     let ciphers: Arc<dyn crate::envelope::CipherDirectory> =
         Arc::new(crate::envelope::AgeCipherDirectory::new(keys.path()).unwrap());
+    let ciphers_for_zero = ciphers.clone();
     let state_files = Arc::new(crate::state_files::StateFileService::new(
         pool.clone(),
         state_root.path().into(),
@@ -4055,6 +4056,41 @@ async fn runtime_config_sync_replays_sealed_chats_before_enabling_sync() {
         )
         .await
         .unwrap();
+    let zero_path = "c-empty/transcript.json";
+    let zero_body_path = format!(
+        "state/{}/chats/{}.body",
+        src.id,
+        base64::Engine::encode(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+            zero_path.as_bytes(),
+        )
+    );
+    let zero_body_abs = state_root.path().join(&zero_body_path);
+    if let Some(parent) = zero_body_abs.parent() {
+        tokio::fs::create_dir_all(parent).await.unwrap();
+    }
+    let sealed_zero = ciphers_for_zero
+        .for_user(&owner)
+        .unwrap()
+        .seal(b"")
+        .unwrap();
+    tokio::fs::write(&zero_body_abs, sealed_zero).await.unwrap();
+    crate::db::state_files::upsert(
+        &pool,
+        crate::db::state_files::UpsertSpec {
+            instance_id: &src.id,
+            owner_id: &owner,
+            namespace: "chats",
+            path: zero_path,
+            mime: Some("application/json"),
+            bytes: 0,
+            body_path: &zero_body_path,
+            updated_at: 1_777_730_002,
+            synced_at: 1_777_730_002,
+        },
+    )
+    .await
+    .unwrap();
 
     let (visited, succeeded) = isvc.sync_runtime_config_all().await.unwrap();
     assert_eq!((visited, succeeded), (1, 1));
@@ -4065,6 +4101,12 @@ async fn runtime_config_sync_replays_sealed_chats_before_enabling_sync() {
             .iter()
             .any(|(_, _, b)| b.namespace == "chats" && b.path == "c-7/transcript.json"),
         "startup/runtime sync must replay mirrored chat transcripts into the live sandbox"
+    );
+    assert!(
+        !restored
+            .iter()
+            .any(|(_, _, b)| b.namespace == "chats" && b.path == zero_path),
+        "runtime sync must not replay invalid zero-byte chat transcripts"
     );
     drop(restored);
 

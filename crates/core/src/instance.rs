@@ -1713,6 +1713,19 @@ impl InstanceService {
                         return Err(SwarmError::Internal(format!("open state file: {e}")));
                     }
                 };
+                if crate::state_files::is_zero_byte_chat_transcript(
+                    &row.namespace,
+                    &row.path,
+                    &plain,
+                ) {
+                    tracing::warn!(
+                        instance = %instance_id,
+                        namespace = %row.namespace,
+                        path = %row.path,
+                        "state-replay: skipping zero-byte chat transcript mirror row"
+                    );
+                    continue;
+                }
                 (false, Some(B64.encode(plain)))
             };
             let body = RestoreStateFileBody {

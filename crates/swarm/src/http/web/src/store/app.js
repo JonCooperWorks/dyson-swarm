@@ -235,17 +235,6 @@ export function setSkillsFor(instanceId, rows) {
 // subroute is a strict prefix of the detail pattern, so all of them
 // must match BEFORE the bare `#/i/<id>` rule.
 
-const SECTION_VIEW_NAMES = {
-  identity: 'instance-identity',
-  model: 'instance-model',
-  network: 'instance-network',
-  tools: 'instance-tools',
-  mcp: 'instance-mcp',
-  snapshots: 'instance-snapshots',
-  runtime: 'instance-runtime',
-  skills: 'instance-skills',
-};
-
 export function parseHashView() {
   if (typeof window === 'undefined') return { name: 'instances', id: null };
   const h = routeHashFromLocation(window.location);
@@ -293,7 +282,8 @@ export function parseHashView() {
   if (section) {
     const id = decodeURIComponent(section[1]);
     const slug = decodeURIComponent(section[2]);
-    if (SECTION_VIEW_NAMES[slug]) return { name: SECTION_VIEW_NAMES[slug], id };
+    const sectionView = sectionViewName(slug);
+    if (sectionView) return { name: sectionView, id };
     if (slug === 'edit') return { name: 'instance-identity', id };
   }
   const m = h.match(/^#\/i\/([^/?#]+)/);
@@ -326,4 +316,27 @@ export function parseHashView() {
   if (h.startsWith('#/skills')) return { name: 'skills', id: null };
   if (h.startsWith('#/artifacts')) return { name: 'artifacts', id: null };
   return { name: 'instances', id: null };
+}
+
+function sectionViewName(slug) {
+  switch (slug) {
+    case 'identity':
+      return 'instance-identity';
+    case 'model':
+      return 'instance-model';
+    case 'network':
+      return 'instance-network';
+    case 'tools':
+      return 'instance-tools';
+    case 'mcp':
+      return 'instance-mcp';
+    case 'snapshots':
+      return 'instance-snapshots';
+    case 'runtime':
+      return 'instance-runtime';
+    case 'skills':
+      return 'instance-skills';
+    default:
+      return null;
+  }
 }

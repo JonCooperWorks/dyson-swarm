@@ -19,6 +19,8 @@ pub mod envelope;
 #[cfg(feature = "full")]
 pub mod error;
 #[cfg(feature = "full")]
+pub mod http;
+#[cfg(feature = "full")]
 pub mod instance;
 #[cfg(feature = "full")]
 pub mod instance_client;

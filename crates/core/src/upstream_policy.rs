@@ -43,6 +43,8 @@ pub enum OutboundUrlError {
     CachedAddrsMissing,
     #[error("internal upstreams are disabled")]
     InternalNotAllowed,
+    #[error("build outbound HTTP client: {0}")]
+    Build(String),
 }
 
 #[derive(Debug, Clone)]

@@ -100,6 +100,33 @@
   padding-inline: clamp(16px, 4vw, 48px);
 }
 
+.admin-catalog-page-wide {
+  max-width: none;
+  width: 100%;
+}
+
+.admin-catalog-page-wide .admin-catalog-form-panel,
+.admin-catalog-page-wide .admin-skill-marketplace-form-panel {
+  max-width: none;
+  width: 100%;
+}
+
+.admin-catalog-page-wide .form.admin-catalog-form {
+  max-width: 1400px;
+  margin: 0 auto;
+}
+
+.admin-catalog-page-wide .field input[type="text"],
+.admin-catalog-page-wide .field input:not([type]),
+.admin-catalog-page-wide .field select {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.admin-catalog-page-wide .field textarea {
+  width: 100%;
+}
+
 .admin-catalog-page-subtitle {
   margin: 6px 0 0;
 }

@@ -231,6 +231,24 @@ describe('AdminView Docker MCP catalog', () => {
     expect(client.adminPutSkillMarketplaceSource).not.toHaveBeenCalled();
   });
 
+  test('SkillMarketplaceEditorPage renders with the wide admin catalog class', async () => {
+    const client = {
+      adminListUsers: vi.fn().mockResolvedValue([]),
+      adminPutSkillMarketplaceSource: vi.fn(),
+    };
+
+    render(
+      <ApiProvider client={client} auth={{ mode: 'none' }}>
+        <AdminView view={{ name: 'admin-skill-marketplace-new' }}/>
+      </ApiProvider>,
+    );
+
+    expect(await screen.findByRole('heading', { name: 'add skill marketplace' }))
+      .toBeInTheDocument();
+    expect(document.querySelector('main.admin-catalog-page'))
+      .toHaveClass('admin-catalog-page-wide');
+  });
+
   test('links add and edit actions to dedicated catalog pages', async () => {
     const client = {
       adminListUsers: vi.fn().mockResolvedValue([]),
@@ -501,6 +519,27 @@ describe('AdminView Docker MCP catalog', () => {
 
     expect(client.adminPutMcpDockerCatalogServer).not.toHaveBeenCalled();
     expect(screen.getByText(/Expected property name/)).toBeInTheDocument();
+  });
+
+  test('DockerCatalogEditorPage renders with the wide admin catalog class', async () => {
+    const client = {
+      adminListUsers: vi.fn().mockResolvedValue([]),
+      adminRevokeProxyToken: vi.fn(),
+      adminListMcpDockerCatalog: vi.fn().mockResolvedValue({ allow_raw_json: false, servers: [] }),
+      adminPutMcpDockerCatalogServer: vi.fn(),
+      adminDeleteMcpDockerCatalogServer: vi.fn(),
+    };
+
+    render(
+      <ApiProvider client={client} auth={{ mode: 'none' }}>
+        <AdminView view={{ name: 'admin-mcp-catalog-new' }}/>
+      </ApiProvider>,
+    );
+
+    expect(await screen.findByRole('heading', { name: 'add Docker MCP template' }))
+      .toBeInTheDocument();
+    expect(document.querySelector('main.admin-catalog-page'))
+      .toHaveClass('admin-catalog-page-wide');
   });
 
   test('shows pending Docker MCP requests in the same catalog panel', async () => {

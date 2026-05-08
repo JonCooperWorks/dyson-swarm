@@ -382,7 +382,7 @@ function SkillMarketplaceSourceEditorPage({ client, mode, marketplaceId }) {
   };
 
   return (
-    <main className="admin-pane admin-catalog-page">
+    <main className="admin-pane admin-catalog-page admin-catalog-page-wide">
       <header className="admin-header">
         <div>
           <h2>{isEdit ? `edit ${marketplaceId}` : 'add skill marketplace'}</h2>
@@ -595,7 +595,7 @@ function DockerCatalogEditorPage({ client, mode, catalogId }) {
   };
 
   return (
-    <main className="admin-pane admin-catalog-page">
+    <main className="admin-pane admin-catalog-page admin-catalog-page-wide">
       <header className="admin-header">
         <div>
           <h2>{isEdit ? `edit ${catalogId}` : 'add Docker MCP template'}</h2>

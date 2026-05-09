@@ -609,6 +609,7 @@ mod tests {
                 name: String::new(),
                 task: String::new(),
                 cube_sandbox_id: Some("sb-1".into()),
+                state_generation: String::new(),
                 template_id: "t".into(),
                 status: InstanceStatus::Live,
                 bearer_token: "b".into(),

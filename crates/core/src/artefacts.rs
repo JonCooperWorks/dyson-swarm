@@ -1,4 +1,4 @@
-//! Swarm-side write-through cache for dyson artefacts.
+//! Swarm-side durable store for dyson artefacts.
 //!
 //! The cache backs two surfaces:
 //!
@@ -9,32 +9,22 @@
 //!   so a user can browse and (later) decide-to-share without each
 //!   request fanning out to the still-live cube.
 //!
-//! Bytes live on the local filesystem under `<cache_root>/artefacts/`
-//! to keep large bodies (PDFs, generated images) out of SQLite where
-//! a 4 MiB BLOB cap would matter.  Metadata lives in `artefact_cache`
-//! (see `db::artefacts`).  The two are kept in sync by the upsert →
-//! write-bytes → update-body sequence in `ingest`: a partial failure
-//! after the metadata insert leaves the row pointing at a `body_path`
-//! we may or may not have created — the next ingest call will
-//! overwrite the on-disk body and clear the inconsistency, and the
-//! read paths fall back to the live cube on a missing-file miss.
+//! Metadata and sealed bytes both live in `artefact_cache` (see
+//! `db::artefacts`). The agent sandbox disk can keep scratch copies,
+//! but the durable artefact source of truth is the swarm store.
 
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use sqlx::SqlitePool;
-use tokio::fs;
-use tokio::io::AsyncWriteExt;
 
 use crate::db::artefacts::{self as store, CachedArtefact};
 use crate::envelope::CipherDirectory;
 use crate::error::StoreError;
 use crate::webhooks::AGE_ARMOR_PREFIX;
 
-/// Errors surfaced by the cache service.  Distinguished from
-/// `StoreError` so callers can react differently on disk failure
-/// (degrade to "no cache, fall through to upstream") vs DB failure
-/// (5xx).
+/// Errors surfaced by the artefact service. Distinguished from
+/// `StoreError` so callers can react differently on invalid ids vs DB
+/// or seal/open failure.
 #[derive(Debug, thiserror::Error)]
 pub enum CacheError {
     #[error(transparent)]
@@ -51,20 +41,15 @@ impl From<std::io::Error> for CacheError {
     }
 }
 
-/// Service handle.  Cheap to clone — `pool` is an `Arc` inside, `root`
-/// is a `PathBuf` we just clone on each call, and `ciphers` is an
-/// `Arc` to a directory.
+/// Service handle. Cheap to clone — `pool` is an `Arc` inside and
+/// `ciphers` is an `Arc` to a directory.
 ///
 /// Bodies are sealed under the row's `owner_id` cipher before they hit
-/// disk, so a stolen `local_cache_dir` alone doesn't expose historical
-/// artefact contents — an attacker would also need the per-user age
-/// keys (kept outside the cache root).  Pre-encryption rows on disk
-/// (legacy, no age armor header) open as-is so existing caches stay
-/// readable.  Same posture as `WebhookService::open_audit_body`.
+/// the store, so DB snapshots without the per-user age keys do not
+/// expose historical artefact contents.
 #[derive(Clone)]
 pub struct ArtefactCacheService {
     pool: SqlitePool,
-    root: PathBuf,
     ciphers: Arc<dyn CipherDirectory>,
 }
 
@@ -86,29 +71,10 @@ pub struct IngestMeta<'a> {
 }
 
 impl ArtefactCacheService {
-    /// Wire the service to a pool, a root directory, and the per-user
-    /// cipher directory used to seal bodies at rest.  The root is
-    /// created on first ingest (lazy) — failing fast at startup would
-    /// prevent the swarm from booting on a host where the cache dir
-    /// is on a still-mounting volume, which we'd rather not.
-    pub fn new(pool: SqlitePool, root: PathBuf, ciphers: Arc<dyn CipherDirectory>) -> Self {
-        Self {
-            pool,
-            root,
-            ciphers,
-        }
-    }
-
-    pub fn root(&self) -> &Path {
-        &self.root
-    }
-
-    /// Filesystem path to a row's body.  Joins `root` with the row's
-    /// stored relative `body_path`.  Useful for the few callers that
-    /// want to mmap or stream the file rather than read it into
-    /// memory through `read_body`.
-    pub fn body_path_for(&self, row: &CachedArtefact) -> PathBuf {
-        self.root.join(&row.body_path)
+    /// Wire the service to a pool and the per-user cipher directory
+    /// used to seal bodies at rest.
+    pub fn new(pool: SqlitePool, ciphers: Arc<dyn CipherDirectory>) -> Self {
+        Self { pool, ciphers }
     }
 
     /// Fetch a cached row by identity tuple.  Misses return
@@ -122,30 +88,23 @@ impl ArtefactCacheService {
         Ok(store::find(&self.pool, instance_id, chat_id, artefact_id).await?)
     }
 
-    /// Read the body bytes from disk.  Returns `Ok(None)` if the row
-    /// exists but the on-disk body is gone (mid-write crash, manual
-    /// cache wipe, etc.) — the read path treats this the same as a
-    /// row miss and falls through to the live cube.
-    ///
-    /// Sealed bodies (age armor prefix) open via the row's owner
-    /// cipher.  Legacy bodies (pre-encryption rows: no armor header)
-    /// pass through unchanged so existing caches stay readable.  A
-    /// sealed body that fails to decrypt (key rotated, file tampered)
-    /// returns `Ok(None)` plus a warn log — same posture as
-    /// `WebhookService::open_audit_body` — so the read path falls
-    /// through to the live cube instead of returning ciphertext.
+    /// Read the body bytes from the swarm store. Returns `Ok(None)` if
+    /// the row is metadata-only or the sealed body cannot be opened.
     pub async fn read_body(&self, row: &CachedArtefact) -> Result<Option<Vec<u8>>, CacheError> {
-        let path = self.body_path_for(row);
-        let bytes = match fs::read(&path).await {
-            Ok(bytes) => bytes,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(e.into()),
+        let bytes = match row.body_ciphertext.as_deref() {
+            Some(bytes) => bytes,
+            None => return Ok(None),
         };
+        if bytes.is_empty() {
+            return Ok(Some(Vec::new()));
+        }
         if !bytes.starts_with(AGE_ARMOR_PREFIX) {
-            // Legacy body written before encryption shipped — surface
-            // as-is so historical caches stay readable.  Empty bodies
-            // also land here (zero-length file → no armor prefix).
-            return Ok(Some(bytes));
+            tracing::warn!(
+                artefact = %row.artefact_id,
+                owner = %row.owner_id,
+                "artefact store: refusing unsealed body",
+            );
+            return Ok(None);
         }
         let cipher = match self.ciphers.for_user(&row.owner_id) {
             Ok(c) => c,
@@ -159,7 +118,7 @@ impl ArtefactCacheService {
                 return Ok(None);
             }
         };
-        match cipher.open(&bytes) {
+        match cipher.open(bytes) {
             Ok(plain) => Ok(Some(plain)),
             Err(e) => {
                 tracing::warn!(
@@ -225,11 +184,9 @@ impl ArtefactCacheService {
         Ok(store::list_for_owner_page(&self.pool, owner_id, limit, offset).await?)
     }
 
-    /// Delete a cached row + its on-disk body.  Owner-scoped: returns
+    /// Delete a cached row + its stored body. Owner-scoped: returns
     /// `Ok(false)` if the row didn't exist or wasn't theirs (no oracle
-    /// for cross-tenant probing).  Body removal is best-effort — a
-    /// stale file is harmless once the row is gone (the read paths
-    /// look up by tuple).
+    /// for cross-tenant probing).
     pub async fn delete(
         &self,
         owner_id: &str,
@@ -237,34 +194,19 @@ impl ArtefactCacheService {
         chat_id: &str,
         artefact_id: &str,
     ) -> Result<bool, CacheError> {
-        // Look up the body_path before deleting the row so we can
-        // unlink the file regardless of which delete leg ran first.
-        if let Some(row) = store::find(&self.pool, instance_id, chat_id, artefact_id).await?
-            && row.owner_id == owner_id
-        {
-            let abs = self.root.join(&row.body_path);
-            let _ = fs::remove_file(&abs).await;
-        }
         Ok(store::delete(&self.pool, owner_id, instance_id, chat_id, artefact_id).await?)
     }
 
-    /// Upsert the metadata row and (when `body` is `Some`) write the
-    /// body bytes to disk under the row's `body_path`, then promote
-    /// the row's bytes/mime fields to point at the freshly-written
-    /// body.  Idempotent — calling twice with the same args produces
-    /// the same on-disk state.
-    ///
-    /// Sequencing: metadata first so a body-write crash doesn't leave
-    /// a parent dir without a row to point at; body next; row promoted
-    /// last so a reader sees the new mime/bytes only after the file
-    /// is fully landed.
+    /// Upsert the metadata row and, when `body` is `Some`, seal and
+    /// store the body bytes in the same swarm row. Idempotent: calling
+    /// twice with the same args produces the same durable state.
     pub async fn ingest(
         &self,
         meta: IngestMeta<'_>,
         body: Option<&[u8]>,
     ) -> Result<CachedArtefact, CacheError> {
-        let body_path = relative_body_path(meta.instance_id, meta.chat_id, meta.artefact_id)?;
-        let (id, existing_path) = store::upsert_meta(
+        validate_tuple(meta.instance_id, meta.chat_id, meta.artefact_id)?;
+        let id = store::upsert_meta(
             &self.pool,
             store::UpsertSpec {
                 instance_id: meta.instance_id,
@@ -274,25 +216,19 @@ impl ArtefactCacheService {
                 kind: meta.kind,
                 title: meta.title,
                 created_at: meta.created_at,
-                body_path_seed: &body_path,
                 metadata_json: meta.metadata_json,
             },
         )
         .await?;
-        // First-insert seeds the row with our path; subsequent calls
-        // get back the previous body_path.  Either way `existing_path`
-        // is what we should write the body under.
-        let target_rel = existing_path;
 
         if let Some(bytes) = body {
-            // Seal under the owner's age cipher before disk write.
+            // Seal under the owner's age cipher before store write.
             // `body_size` (the `bytes` field on the row) reflects the
             // *plaintext* length so listings stay meaningful without
-            // decryption.  Empty bodies skip the seal — write a zero-
-            // length file so the read path's "row exists, no body"
-            // branch sees an empty body rather than a stale ciphertext.
+            // decryption. Empty bodies are stored as a present empty
+            // blob, distinct from metadata-only `NULL`.
             let plain_len = i64::try_from(bytes.len()).unwrap_or(i64::MAX);
-            let on_disk = if bytes.is_empty() {
+            let stored_body = if bytes.is_empty() {
                 Vec::new()
             } else {
                 let cipher = self
@@ -303,46 +239,16 @@ impl ArtefactCacheService {
                     .seal(bytes)
                     .map_err(|e| CacheError::Io(format!("seal: {e}")))?
             };
-            self.write_body(&target_rel, &on_disk).await?;
-            store::update_body(&self.pool, id, &target_rel, plain_len, meta.mime).await?;
+            store::update_body(&self.pool, id, plain_len, meta.mime, &stored_body).await?;
         }
         let row = store::find(&self.pool, meta.instance_id, meta.chat_id, meta.artefact_id)
             .await?
             .ok_or_else(|| CacheError::Io("ingested row vanished".into()))?;
         Ok(row)
     }
-
-    async fn write_body(&self, rel_path: &str, bytes: &[u8]) -> Result<(), CacheError> {
-        let abs = self.root.join(rel_path);
-        if let Some(parent) = abs.parent() {
-            fs::create_dir_all(parent).await?;
-        }
-        // Write to a sibling temp file then rename, so a reader that
-        // opens the path mid-ingest either sees the old body or the
-        // new one — never a torn write.
-        let tmp = abs.with_extension("body.tmp");
-        let mut f = fs::File::create(&tmp).await?;
-        f.write_all(bytes).await?;
-        f.sync_all().await?;
-        drop(f);
-        fs::rename(&tmp, &abs).await?;
-        Ok(())
-    }
 }
 
-/// Build the relative body path for a (instance, chat, artefact)
-/// tuple.  The shape is intentionally short and predictable so an
-/// operator can `ls` a chat's bodies; we don't sharded-prefix yet
-/// because the row count per chat stays small (< ~100) in practice.
-///
-/// All three components have already passed through the swarm's
-/// `safe_store_id`-style validation upstream — they're constrained to
-/// `[A-Za-z0-9_-]` — so plain joining is safe (no `..` traversal).
-fn relative_body_path(
-    instance_id: &str,
-    chat_id: &str,
-    artefact_id: &str,
-) -> Result<String, CacheError> {
+fn validate_tuple(instance_id: &str, chat_id: &str, artefact_id: &str) -> Result<(), CacheError> {
     for (label, value) in [
         ("instance_id", instance_id),
         ("chat_id", chat_id),
@@ -354,9 +260,7 @@ fn relative_body_path(
             )));
         }
     }
-    Ok(format!(
-        "artefacts/{instance_id}/{chat_id}/{artefact_id}.body"
-    ))
+    Ok(())
 }
 
 fn safe_component(value: &str) -> bool {
@@ -378,18 +282,15 @@ mod tests {
     use super::*;
     use crate::db::open_in_memory;
 
-    /// Build a service backed by an in-memory pool, a tempdir for
-    /// bodies, and an `AgeCipherDirectory` rooted in another tempdir
-    /// (so each test gets its own keyring).  The keys tempdir is held
-    /// alongside the body tempdir — both must outlive the service.
-    async fn svc() -> (ArtefactCacheService, tempfile::TempDir, tempfile::TempDir) {
+    /// Build a service backed by an in-memory pool and an
+    /// `AgeCipherDirectory` rooted in a tempdir.
+    async fn svc() -> (ArtefactCacheService, tempfile::TempDir) {
         let pool = open_in_memory().await.unwrap();
-        let dir = tempfile::tempdir().unwrap();
         let keys = tempfile::tempdir().unwrap();
         let ciphers: Arc<dyn CipherDirectory> =
             Arc::new(crate::envelope::AgeCipherDirectory::new(keys.path()).unwrap());
-        let svc = ArtefactCacheService::new(pool, dir.path().to_path_buf(), ciphers);
-        (svc, dir, keys)
+        let svc = ArtefactCacheService::new(pool, ciphers);
+        (svc, keys)
     }
 
     /// `AgeCipherDirectory::for_user` requires a 32-hex user id (or the
@@ -416,7 +317,7 @@ mod tests {
 
     #[tokio::test]
     async fn ingest_writes_body_and_metadata() {
-        let (svc, _tmp, _keys) = svc().await;
+        let (svc, _keys) = svc().await;
         let row = svc
             .ingest(meta("inst-a", ALICE, "c1", "a1"), Some(b"hello"))
             .await
@@ -431,7 +332,7 @@ mod tests {
     async fn ingest_metadata_only_does_not_clobber_body() {
         // The whole point of the cache is that "I just need to refresh
         // the title" doesn't blow away a still-good body.
-        let (svc, _tmp, _keys) = svc().await;
+        let (svc, _keys) = svc().await;
         svc.ingest(meta("i", ALICE, "c", "a"), Some(b"original"))
             .await
             .unwrap();
@@ -448,7 +349,7 @@ mod tests {
 
     #[tokio::test]
     async fn ingest_replaces_body_atomically() {
-        let (svc, _tmp, _keys) = svc().await;
+        let (svc, _keys) = svc().await;
         svc.ingest(meta("i", ALICE, "c", "a"), Some(b"v1"))
             .await
             .unwrap();
@@ -462,11 +363,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ingest_rejects_traversal_ids_without_writing_outside_root() {
-        let (svc, tmp, _keys) = svc().await;
-        let outside = tmp.path().parent().unwrap().join("outside");
-        let _ = std::fs::remove_dir_all(&outside);
-
+    async fn ingest_rejects_traversal_ids() {
+        let (svc, _keys) = svc().await;
         let err = svc
             .ingest(meta("i", ALICE, "../../../outside", "a"), Some(b"pwn"))
             .await
@@ -475,29 +373,19 @@ mod tests {
             err.to_string().contains("invalid"),
             "unexpected error: {err}",
         );
-        assert!(
-            !outside.exists(),
-            "ingest must not create body files outside the cache root",
-        );
     }
 
     #[tokio::test]
-    async fn read_body_gone_returns_none() {
-        // Manual cache wipe: row exists but file's been removed.
-        // Read path needs to see this as a miss so it can fall back.
-        let (svc, _tmp, _keys) = svc().await;
-        let row = svc
-            .ingest(meta("i", ALICE, "c", "a"), Some(b"hi"))
-            .await
-            .unwrap();
-        std::fs::remove_file(svc.body_path_for(&row)).unwrap();
+    async fn metadata_only_body_returns_none() {
+        let (svc, _keys) = svc().await;
+        let row = svc.ingest(meta("i", ALICE, "c", "a"), None).await.unwrap();
         let got = svc.read_body(&row).await.unwrap();
         assert!(got.is_none());
     }
 
     #[tokio::test]
     async fn list_for_owner_is_owner_scoped() {
-        let (svc, _tmp, _keys) = svc().await;
+        let (svc, _keys) = svc().await;
         svc.ingest(meta("i1", ALICE, "c", "a1"), Some(b""))
             .await
             .unwrap();
@@ -514,34 +402,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ingest_seals_body_on_disk() {
-        // The bytes a stolen `local_cache_dir` would expose: ASCII-armored
-        // age ciphertext, NOT the plaintext.  This is the at-rest
-        // posture the seal exists to provide.
-        let (svc, _tmp, _keys) = svc().await;
+    async fn ingest_seals_body_in_store() {
+        let (svc, _keys) = svc().await;
         let row = svc
             .ingest(meta("i", ALICE, "c", "a"), Some(b"top-secret findings"))
             .await
             .unwrap();
-        let on_disk = std::fs::read(svc.body_path_for(&row)).unwrap();
+        let stored = row.body_ciphertext.as_deref().expect("sealed body");
         assert!(
-            on_disk.starts_with(AGE_ARMOR_PREFIX),
+            stored.starts_with(AGE_ARMOR_PREFIX),
             "body must be sealed under age cipher, found prefix {:?}",
-            std::str::from_utf8(&on_disk[..on_disk.len().min(40)]).unwrap_or("<binary>"),
+            std::str::from_utf8(&stored[..stored.len().min(40)]).unwrap_or("<binary>"),
         );
         assert!(
-            !on_disk
+            !stored
                 .windows(b"top-secret findings".len())
                 .any(|w| w == b"top-secret findings"),
-            "plaintext must not appear in the on-disk ciphertext",
+            "plaintext must not appear in the stored ciphertext",
         );
     }
 
     #[tokio::test]
     async fn read_body_decrypts_sealed_roundtrip() {
-        // The end-to-end contract: bytes in via ingest, plaintext out
-        // via read_body, even though disk holds ciphertext.
-        let (svc, _tmp, _keys) = svc().await;
+        let (svc, _keys) = svc().await;
         let row = svc
             .ingest(meta("i", ALICE, "c", "a"), Some(b"# Findings\n\n* a\n"))
             .await
@@ -553,21 +436,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_body_legacy_plaintext_passes_through() {
-        // Pre-encryption rows on disk: no armor header, surface as-is
-        // so historical caches stay readable after the seal lands.
-        // We simulate the legacy posture by writing plaintext directly
-        // to the row's body_path, bypassing the seal.
-        let (svc, _tmp, _keys) = svc().await;
-        // First ingest with empty body so the row exists with a path.
-        let row = svc
-            .ingest(meta("i", ALICE, "c", "a"), Some(b""))
+    async fn read_body_rejects_unsealed_store_body() {
+        let (svc, _keys) = svc().await;
+        let mut row = svc
+            .ingest(meta("i", ALICE, "c", "a"), Some(b"sealed first"))
             .await
             .unwrap();
-        // Overwrite with plaintext to simulate a legacy on-disk body.
-        std::fs::write(svc.body_path_for(&row), b"old plaintext body").unwrap();
-        let got = svc.read_body(&row).await.unwrap().unwrap();
-        assert_eq!(got, b"old plaintext body");
+        row.body_ciphertext = Some(b"old plaintext body".to_vec());
+        let got = svc.read_body(&row).await.unwrap();
+        assert!(got.is_none());
     }
 
     #[tokio::test]
@@ -576,17 +453,15 @@ mod tests {
         // owner key has been rotated and the new key can't open old
         // ciphertexts) must surface as a miss — NOT as ciphertext bytes
         // — so the read path falls back to the live cube.
-        let (svc, _tmp, _keys) = svc().await;
-        let row = svc
+        let (svc, _keys) = svc().await;
+        let mut row = svc
             .ingest(meta("i", ALICE, "c", "a"), Some(b"sealed payload"))
             .await
             .unwrap();
-        // Tamper: read the ciphertext, flip a byte in the middle of
-        // the armor body, write it back.  age's MAC catches this.
-        let mut ct = std::fs::read(svc.body_path_for(&row)).unwrap();
+        let mut ct = row.body_ciphertext.clone().expect("sealed body");
         let mid = ct.len() / 2;
         ct[mid] ^= 0x40;
-        std::fs::write(svc.body_path_for(&row), ct).unwrap();
+        row.body_ciphertext = Some(ct);
         let got = svc.read_body(&row).await.unwrap();
         assert!(
             got.is_none(),
@@ -597,9 +472,9 @@ mod tests {
     #[tokio::test]
     async fn ingest_seal_persists_across_metadata_only_refresh() {
         // Combination of "metadata refresh keeps the body" + the seal:
-        // the still-good ciphertext on disk must still decrypt after a
+        // the still-good ciphertext in the store must still decrypt after a
         // metadata-only re-upsert.
-        let (svc, _tmp, _keys) = svc().await;
+        let (svc, _keys) = svc().await;
         svc.ingest(meta("i", ALICE, "c", "a"), Some(b"v1 sealed"))
             .await
             .unwrap();
@@ -614,12 +489,7 @@ mod tests {
 
     #[tokio::test]
     async fn ingest_replaces_sealed_body_atomically() {
-        // Re-ingesting with new bytes: the new ciphertext lands via
-        // the same atomic-rename path, the row's `bytes` column tracks
-        // the new plaintext length, and read_body decrypts to the new
-        // plaintext.  Catches a regression where double-sealing or a
-        // stale ciphertext leaks through.
-        let (svc, _tmp, _keys) = svc().await;
+        let (svc, _keys) = svc().await;
         svc.ingest(meta("i", ALICE, "c", "a"), Some(b"v1"))
             .await
             .unwrap();
@@ -633,21 +503,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn empty_body_ingest_writes_zero_length_file() {
-        // Empty body skips the seal — write a zero-length file and
-        // surface it back as empty bytes (NOT as a NotFound miss).
+    async fn empty_body_ingest_writes_present_empty_blob() {
+        // Empty body skips the seal but still stores a present empty
+        // blob and surfaces it back as empty bytes (NOT as a miss).
         // The existing share/sweep paths pass `None` for body when
         // they only refresh metadata, but `Some(&[])` is a separate
         // signal ("known-empty body") that we need to preserve.
-        let (svc, _tmp, _keys) = svc().await;
+        let (svc, _keys) = svc().await;
         let row = svc
             .ingest(meta("i", ALICE, "c", "a"), Some(b""))
             .await
             .unwrap();
-        let on_disk = std::fs::read(svc.body_path_for(&row)).unwrap();
         assert!(
-            on_disk.is_empty(),
-            "empty body should write zero-length file"
+            row.body_ciphertext.as_deref().is_some_and(|b| b.is_empty()),
+            "empty body should store a present empty blob"
         );
         let got = svc.read_body(&row).await.unwrap().unwrap();
         assert!(
@@ -662,13 +531,13 @@ mod tests {
         // Same cipher directory, two owners.  Forging the row's owner_id
         // on read should not let bob open alice's ciphertext.  We model
         // the attack as: alice ingests, bob tries to read by hand-rolling
-        // a row with bob's owner_id pointing at alice's body_path.
-        let (svc, _tmp, _keys) = svc().await;
+        // a row with bob's owner_id pointing at alice's stored body.
+        let (svc, _keys) = svc().await;
         let alice_row = svc
             .ingest(meta("i", ALICE, "c", "a"), Some(b"alice secret"))
             .await
             .unwrap();
-        // Forged row: same body_path, bob's owner_id.
+        // Forged row: same body, bob's owner_id.
         let forged = CachedArtefact {
             owner_id: BOB.to_owned(),
             ..alice_row.clone()

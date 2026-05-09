@@ -182,9 +182,6 @@ async fn authorize_state_token_owner(
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
         }
     };
-    if token_record.provider != crate::db::tokens::STATE_SYNC_PROVIDER {
-        return Err(StatusCode::UNAUTHORIZED);
-    }
     let instance = match state
         .instances
         .get_unscoped(&token_record.instance_id)
@@ -200,6 +197,12 @@ async fn authorize_state_token_owner(
             return Err(super::instances::swarm_err_to_status(e));
         }
     };
+    if !crate::db::tokens::state_sync_provider_matches(
+        &token_record.provider,
+        &instance.state_generation,
+    ) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
     Ok(instance.owner_id)
 }
 
@@ -635,6 +638,7 @@ mod tests {
             name: "Axelrod".into(),
             task: String::new(),
             cube_sandbox_id: None,
+            state_generation: String::new(),
             template_id: "t".into(),
             status: InstanceStatus::Live,
             bearer_token: String::new(),

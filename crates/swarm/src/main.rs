@@ -177,7 +177,6 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     ));
     let state_files = std::sync::Arc::new(dyson_swarm::state_files::StateFileService::new(
         pool.clone(),
-        cfg.backup.local_cache_dir.clone(),
         cipher_dir.clone(),
     ));
     let outbound_policy = Arc::new(dyson_swarm_core::upstream_policy::OutboundUrlPolicy {
@@ -681,13 +680,10 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         cipher_dir.clone(),
     ));
 
-    // Swarm-side artefact cache.  Bytes live under
-    // `<local_cache_dir>/artefacts/`; metadata in the `artefact_cache`
-    // table.  Reused by share_public (so still-shared artefacts
-    // outlive their cube) and the swarm-side artefact list endpoint.
+    // Swarm-side artefact store. Metadata and sealed bytes live in the
+    // swarm DB so shared artefacts outlive their cube and any one host.
     let artefact_cache = std::sync::Arc::new(dyson_swarm::artefacts::ArtefactCacheService::new(
         pool.clone(),
-        cfg.backup.local_cache_dir.clone(),
         cipher_dir.clone(),
     ));
     // Anonymous artefact-share service — wires the SQLite pool, the

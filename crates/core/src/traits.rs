@@ -180,6 +180,11 @@ pub struct InstanceRow {
     /// running sandbox without an explicit re-onboard.
     pub task: String,
     pub cube_sandbox_id: Option<String>,
+    /// Swarm-side generation that owns durable state writes for this
+    /// instance. State-sync tokens are minted against this value; when
+    /// a sandbox is replaced, the row moves to a fresh generation so
+    /// stale sandboxes can no longer write mirrored workspace/chat state.
+    pub state_generation: String,
     pub template_id: String,
     pub status: InstanceStatus,
     pub bearer_token: String,
@@ -378,6 +383,7 @@ pub trait InstanceStore: Send + Sync {
         &self,
         id: &str,
         new_cube_sandbox_id: &str,
+        new_state_generation: &str,
         new_template_id: &str,
         new_network_policy: &crate::network_policy::NetworkPolicy,
         new_network_policy_cidrs: &[String],
@@ -427,12 +433,15 @@ pub trait TokenStore: Send + Sync {
     /// chat-provider tokens against the ingest endpoint by prefix.
     /// `revoke_for_instance` cleans these up alongside the chat token.
     async fn mint_ingest(&self, instance_id: &str) -> Result<String, StoreError>;
-    /// Mint a per-instance state-sync token (the bearer dyson stamps on
-    /// `POST /v1/internal/state/file`). It shares the `proxy_tokens`
-    /// table with chat and artefact ingest tokens, but uses an `st_`
-    /// prefix and `provider = "state_sync"` so the state endpoint can
-    /// reject tokens minted for any other audience.
-    async fn mint_state_sync(&self, instance_id: &str) -> Result<String, StoreError>;
+    /// Mint a state-sync token scoped to the instance's active state
+    /// generation. New swarm-backed runtimes use this so stale
+    /// sandboxes lose durable write authority as soon as the instance
+    /// row moves to a fresh generation.
+    async fn mint_state_sync_for_generation(
+        &self,
+        instance_id: &str,
+        generation: &str,
+    ) -> Result<String, StoreError>;
     async fn resolve(&self, token: &str) -> Result<Option<TokenRecord>, StoreError>;
     async fn revoke_for_instance(&self, instance_id: &str) -> Result<(), StoreError>;
     /// Revoke a single proxy_token by its plaintext value (B1).

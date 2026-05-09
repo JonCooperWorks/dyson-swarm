@@ -475,10 +475,8 @@ mod tests {
             Arc::new(crate::webhooks::NullWebhookDispatcher),
             cipher_dir.clone(),
         ));
-        let cache_dir = tempfile::tempdir().unwrap();
         let artefact_cache = Arc::new(crate::artefacts::ArtefactCacheService::new(
             pool.clone(),
-            cache_dir.path().to_path_buf(),
             cipher_dir.clone(),
         ));
         let shares_svc = Arc::new(crate::shares::ShareService::new(
@@ -491,10 +489,8 @@ mod tests {
         ));
         let state_files = Arc::new(crate::state_files::StateFileService::new(
             pool,
-            cache_dir.path().to_path_buf(),
             cipher_dir.clone(),
         ));
-        std::mem::forget(cache_dir);
         let state = AppState {
             user_secrets,
             system_secrets,

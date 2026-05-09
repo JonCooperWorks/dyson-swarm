@@ -105,6 +105,7 @@ fn row_to_instance(
         name: row.try_get("name").map_err(map_sqlx)?,
         task: row.try_get("task").map_err(map_sqlx)?,
         cube_sandbox_id: row.try_get("cube_sandbox_id").map_err(map_sqlx)?,
+        state_generation: row.try_get("state_generation").map_err(map_sqlx)?,
         template_id: row.try_get("template_id").map_err(map_sqlx)?,
         status,
         bearer_token: open_bearer(
@@ -143,17 +144,18 @@ impl InstanceStore for SqlxInstanceStore {
         let bearer_token = seal_bearer(self.cipher.as_ref(), &row.bearer_token)?;
         sqlx::query(
             "INSERT INTO instances \
-             (id, owner_id, name, task, cube_sandbox_id, template_id, status, bearer_token, \
+             (id, owner_id, name, task, cube_sandbox_id, state_generation, template_id, status, bearer_token, \
               pinned, expires_at, last_active_at, last_probe_at, last_probe_status, \
               created_at, destroyed_at, rotated_to, \
               network_policy_kind, network_policy_entries, network_policy_cidrs, models, tools) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&row.id)
         .bind(&row.owner_id)
         .bind(&row.name)
         .bind(&row.task)
         .bind(&row.cube_sandbox_id)
+        .bind(&row.state_generation)
         .bind(&row.template_id)
         .bind(row.status.as_str())
         .bind(&bearer_token)
@@ -391,6 +393,7 @@ impl InstanceStore for SqlxInstanceStore {
         &self,
         id: &str,
         new_cube_sandbox_id: &str,
+        new_state_generation: &str,
         new_template_id: &str,
         new_network_policy: &crate::network_policy::NetworkPolicy,
         new_network_policy_cidrs: &[String],
@@ -402,18 +405,20 @@ impl InstanceStore for SqlxInstanceStore {
         let result = sqlx::query(
             "UPDATE instances SET \
                 cube_sandbox_id = ?1, \
-                template_id = ?2, \
-                network_policy_kind = ?3, \
-                network_policy_entries = ?4, \
-                network_policy_cidrs = ?5, \
+                state_generation = ?2, \
+                template_id = ?3, \
+                network_policy_kind = ?4, \
+                network_policy_entries = ?5, \
+                network_policy_cidrs = ?6, \
                 last_probe_at = NULL, \
                 last_probe_status = NULL, \
-                last_active_at = ?6, \
+                last_active_at = ?7, \
                 rotated_to = NULL, \
                 status = 'live' \
-             WHERE id = ?7",
+             WHERE id = ?8",
         )
         .bind(new_cube_sandbox_id)
+        .bind(new_state_generation)
         .bind(new_template_id)
         .bind(kind)
         .bind(entries_csv)
@@ -478,6 +483,7 @@ mod tests {
             name: String::new(),
             task: String::new(),
             cube_sandbox_id: Some(format!("sb-{id}")),
+            state_generation: format!("sg-{id}"),
             template_id: "tpl-1".into(),
             status: InstanceStatus::Live,
             bearer_token: format!("tok-{id}"),

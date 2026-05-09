@@ -1,8 +1,8 @@
 //! SQLite metadata store for swarm-side instance state files.
 //!
-//! File bodies live on disk under the cache root and are sealed before
-//! write. This module owns only the row bookkeeping: the owner scope,
-//! relative body path, plaintext byte count, and tombstone state.
+//! File bodies are sealed before they enter the store. This module owns
+//! both the encrypted body bytes and row bookkeeping so workspace state
+//! is replayable from the swarm store without node-local cache affinity.
 
 use sqlx::{Row, SqlitePool};
 
@@ -18,7 +18,7 @@ pub struct StateFileRow {
     pub path: String,
     pub mime: Option<String>,
     pub bytes: i64,
-    pub body_path: String,
+    pub body_ciphertext: Option<Vec<u8>>,
     pub updated_at: i64,
     pub synced_at: i64,
     pub deleted_at: Option<i64>,
@@ -32,7 +32,7 @@ pub struct UpsertSpec<'a> {
     pub path: &'a str,
     pub mime: Option<&'a str>,
     pub bytes: i64,
-    pub body_path: &'a str,
+    pub body_ciphertext: &'a [u8],
     pub updated_at: i64,
     pub synced_at: i64,
 }
@@ -40,13 +40,13 @@ pub struct UpsertSpec<'a> {
 pub async fn upsert(pool: &SqlitePool, spec: UpsertSpec<'_>) -> Result<StateFileRow, StoreError> {
     sqlx::query(
         "INSERT INTO instance_state_files \
-         (instance_id, owner_id, namespace, path, mime, bytes, body_path, updated_at, synced_at, deleted_at) \
+         (instance_id, owner_id, namespace, path, mime, bytes, body_ciphertext, updated_at, synced_at, deleted_at) \
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL) \
          ON CONFLICT(instance_id, namespace, path) DO UPDATE SET \
            owner_id = excluded.owner_id, \
            mime = excluded.mime, \
            bytes = excluded.bytes, \
-           body_path = excluded.body_path, \
+           body_ciphertext = excluded.body_ciphertext, \
            updated_at = excluded.updated_at, \
            synced_at = excluded.synced_at, \
            deleted_at = NULL",
@@ -57,7 +57,7 @@ pub async fn upsert(pool: &SqlitePool, spec: UpsertSpec<'_>) -> Result<StateFile
     .bind(spec.path)
     .bind(spec.mime)
     .bind(spec.bytes)
-    .bind(spec.body_path)
+    .bind(spec.body_ciphertext)
     .bind(spec.updated_at)
     .bind(spec.synced_at)
     .execute(pool)
@@ -75,19 +75,18 @@ pub async fn tombstone(
     owner_id: &str,
     namespace: &str,
     path: &str,
-    body_path: &str,
     updated_at: i64,
     synced_at: i64,
 ) -> Result<StateFileRow, StoreError> {
     sqlx::query(
         "INSERT INTO instance_state_files \
-         (instance_id, owner_id, namespace, path, mime, bytes, body_path, updated_at, synced_at, deleted_at) \
-         VALUES (?, ?, ?, ?, NULL, 0, ?, ?, ?, ?) \
+         (instance_id, owner_id, namespace, path, mime, bytes, body_ciphertext, updated_at, synced_at, deleted_at) \
+         VALUES (?, ?, ?, ?, NULL, 0, NULL, ?, ?, ?) \
          ON CONFLICT(instance_id, namespace, path) DO UPDATE SET \
            owner_id = excluded.owner_id, \
            mime = NULL, \
            bytes = 0, \
-           body_path = excluded.body_path, \
+           body_ciphertext = NULL, \
            updated_at = excluded.updated_at, \
            synced_at = excluded.synced_at, \
            deleted_at = excluded.deleted_at",
@@ -96,7 +95,6 @@ pub async fn tombstone(
     .bind(owner_id)
     .bind(namespace)
     .bind(path)
-    .bind(body_path)
     .bind(updated_at)
     .bind(synced_at)
     .bind(synced_at)
@@ -116,7 +114,7 @@ pub async fn find(
     path: &str,
 ) -> Result<Option<StateFileRow>, StoreError> {
     let row = sqlx::query(
-        "SELECT id, instance_id, owner_id, namespace, path, mime, bytes, body_path, updated_at, synced_at, deleted_at \
+        "SELECT id, instance_id, owner_id, namespace, path, mime, bytes, body_ciphertext, updated_at, synced_at, deleted_at \
          FROM instance_state_files \
          WHERE instance_id = ? AND namespace = ? AND path = ?",
     )
@@ -134,7 +132,7 @@ pub async fn list_for_instance(
     instance_id: &str,
 ) -> Result<Vec<StateFileRow>, StoreError> {
     let rows = sqlx::query(
-        "SELECT id, instance_id, owner_id, namespace, path, mime, bytes, body_path, updated_at, synced_at, deleted_at \
+        "SELECT id, instance_id, owner_id, namespace, path, mime, bytes, body_ciphertext, updated_at, synced_at, deleted_at \
          FROM instance_state_files \
          WHERE instance_id = ? \
          ORDER BY namespace, path",
@@ -155,7 +153,7 @@ fn row_to_state_file(row: sqlx::sqlite::SqliteRow) -> StateFileRow {
         path: row.get("path"),
         mime: row.get("mime"),
         bytes: row.get("bytes"),
-        body_path: row.get("body_path"),
+        body_ciphertext: row.get("body_ciphertext"),
         updated_at: row.get("updated_at"),
         synced_at: row.get("synced_at"),
         deleted_at: row.get("deleted_at"),

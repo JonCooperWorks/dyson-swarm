@@ -51,9 +51,24 @@ pub(crate) fn token_lookup_key(token: &str) -> String {
 /// operators inspecting the table directly.
 pub const INGEST_PROVIDER: &str = "ingest";
 
-/// Provider string stamped on rows minted via
-/// `TokenStore::mint_state_sync`.
+/// Base provider namespace for state-sync tokens. Concrete tokens are
+/// always scoped as `state_sync:<generation>` so only the current
+/// sandbox generation can write durable swarm state.
 pub const STATE_SYNC_PROVIDER: &str = "state_sync";
+
+pub fn state_sync_provider(generation: &str) -> String {
+    let generation = generation.trim();
+    debug_assert!(!generation.is_empty(), "state generation is required");
+    format!("{STATE_SYNC_PROVIDER}:{generation}")
+}
+
+pub fn state_sync_provider_matches(provider: &str, generation: &str) -> bool {
+    let generation = generation.trim();
+    if generation.is_empty() {
+        return false;
+    }
+    provider == state_sync_provider(generation)
+}
 
 impl SqlxTokenStore {
     /// Common mint path — the prefix and provider are the only knobs
@@ -106,12 +121,12 @@ impl TokenStore for SqlxTokenStore {
             .await
     }
 
-    async fn mint_state_sync(&self, instance_id: &str) -> Result<String, StoreError> {
-        // `st_` prefix marks state-file mirror tokens (selected dyson
-        // files pushed from dyson → swarm). Same row layout as chat
-        // and artefact tokens; the prefix + provider act as an
-        // audience check at the internal state endpoint.
-        self.mint_with_prefix("st_", instance_id, STATE_SYNC_PROVIDER)
+    async fn mint_state_sync_for_generation(
+        &self,
+        instance_id: &str,
+        generation: &str,
+    ) -> Result<String, StoreError> {
+        self.mint_with_prefix("st_", instance_id, &state_sync_provider(generation))
             .await
     }
 
@@ -263,6 +278,7 @@ mod tests {
                 name: String::new(),
                 task: String::new(),
                 cube_sandbox_id: None,
+                state_generation: String::new(),
                 template_id: "t".into(),
                 status: InstanceStatus::Live,
                 bearer_token: "b".into(),
@@ -383,7 +399,10 @@ mod tests {
         let store = SqlxTokenStore::new(pool, Arc::new(TestCipher));
         let chat = store.mint("i1", "openai").await.unwrap();
         let ingest = store.mint_ingest("i1").await.unwrap();
-        let state = store.mint_state_sync("i1").await.unwrap();
+        let state = store
+            .mint_state_sync_for_generation("i1", "gen-a")
+            .await
+            .unwrap();
 
         store.revoke_for_instance("i1").await.unwrap();
         assert!(
@@ -410,7 +429,10 @@ mod tests {
         let store = SqlxTokenStore::new(pool, Arc::new(TestCipher));
         let pt = store.mint("i1", "openai").await.unwrap();
         let it = store.mint_ingest("i1").await.unwrap();
-        let st = store.mint_state_sync("i1").await.unwrap();
+        let st = store
+            .mint_state_sync_for_generation("i1", "gen-a")
+            .await
+            .unwrap();
         assert!(pt.starts_with("pt_"));
         assert!(it.starts_with("it_"));
         assert!(st.starts_with("st_"));
@@ -418,7 +440,24 @@ mod tests {
         assert_ne!(pt, st);
         assert_ne!(it, st);
         let resolved = store.resolve(&st).await.unwrap().expect("present");
-        assert_eq!(resolved.provider, STATE_SYNC_PROVIDER);
+        assert_eq!(resolved.provider, "state_sync:gen-a");
+    }
+
+    #[tokio::test]
+    async fn state_sync_generation_is_encoded_in_provider() {
+        let pool = open_in_memory().await.unwrap();
+        seed(&pool, "i1").await;
+        let store = SqlxTokenStore::new(pool, Arc::new(TestCipher));
+        let tok = store
+            .mint_state_sync_for_generation("i1", "gen-a")
+            .await
+            .unwrap();
+        let resolved = store.resolve(&tok).await.unwrap().expect("present");
+
+        assert_eq!(resolved.provider, "state_sync:gen-a");
+        assert!(state_sync_provider_matches(&resolved.provider, "gen-a"));
+        assert!(!state_sync_provider_matches(&resolved.provider, "gen-b"));
+        assert!(!state_sync_provider_matches(&resolved.provider, ""));
     }
 
     #[tokio::test]

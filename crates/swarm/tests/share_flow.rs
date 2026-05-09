@@ -208,6 +208,7 @@ async fn build() -> Fixture {
             name: "share-test".into(),
             task: String::new(),
             cube_sandbox_id: Some("sb-test".into()),
+            state_generation: String::new(),
             template_id: "tpl".into(),
             status: InstanceStatus::Live,
             bearer_token: "test-bearer".into(),
@@ -242,10 +243,8 @@ async fn build() -> Fixture {
         cipher_dir.clone(),
     ));
     let apex = "swarm.test".to_string();
-    let cache_dir = tempfile::tempdir().unwrap();
     let artefact_cache = Arc::new(dyson_swarm::artefacts::ArtefactCacheService::new(
         pool.clone(),
-        cache_dir.path().to_path_buf(),
         cipher_dir.clone(),
     ));
     artefact_cache
@@ -275,10 +274,8 @@ async fn build() -> Fixture {
     ));
     let state_files = Arc::new(dyson_swarm::state_files::StateFileService::new(
         pool.clone(),
-        cache_dir.path().to_path_buf(),
         cipher_dir.clone(),
     ));
-    std::mem::forget(cache_dir);
 
     let app_state = http::AppState {
         user_secrets: user_secrets_svc,

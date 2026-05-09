@@ -1,14 +1,11 @@
 //! SQLite-backed store for the `artefact_cache` table — swarm's copy
-//! of dyson-emitted artefact metadata.  Bytes live on disk under the
-//! `body_path`; this layer only handles the row.
+//! of dyson-emitted artefact metadata and sealed body bytes.
 //!
 //! Identity is `(instance_id, chat_id, artefact_id)`.  `upsert_meta`
 //! is the ingest hot path — called every time the share read path or
 //! the swarm-side artefact list endpoint pulls fresh bytes from a
-//! cube.  `update_body` writes the on-disk path + size + mime once
-//! the body has actually been written; the two are split so a partial
-//! failure between metadata-write and body-write doesn't leave a row
-//! pointing at nothing (we update the path *after* the body lands).
+//! cube.  `update_body` stores the sealed body + size + mime once
+//! the body has been sealed.
 
 use sqlx::{Row, SqlitePool};
 
@@ -16,9 +13,9 @@ use crate::db::map_sqlx;
 use crate::error::StoreError;
 use crate::now_secs;
 
-/// One cached artefact row.  `body_path` is relative to the operator's
-/// `[backup].local_cache_dir`; the service layer joins it with the
-/// configured root before opening the file.
+/// One cached artefact row. `body_ciphertext` is sealed under the
+/// row owner before it enters the store. `None` means metadata-only:
+/// the artefact is known, but swarm does not yet have durable bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CachedArtefact {
     pub id: i64,
@@ -30,18 +27,15 @@ pub struct CachedArtefact {
     pub title: String,
     pub mime: Option<String>,
     pub bytes: i64,
-    pub body_path: String,
+    pub body_ciphertext: Option<Vec<u8>>,
     pub metadata_json: Option<String>,
     pub created_at: i64,
     pub cached_at: i64,
 }
 
 /// Insert (or refresh metadata of) a cached artefact row.  No body
-/// bytes are written here — the caller follows up with `update_body`
-/// once the bytes are committed to disk.  Returns the row id either
-/// way; the row's `body_path` is set on insert and *not* clobbered on
-/// upsert (preserves an already-warm cache when only metadata
-/// refreshes).
+/// bytes are written here — the caller follows up with `update_body`.
+/// Existing body bytes are not clobbered by metadata-only refreshes.
 pub struct UpsertSpec<'a> {
     pub instance_id: &'a str,
     pub owner_id: &'a str,
@@ -50,31 +44,23 @@ pub struct UpsertSpec<'a> {
     pub kind: &'a str,
     pub title: &'a str,
     pub created_at: i64,
-    /// Initial body_path used only when the row doesn't already exist.
-    /// Subsequent upserts leave the existing path alone — `update_body`
-    /// is the explicit path-rewrite call.
-    pub body_path_seed: &'a str,
     pub metadata_json: Option<&'a str>,
 }
 
-/// UPSERT the metadata.  Returns `(row_id, body_path)` so the caller
-/// has the path to write bytes to even on the "row already existed"
-/// branch.  We never overwrite `body_path` here so a successful body
-/// write from a prior call survives a subsequent metadata-only refresh.
-pub async fn upsert_meta(
-    pool: &SqlitePool,
-    spec: UpsertSpec<'_>,
-) -> Result<(i64, String), StoreError> {
+/// UPSERT the metadata. Returns the row id. We never overwrite
+/// `body_ciphertext` here so a successful body write from a prior call
+/// survives a subsequent metadata-only refresh.
+pub async fn upsert_meta(pool: &SqlitePool, spec: UpsertSpec<'_>) -> Result<i64, StoreError> {
     let now = now_secs();
-    // Use ON CONFLICT to keep the existing body_path, bytes, mime when the
+    // Use ON CONFLICT to keep the existing body bytes, bytes, mime when the
     // tuple is already cached — a metadata refresh shouldn't blow away
     // a known-good body.  cached_at IS bumped so the GC sees the row as
     // recently-touched.
     sqlx::query(
         "INSERT INTO artefact_cache \
             (instance_id, owner_id, chat_id, artefact_id, kind, title, \
-             mime, bytes, body_path, metadata_json, created_at, cached_at) \
-         VALUES (?, ?, ?, ?, ?, ?, NULL, 0, ?, ?, ?, ?) \
+             mime, bytes, body_ciphertext, metadata_json, created_at, cached_at) \
+         VALUES (?, ?, ?, ?, ?, ?, NULL, 0, NULL, ?, ?, ?) \
          ON CONFLICT(instance_id, chat_id, artefact_id) DO UPDATE SET \
             kind = excluded.kind, \
             title = excluded.title, \
@@ -87,7 +73,6 @@ pub async fn upsert_meta(
     .bind(spec.artefact_id)
     .bind(spec.kind)
     .bind(spec.title)
-    .bind(spec.body_path_seed)
     .bind(spec.metadata_json)
     .bind(spec.created_at)
     .bind(now)
@@ -96,7 +81,7 @@ pub async fn upsert_meta(
     .map_err(map_sqlx)?;
 
     let row = sqlx::query(
-        "SELECT id, body_path FROM artefact_cache \
+        "SELECT id FROM artefact_cache \
          WHERE instance_id = ? AND chat_id = ? AND artefact_id = ?",
     )
     .bind(spec.instance_id)
@@ -106,28 +91,26 @@ pub async fn upsert_meta(
     .await
     .map_err(map_sqlx)?;
     let id: i64 = row.try_get("id").map_err(map_sqlx)?;
-    let body_path: String = row.try_get("body_path").map_err(map_sqlx)?;
-    Ok((id, body_path))
+    Ok(id)
 }
 
-/// Promote a row's `body_path` + size + mime once the body has been
-/// committed to disk.  Idempotent — a second call with the same path
-/// is fine.
+/// Promote a row's sealed body + size + mime. Idempotent — a second
+/// call with the same bytes is fine.
 pub async fn update_body(
     pool: &SqlitePool,
     id: i64,
-    body_path: &str,
     bytes: i64,
     mime: Option<&str>,
+    body_ciphertext: &[u8],
 ) -> Result<(), StoreError> {
     sqlx::query(
         "UPDATE artefact_cache \
-         SET body_path = ?, bytes = ?, mime = ?, cached_at = ? \
+         SET bytes = ?, mime = ?, body_ciphertext = ?, cached_at = ? \
          WHERE id = ?",
     )
-    .bind(body_path)
     .bind(bytes)
     .bind(mime)
+    .bind(body_ciphertext)
     .bind(now_secs())
     .bind(id)
     .execute(pool)
@@ -145,7 +128,7 @@ pub async fn find(
 ) -> Result<Option<CachedArtefact>, StoreError> {
     let row = sqlx::query(
         "SELECT id, instance_id, owner_id, chat_id, artefact_id, \
-                kind, title, mime, bytes, body_path, metadata_json, \
+                kind, title, mime, bytes, body_ciphertext, metadata_json, \
                 created_at, cached_at \
          FROM artefact_cache \
          WHERE instance_id = ? AND chat_id = ? AND artefact_id = ?",
@@ -180,7 +163,7 @@ pub async fn list_for_instance_page(
 ) -> Result<Vec<CachedArtefact>, StoreError> {
     let mut sql = String::from(
         "SELECT id, instance_id, owner_id, chat_id, artefact_id, \
-                kind, title, mime, bytes, body_path, metadata_json, \
+                kind, title, mime, bytes, body_ciphertext, metadata_json, \
                 created_at, cached_at \
          FROM artefact_cache \
          WHERE owner_id = ? AND instance_id = ?",
@@ -219,7 +202,7 @@ pub async fn list_for_owner_page(
 ) -> Result<Vec<CachedArtefact>, StoreError> {
     let rows = sqlx::query(
         "SELECT id, instance_id, owner_id, chat_id, artefact_id, \
-                kind, title, mime, bytes, body_path, metadata_json, \
+                kind, title, mime, bytes, body_ciphertext, metadata_json, \
                 created_at, cached_at \
          FROM artefact_cache \
          WHERE owner_id = ? \
@@ -235,9 +218,7 @@ pub async fn list_for_owner_page(
     rows.into_iter().map(row_to_cached).collect()
 }
 
-/// Delete one cached row.  Returns `true` if a row was removed.  The
-/// caller is responsible for unlinking the on-disk body — this layer
-/// doesn't know the absolute path, only the relative `body_path`.
+/// Delete one cached row.  Returns `true` if a row was removed.
 pub async fn delete(
     pool: &SqlitePool,
     owner_id: &str,
@@ -270,7 +251,7 @@ fn row_to_cached(r: sqlx::sqlite::SqliteRow) -> Result<CachedArtefact, StoreErro
         title: r.try_get("title").map_err(map_sqlx)?,
         mime: r.try_get("mime").map_err(map_sqlx)?,
         bytes: r.try_get("bytes").map_err(map_sqlx)?,
-        body_path: r.try_get("body_path").map_err(map_sqlx)?,
+        body_ciphertext: r.try_get("body_ciphertext").map_err(map_sqlx)?,
         metadata_json: r.try_get("metadata_json").map_err(map_sqlx)?,
         created_at: r.try_get("created_at").map_err(map_sqlx)?,
         cached_at: r.try_get("cached_at").map_err(map_sqlx)?,
@@ -282,13 +263,7 @@ mod tests {
     use super::*;
     use crate::db::open_in_memory;
 
-    fn spec<'a>(
-        instance: &'a str,
-        owner: &'a str,
-        chat: &'a str,
-        art: &'a str,
-        body_path: &'a str,
-    ) -> UpsertSpec<'a> {
+    fn spec<'a>(instance: &'a str, owner: &'a str, chat: &'a str, art: &'a str) -> UpsertSpec<'a> {
         UpsertSpec {
             instance_id: instance,
             owner_id: owner,
@@ -297,7 +272,6 @@ mod tests {
             kind: "security_review",
             title: "Test artefact",
             created_at: 1_700_000_000,
-            body_path_seed: body_path,
             metadata_json: None,
         }
     }
@@ -305,52 +279,47 @@ mod tests {
     #[tokio::test]
     async fn upsert_then_find_round_trips() {
         let pool = open_in_memory().await.unwrap();
-        let (id, body_path) = upsert_meta(&pool, spec("inst-a", "alice", "c1", "a1", "p/1"))
+        let id = upsert_meta(&pool, spec("inst-a", "alice", "c1", "a1"))
             .await
             .unwrap();
         assert!(id > 0);
-        assert_eq!(body_path, "p/1");
         let got = find(&pool, "inst-a", "c1", "a1").await.unwrap().unwrap();
         assert_eq!(got.title, "Test artefact");
         assert_eq!(got.owner_id, "alice");
-        assert_eq!(got.body_path, "p/1");
+        assert_eq!(got.body_ciphertext, None);
         assert_eq!(got.bytes, 0); // body not written yet
     }
 
     #[tokio::test]
-    async fn upsert_does_not_clobber_existing_body_path() {
+    async fn upsert_does_not_clobber_existing_body() {
         // Critical invariant: a metadata refresh must not destroy a
-        // warm cache.  `body_path_seed` is only used on first insert;
-        // subsequent upserts keep the old path.
+        // warm cached body.
         let pool = open_in_memory().await.unwrap();
-        let (_, p1) = upsert_meta(&pool, spec("inst-a", "alice", "c1", "a1", "p/first"))
+        let id = upsert_meta(&pool, spec("inst-a", "alice", "c1", "a1"))
             .await
             .unwrap();
-        // Pretend body landed.
-        update_body(&pool, 1, "p/first", 1234, Some("text/markdown"))
+        update_body(&pool, id, 1234, Some("text/markdown"), b"sealed")
             .await
             .unwrap();
-        // Re-upsert with a different seed — body_path must NOT change.
-        let (_, p2) = upsert_meta(&pool, spec("inst-a", "alice", "c1", "a1", "p/second"))
+        upsert_meta(&pool, spec("inst-a", "alice", "c1", "a1"))
             .await
             .unwrap();
-        assert_eq!(p1, "p/first");
-        assert_eq!(p2, "p/first", "second upsert clobbered body_path");
         let got = find(&pool, "inst-a", "c1", "a1").await.unwrap().unwrap();
         assert_eq!(got.bytes, 1234);
         assert_eq!(got.mime.as_deref(), Some("text/markdown"));
+        assert_eq!(got.body_ciphertext.as_deref(), Some(b"sealed".as_slice()));
     }
 
     #[tokio::test]
     async fn list_for_instance_owner_scopes() {
         let pool = open_in_memory().await.unwrap();
-        upsert_meta(&pool, spec("inst-a", "alice", "c1", "a1", "p/1"))
+        upsert_meta(&pool, spec("inst-a", "alice", "c1", "a1"))
             .await
             .unwrap();
-        upsert_meta(&pool, spec("inst-a", "bob", "c2", "a2", "p/2"))
+        upsert_meta(&pool, spec("inst-a", "bob", "c2", "a2"))
             .await
             .unwrap();
-        upsert_meta(&pool, spec("inst-b", "alice", "c3", "a3", "p/3"))
+        upsert_meta(&pool, spec("inst-b", "alice", "c3", "a3"))
             .await
             .unwrap();
         let list = list_for_instance(&pool, "alice", "inst-a").await.unwrap();
@@ -361,13 +330,13 @@ mod tests {
     #[tokio::test]
     async fn list_for_owner_includes_all_instances() {
         let pool = open_in_memory().await.unwrap();
-        upsert_meta(&pool, spec("inst-a", "alice", "c", "a1", "p/1"))
+        upsert_meta(&pool, spec("inst-a", "alice", "c", "a1"))
             .await
             .unwrap();
-        upsert_meta(&pool, spec("inst-b", "alice", "c", "a2", "p/2"))
+        upsert_meta(&pool, spec("inst-b", "alice", "c", "a2"))
             .await
             .unwrap();
-        upsert_meta(&pool, spec("inst-x", "bob", "c", "ax", "p/x"))
+        upsert_meta(&pool, spec("inst-x", "bob", "c", "ax"))
             .await
             .unwrap();
         let list = list_for_owner(&pool, "alice", 100).await.unwrap();
@@ -381,7 +350,7 @@ mod tests {
             .into_iter()
             .enumerate()
         {
-            upsert_meta(&pool, spec("inst-a", "alice", chat, art, "p"))
+            upsert_meta(&pool, spec("inst-a", "alice", chat, art))
                 .await
                 .unwrap();
             sqlx::query(
@@ -429,7 +398,7 @@ mod tests {
     #[tokio::test]
     async fn delete_is_owner_scoped() {
         let pool = open_in_memory().await.unwrap();
-        upsert_meta(&pool, spec("inst-a", "alice", "c1", "a1", "p/1"))
+        upsert_meta(&pool, spec("inst-a", "alice", "c1", "a1"))
             .await
             .unwrap();
         // Bob can't delete alice's row.

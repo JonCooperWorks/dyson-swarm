@@ -19,6 +19,7 @@ pub(super) struct RuntimeTokens {
     pub(super) proxy: String,
     pub(super) ingest: String,
     pub(super) state_sync: String,
+    pub(super) state_generation: String,
 }
 
 #[derive(Debug, Clone)]
@@ -28,6 +29,7 @@ pub(super) struct InPlaceSwapPlan {
     pub(super) target_template_id: String,
     pub(super) target_policy: NetworkPolicy,
     pub(super) resolved_policy: network_policy::ResolvedPolicy,
+    pub(super) target_state_generation: String,
 }
 
 /// Body sent to dyson's `/api/admin/configure`.  Mirrors the dyson

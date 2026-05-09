@@ -421,7 +421,6 @@ mod tests {
                 artefact_id: "a",
                 kind: "other",
                 title: "report.md",
-                body_path_seed: "artefacts/inst-a/c/a.body",
                 metadata_json: Some("{}"),
                 created_at: 1,
             },

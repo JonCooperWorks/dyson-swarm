@@ -59,8 +59,8 @@ pub const ENV_INGEST_TOKEN: &str = "SWARM_INGEST_TOKEN";
 /// when mirroring selected workspace/chat files back to swarm.
 pub const ENV_STATE_SYNC_URL: &str = "SWARM_STATE_SYNC_URL";
 /// Per-instance bearer the state worker stamps on state-file POSTs.
-/// Distinct prefix (`st_`) and provider (`state_sync`) from chat and
-/// artefact ingest tokens.
+/// Distinct prefix (`st_`) and generation-scoped provider
+/// (`state_sync:<generation>`) from chat and artefact ingest tokens.
 pub const ENV_STATE_SYNC_TOKEN: &str = "SWARM_STATE_SYNC_TOKEN";
 
 /// Path the ingest URL appends to `self.proxy_base`.  Kept as a

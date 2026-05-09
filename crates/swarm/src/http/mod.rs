@@ -119,9 +119,10 @@ pub struct AppState {
     /// so destroyed/reset cubes don't break still-active share URLs
     /// or the swarm UI's artefact list.
     pub artefact_cache: crate::artefacts::ArtefactCache,
-    /// Sealed mirror of selected dyson workspace/chat state files.
+    /// Swarm-owned selected dyson workspace/chat state files.
     /// Written by the internal state-sync endpoint with an `st_`
-    /// per-instance bearer; bodies are encrypted before disk.
+    /// generation-scoped bearer; bodies are encrypted before entering
+    /// the store.
     pub state_files: crate::state_files::StateFiles,
     /// Shared skill marketplace catalog. Swarm owns catalog ingestion;
     /// Dyson instances install selected packages into their own workspaces.
@@ -362,10 +363,8 @@ mod tests {
             Arc::new(crate::webhooks::NullWebhookDispatcher),
             cipher_dir.clone(),
         ));
-        let cache_dir = tempfile::tempdir().unwrap();
         let artefact_cache = Arc::new(crate::artefacts::ArtefactCacheService::new(
             pool.clone(),
-            cache_dir.path().to_path_buf(),
             cipher_dir.clone(),
         ));
         let shares_svc = Arc::new(crate::shares::ShareService::new(
@@ -378,12 +377,8 @@ mod tests {
         ));
         let state_files = Arc::new(crate::state_files::StateFileService::new(
             pool.clone(),
-            cache_dir.path().to_path_buf(),
             cipher_dir.clone(),
         ));
-        // Leak the tempdir so the body files outlive the test scope —
-        // the test harness exits soon after either way.
-        std::mem::forget(cache_dir);
         let state = AppState {
             user_secrets,
             system_secrets,

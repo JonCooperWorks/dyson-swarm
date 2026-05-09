@@ -11,7 +11,7 @@
  * "sweep" button in the panel header that prompts for a chat id and
  * walks the cube's listing into the cache.
  *
- * Bytes live on swarm under [backup].local_cache_dir/artifacts/.
+ * Sealed bytes live in the swarm store.
  * Each row exposes:
  *   - "open"  — authenticated fetch + blob URL window.open
  *   - "share" — mint an anonymous share link with an expiry choice
@@ -174,7 +174,7 @@ export function ArtifactTable({
   const activeShares = activeSharesByArtifact(shareRows);
 
   const remove = async (row) => {
-    if (!confirm(`Remove cached copy of "${row.title}"?  This drops the swarm row + on-disk body; the live cube still has it (until reset).`)) return;
+    if (!confirm(`Remove cached copy of "${row.title}"?  This drops the swarm row and stored body; the live cube still has it until reset.`)) return;
     setBusy(true); setErr(null);
     try {
       await client.deleteInstanceArtifact(row.instance_id, row.id);

@@ -16,10 +16,9 @@
 //! refused locally, swarm refuses too.
 //!
 //! Storage: handed to `ArtefactCacheService::ingest` which seals the
-//! body under the owner's age cipher and writes it to disk under
-//! `<local_cache_dir>/artefacts/<instance>/<chat>/<artefact_id>.body`.
+//! body under the owner's age cipher and stores it in the swarm DB.
 //! Idempotent on `(instance_id, chat_id, artefact_id)` so a dyson-
-//! side retry produces the same on-disk state.
+//! side retry produces the same durable state.
 //!
 //! Mounted unauthenticated under `/v1/internal/` (alongside
 //! `instances::internal_router`).  The bearer-token check in this
@@ -72,7 +71,7 @@ struct IngestRequest {
     created_at: i64,
     /// Base64-encoded body bytes.  `None` is a metadata-only refresh
     /// (the existing `ArtefactCacheService::ingest` semantics) — the
-    /// row's existing on-disk body is preserved.  `Some("")` is a
+    /// row's existing stored body is preserved.  `Some("")` is a
     /// distinct signal: the artefact's body is known-empty.
     #[serde(default)]
     body_b64: Option<String>,
@@ -309,12 +308,7 @@ mod tests {
             Arc::new(crate::webhooks::NullWebhookDispatcher),
             cipher_dir.clone(),
         ));
-        let cache_dir = tempfile::tempdir().unwrap();
-        let artefact_cache = Arc::new(ArtefactCacheService::new(
-            pool.clone(),
-            cache_dir.path().to_path_buf(),
-            cipher_dir.clone(),
-        ));
+        let artefact_cache = Arc::new(ArtefactCacheService::new(pool.clone(), cipher_dir.clone()));
         let shares_svc = Arc::new(crate::shares::ShareService::new(
             pool.clone(),
             user_secrets_svc.clone(),
@@ -325,7 +319,6 @@ mod tests {
         ));
         let state_files = Arc::new(crate::state_files::StateFileService::new(
             pool.clone(),
-            cache_dir.path().to_path_buf(),
             cipher_dir.clone(),
         ));
 
@@ -353,6 +346,7 @@ mod tests {
                 name: String::new(),
                 task: String::new(),
                 cube_sandbox_id: Some("cube-x".into()),
+                state_generation: String::new(),
                 template_id: "t".into(),
                 status: InstanceStatus::Live,
                 bearer_token: "b".into(),
@@ -413,10 +407,9 @@ mod tests {
         });
         let url = format!("http://{addr}");
 
-        // Leak the tempdirs so the bodies + keys outlive the test —
-        // matches the existing http fixture pattern.
+        // Leak the keys so the cipher directory outlives the test
+        // server task.
         std::mem::forget(keys);
-        std::mem::forget(cache_dir);
 
         Fixture {
             url,
@@ -599,9 +592,9 @@ mod tests {
             .unwrap();
         assert_eq!(plain, b"# Findings\n\n* a\n");
 
-        // Disk holds ciphertext, not plaintext.
-        let on_disk = std::fs::read(f.state.artefact_cache.body_path_for(&row)).unwrap();
-        assert!(on_disk.starts_with(b"-----BEGIN AGE ENCRYPTED FILE-----"));
+        // Store holds ciphertext, not plaintext.
+        let stored = row.body_ciphertext.as_deref().expect("sealed body");
+        assert!(stored.starts_with(b"-----BEGIN AGE ENCRYPTED FILE-----"));
     }
 
     #[tokio::test]

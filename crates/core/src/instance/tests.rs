@@ -390,12 +390,12 @@ async fn create_returns_url_and_injects_managed_env() {
     );
     let state_resolved = tokens.resolve(state_sync_token).await.unwrap().unwrap();
     assert_eq!(state_resolved.instance_id, created.id);
+    let row = instances.get(&created.id).await.unwrap().unwrap();
     assert_eq!(
         state_resolved.provider,
-        crate::db::tokens::STATE_SYNC_PROVIDER
+        crate::db::tokens::state_sync_provider(&row.state_generation)
     );
 
-    let row = instances.get(&created.id).await.unwrap().unwrap();
     assert_eq!(row.status, InstanceStatus::Live);
 }
 
@@ -2576,6 +2576,7 @@ async fn rotate_binary_skips_when_no_cube_sandbox_id() {
         name: String::new(),
         task: String::new(),
         cube_sandbox_id: None,
+        state_generation: "sg-ancient".into(),
         template_id: "tpl-old".into(),
         status: InstanceStatus::Live,
         bearer_token: "b".into(),
@@ -3755,15 +3756,13 @@ async fn reset_replays_sealed_state_before_enabling_sync() {
         crate::db::test_system_cipher(),
     ));
     let recorder = Arc::new(RecordingReconfigurer::default());
-    let state_root = tempfile::tempdir().unwrap();
     let keys = Box::leak(Box::new(tempfile::tempdir().unwrap()));
     let ciphers: Arc<dyn crate::envelope::CipherDirectory> =
         Arc::new(crate::envelope::AgeCipherDirectory::new(keys.path()).unwrap());
     let user_secrets_store: Arc<dyn crate::traits::UserSecretStore> =
         Arc::new(crate::db::secrets::SqlxUserSecretStore::new(pool.clone()));
     let user_secrets = Arc::new(UserSecretsService::new(user_secrets_store, ciphers.clone()));
-    let state_files =
-        crate::state_files::StateFileService::new(pool.clone(), state_root.path().into(), ciphers);
+    let state_files = crate::state_files::StateFileService::new(pool.clone(), ciphers);
     let isvc = Arc::new(
         InstanceService::new(
             cube.clone(),
@@ -3865,23 +3864,19 @@ async fn reset_replays_sealed_state_before_enabling_sync() {
         )
         .await
         .unwrap();
-    let unreadable = state_files
-        .ingest(
-            crate::state_files::StateFileMeta {
-                instance_id: &src.id,
-                owner_id: &owner,
-                namespace: "chats",
-                path: "c-0001/artefacts/a1.body",
-                mime: Some("application/octet-stream"),
-                updated_at: 1_777_700_003,
-            },
-            b"sealed then corrupted",
-        )
-        .await
-        .unwrap();
-    tokio::fs::write(
-        state_files.body_path_for(&unreadable),
-        b"-----BEGIN AGE ENCRYPTED FILE-----\nnot a valid sealed body\n",
+    crate::db::state_files::upsert(
+        &pool,
+        crate::db::state_files::UpsertSpec {
+            instance_id: &src.id,
+            owner_id: &owner,
+            namespace: "chats",
+            path: "c-0001/artefacts/a1.body",
+            mime: Some("application/octet-stream"),
+            bytes: 23,
+            body_ciphertext: b"-----BEGIN AGE ENCRYPTED FILE-----\nnot a valid sealed body\n",
+            updated_at: 1_777_700_003,
+            synced_at: 1_777_700_003,
+        },
     )
     .await
     .unwrap();
@@ -3992,14 +3987,12 @@ async fn runtime_config_sync_replays_sealed_chats_before_enabling_sync() {
         crate::db::test_system_cipher(),
     ));
     let recorder = Arc::new(RecordingReconfigurer::default());
-    let state_root = tempfile::tempdir().unwrap();
     let keys = Box::leak(Box::new(tempfile::tempdir().unwrap()));
     let ciphers: Arc<dyn crate::envelope::CipherDirectory> =
         Arc::new(crate::envelope::AgeCipherDirectory::new(keys.path()).unwrap());
     let ciphers_for_zero = ciphers.clone();
     let state_files = Arc::new(crate::state_files::StateFileService::new(
         pool.clone(),
-        state_root.path().into(),
         ciphers.clone(),
     ));
     let user_secrets_store: Arc<dyn crate::traits::UserSecretStore> =
@@ -4065,24 +4058,11 @@ async fn runtime_config_sync_replays_sealed_chats_before_enabling_sync() {
         .await
         .unwrap();
     let zero_path = "c-empty/transcript.json";
-    let zero_body_path = format!(
-        "state/{}/chats/{}.body",
-        src.id,
-        base64::Engine::encode(
-            &base64::engine::general_purpose::URL_SAFE_NO_PAD,
-            zero_path.as_bytes(),
-        )
-    );
-    let zero_body_abs = state_root.path().join(&zero_body_path);
-    if let Some(parent) = zero_body_abs.parent() {
-        tokio::fs::create_dir_all(parent).await.unwrap();
-    }
     let sealed_zero = ciphers_for_zero
         .for_user(&owner)
         .unwrap()
         .seal(b"")
         .unwrap();
-    tokio::fs::write(&zero_body_abs, sealed_zero).await.unwrap();
     crate::db::state_files::upsert(
         &pool,
         crate::db::state_files::UpsertSpec {
@@ -4092,7 +4072,7 @@ async fn runtime_config_sync_replays_sealed_chats_before_enabling_sync() {
             path: zero_path,
             mime: Some("application/json"),
             bytes: 0,
-            body_path: &zero_body_path,
+            body_ciphertext: &sealed_zero,
             updated_at: 1_777_730_002,
             synced_at: 1_777_730_002,
         },
@@ -4141,118 +4121,6 @@ async fn runtime_config_sync_replays_sealed_chats_before_enabling_sync() {
 }
 
 #[tokio::test]
-async fn runtime_config_sync_replays_legacy_plaintext_chats_and_reseals() {
-    let pool = open_in_memory().await.unwrap();
-    let owner = "cab0feed".repeat(4);
-    sqlx::query("INSERT INTO users (id, subject, status, created_at) VALUES (?, ?, 'active', ?)")
-        .bind(&owner)
-        .bind(&owner)
-        .bind(0i64)
-        .execute(&pool)
-        .await
-        .unwrap();
-
-    let cube = MockCube::new();
-    let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(
-        pool.clone(),
-        crate::db::test_system_cipher(),
-    ));
-    let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(
-        pool.clone(),
-        crate::db::test_system_cipher(),
-    ));
-    let recorder = Arc::new(RecordingReconfigurer::default());
-    let state_root = tempfile::tempdir().unwrap();
-    let keys = Box::leak(Box::new(tempfile::tempdir().unwrap()));
-    let ciphers: Arc<dyn crate::envelope::CipherDirectory> =
-        Arc::new(crate::envelope::AgeCipherDirectory::new(keys.path()).unwrap());
-    let state_files = Arc::new(crate::state_files::StateFileService::new(
-        pool.clone(),
-        state_root.path().into(),
-        ciphers.clone(),
-    ));
-    let user_secrets_store: Arc<dyn crate::traits::UserSecretStore> =
-        Arc::new(crate::db::secrets::SqlxUserSecretStore::new(pool.clone()));
-    let user_secrets = Arc::new(UserSecretsService::new(user_secrets_store, ciphers));
-    let isvc = Arc::new(
-        InstanceService::new(
-            cube.clone(),
-            instances.clone(),
-            tokens,
-            "https://swarm.test/llm",
-        )
-        .with_reconfigurer(recorder.clone())
-        .with_state_files(state_files.clone())
-        .with_mcp_secrets(user_secrets),
-    );
-
-    let src = isvc
-        .create(
-            &owner,
-            CreateRequest {
-                template_id: "tpl-v1".into(),
-                name: Some("legacy-live-mirror".into()),
-                task: Some("keep old chat history".into()),
-                env: env_with_model(),
-                ttl_seconds: None,
-                network_policy: NetworkPolicy::Open,
-                mcp_servers: Vec::new(),
-            },
-        )
-        .await
-        .unwrap();
-    recorder.pushed.lock().unwrap().clear();
-    recorder.restored.lock().unwrap().clear();
-    recorder.events.lock().unwrap().clear();
-
-    let transcript = state_files
-        .ingest(
-            crate::state_files::StateFileMeta {
-                instance_id: &src.id,
-                owner_id: &owner,
-                namespace: "chats",
-                path: "c-legacy/transcript.json",
-                mime: Some("application/json"),
-                updated_at: 1_777_740_001,
-            },
-            br#"[{"role":"user","content":"legacy mirror"}]"#,
-        )
-        .await
-        .unwrap();
-    tokio::fs::write(
-        state_files.body_path_for(&transcript),
-        br#"[{"role":"user","content":"legacy mirror"}]"#,
-    )
-    .await
-    .unwrap();
-
-    let (visited, succeeded) = isvc.sync_runtime_config_all().await.unwrap();
-    assert_eq!((visited, succeeded), (1, 1));
-
-    let restored = recorder.restored.lock().unwrap();
-    assert!(
-        restored.iter().any(|(_, _, b)| b.namespace == "chats"
-            && b.path == "c-legacy/transcript.json"
-            && b.body_b64.as_deref()
-                == Some("W3sicm9sZSI6InVzZXIiLCJjb250ZW50IjoibGVnYWN5IG1pcnJvciJ9XQ==")),
-        "legacy plaintext mirrored transcripts must still replay"
-    );
-    drop(restored);
-
-    let on_disk = tokio::fs::read(state_files.body_path_for(&transcript))
-        .await
-        .unwrap();
-    assert!(
-        on_disk.starts_with(crate::webhooks::AGE_ARMOR_PREFIX),
-        "legacy plaintext mirror body should be re-sealed after replay"
-    );
-    assert_eq!(
-        state_files.read_body(&transcript).await.unwrap().unwrap(),
-        br#"[{"role":"user","content":"legacy mirror"}]"#
-    );
-}
-
-#[tokio::test]
 async fn binary_rotation_replays_sealed_chats_before_enabling_sync() {
     let pool = open_in_memory().await.unwrap();
     let owner = "facefeed".repeat(4);
@@ -4275,13 +4143,11 @@ async fn binary_rotation_replays_sealed_chats_before_enabling_sync() {
     ));
     let snaps: Arc<dyn SnapshotStore> = Arc::new(SqliteSnapshotStore::new(pool.clone()));
     let recorder = Arc::new(RecordingReconfigurer::default());
-    let state_root = tempfile::tempdir().unwrap();
     let keys = Box::leak(Box::new(tempfile::tempdir().unwrap()));
     let ciphers: Arc<dyn crate::envelope::CipherDirectory> =
         Arc::new(crate::envelope::AgeCipherDirectory::new(keys.path()).unwrap());
     let state_files = Arc::new(crate::state_files::StateFileService::new(
         pool.clone(),
-        state_root.path().into(),
         ciphers.clone(),
     ));
     let user_secrets_store: Arc<dyn crate::traits::UserSecretStore> =
@@ -4485,13 +4351,11 @@ async fn binary_rotation_tolerates_unreadable_mirror_rows_from_snapshot() {
     ));
     let snaps: Arc<dyn SnapshotStore> = Arc::new(SqliteSnapshotStore::new(pool.clone()));
     let recorder = Arc::new(RecordingReconfigurer::default());
-    let state_root = tempfile::tempdir().unwrap();
     let keys = Box::leak(Box::new(tempfile::tempdir().unwrap()));
     let ciphers: Arc<dyn crate::envelope::CipherDirectory> =
         Arc::new(crate::envelope::AgeCipherDirectory::new(keys.path()).unwrap());
     let state_files = Arc::new(crate::state_files::StateFileService::new(
         pool.clone(),
-        state_root.path().into(),
         ciphers,
     ));
     let isvc = Arc::new(
@@ -4546,24 +4410,21 @@ async fn binary_rotation_tolerates_unreadable_mirror_rows_from_snapshot() {
         )
         .await
         .unwrap();
-    let unreadable = state_files
-        .ingest(
-            crate::state_files::StateFileMeta {
-                instance_id: &src.id,
-                owner_id: &owner,
-                namespace: "chats",
-                path: "c-legacy/activity.jsonl",
-                mime: Some("application/jsonl"),
-                updated_at: 1_777_720_001,
-            },
-            br#"{"event":"legacy"}"#,
-        )
-        .await
-        .unwrap();
-    std::fs::write(
-        state_files.body_path_for(&unreadable),
-        b"-----BEGIN AGE ENCRYPTED FILE-----\nnot a valid sealed body\n",
+    crate::db::state_files::upsert(
+        &pool,
+        crate::db::state_files::UpsertSpec {
+            instance_id: &src.id,
+            owner_id: &owner,
+            namespace: "chats",
+            path: "c-legacy/activity.jsonl",
+            mime: Some("application/jsonl"),
+            bytes: 18,
+            body_ciphertext: b"-----BEGIN AGE ENCRYPTED FILE-----\nnot a valid sealed body\n",
+            updated_at: 1_777_720_001,
+            synced_at: 1_777_720_001,
+        },
     )
+    .await
     .unwrap();
 
     let report = isvc.rotate_binary_all(&ssvc, "tpl-v2").await.unwrap();

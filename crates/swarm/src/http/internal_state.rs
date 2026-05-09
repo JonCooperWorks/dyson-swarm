@@ -2,10 +2,11 @@
 //!
 //! Dyson calls this from its swarm-mode background worker to mirror
 //! selected workspace files back to the parent swarm. Auth is a
-//! per-instance `st_<32hex>` bearer minted by swarm and scoped through
-//! the same token resolver as `/llm` and artefact ingest. The resolved
-//! token's `instance_id` is authoritative; the request body cannot
-//! write into another instance or another tenant's owner cipher.
+//! per-instance, generation-scoped `st_<32hex>` bearer minted by swarm
+//! and scoped through the same token resolver as `/llm` and artefact
+//! ingest. The resolved token's `instance_id` is authoritative; the
+//! request body cannot write into another instance, another generation,
+//! or another tenant's owner cipher.
 
 use axum::Router;
 use axum::body::Body;
@@ -57,9 +58,6 @@ async fn ingest_file(State(state): State<AppState>, req: Request<Body>) -> Statu
             return StatusCode::INTERNAL_SERVER_ERROR;
         }
     };
-    if token_record.provider != crate::db::tokens::STATE_SYNC_PROVIDER {
-        return StatusCode::UNAUTHORIZED;
-    }
     let instance_id = token_record.instance_id;
 
     let instance = match state.instances.get_unscoped(&instance_id).await {
@@ -74,6 +72,18 @@ async fn ingest_file(State(state): State<AppState>, req: Request<Body>) -> Statu
             return StatusCode::INTERNAL_SERVER_ERROR;
         }
     };
+    if !crate::db::tokens::state_sync_provider_matches(
+        &token_record.provider,
+        &instance.state_generation,
+    ) {
+        tracing::warn!(
+            instance = %instance_id,
+            token_provider = %token_record.provider,
+            current_generation = %instance.state_generation,
+            "state ingest: rejected stale state-sync token"
+        );
+        return StatusCode::UNAUTHORIZED;
+    }
 
     let body_bytes = match axum::body::to_bytes(req.into_body(), MAX_STATE_BODY).await {
         Ok(b) => b,

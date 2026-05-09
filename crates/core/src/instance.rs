@@ -192,11 +192,15 @@ pub struct InstanceService {
     /// agent only ever sees the swarm proxy URL — never the real
     /// upstream + token.
     mcp_secrets: Option<Arc<UserSecretsService>>,
-    /// Swarm-side sealed mirror of dyson workspace/chat state.  When
-    /// present, rebuild paths replay this into the fresh sandbox before
-    /// cutting traffic over, so redeploys do not surface an empty chat
-    /// or workspace while the cube catches up.
+    /// Swarm-side sealed workspace/chat state.  Rebuild paths replay
+    /// this into the fresh sandbox before granting that sandbox write
+    /// authority, so redeploys do not surface empty state or accept
+    /// stale writes from an older cube.
     state_files: Option<crate::state_files::StateFiles>,
+}
+
+fn mint_state_generation() -> String {
+    Uuid::new_v4().simple().to_string()
 }
 
 /// Anything that can push swarm-side identity/task/model state to a
@@ -424,7 +428,14 @@ impl InstanceService {
     async fn runtime_tokens_for_instance(
         &self,
         instance_id: &str,
+        state_generation: &str,
     ) -> Result<RuntimeTokens, SwarmError> {
+        let state_generation = state_generation.trim();
+        if state_generation.is_empty() {
+            return Err(SwarmError::Internal(format!(
+                "instance {instance_id} is missing a state generation; recreate it as a swarm-backed workspace"
+            )));
+        }
         let proxy = match self.tokens.lookup_by_instance(instance_id).await? {
             Some(t) => t,
             None => self.tokens.mint(instance_id, SHARED_PROVIDER).await?,
@@ -437,18 +448,24 @@ impl InstanceService {
             Some(t) => t,
             None => self.tokens.mint_ingest(instance_id).await?,
         };
+        let state_provider = crate::db::tokens::state_sync_provider(state_generation);
         let state_sync = match self
             .tokens
-            .lookup_by_instance_for_provider(instance_id, crate::db::tokens::STATE_SYNC_PROVIDER)
+            .lookup_by_instance_for_provider(instance_id, &state_provider)
             .await?
         {
             Some(t) => t,
-            None => self.tokens.mint_state_sync(instance_id).await?,
+            None => {
+                self.tokens
+                    .mint_state_sync_for_generation(instance_id, state_generation)
+                    .await?
+            }
         };
         Ok(RuntimeTokens {
             proxy,
             ingest,
             state_sync,
+            state_generation: state_generation.to_owned(),
         })
     }
 
@@ -489,6 +506,7 @@ impl InstanceService {
             target_template_id: target_template_id.to_owned(),
             target_policy,
             resolved_policy,
+            target_state_generation: mint_state_generation(),
         })
     }
 
@@ -816,7 +834,10 @@ impl InstanceService {
                 );
                 continue;
             };
-            let tokens = match self.runtime_tokens_for_instance(&row.id).await {
+            let tokens = match self
+                .runtime_tokens_for_instance(&row.id, &row.state_generation)
+                .await
+            {
                 Ok(tokens) => tokens,
                 Err(e) => {
                     tracing::warn!(
@@ -1234,7 +1255,9 @@ impl InstanceService {
         // Phase 2: build env envelope using the EXISTING bearer + id.
         // Runtime tokens are repaired here so legacy rows missing any
         // sibling token self-heal during rotation.
-        let runtime_tokens = self.runtime_tokens_for_instance(&source.id).await?;
+        let runtime_tokens = self
+            .runtime_tokens_for_instance(&source.id, &plan.target_state_generation)
+            .await?;
         let replay_state_files = self.state_files.clone();
 
         // Phase 3: spin up a fresh cube under the new template using
@@ -1300,6 +1323,7 @@ impl InstanceService {
             .replace_cube_sandbox(
                 &source.id,
                 &info.sandbox_id,
+                &runtime_tokens.state_generation,
                 &plan.target_template_id,
                 target_policy,
                 &row_policy_cidrs(target_policy, resolved),
@@ -1413,7 +1437,10 @@ impl InstanceService {
             "restore-snapshot-in-place: creating replacement cube from deploy snapshot"
         );
 
-        let runtime_tokens = self.runtime_tokens_for_instance(&source.id).await?;
+        let target_state_generation = mint_state_generation();
+        let runtime_tokens = self
+            .runtime_tokens_for_instance(&source.id, &target_state_generation)
+            .await?;
         let managed = managed_env(
             &self.proxy_base,
             &runtime_tokens.proxy,
@@ -1447,6 +1474,7 @@ impl InstanceService {
             .replace_cube_sandbox(
                 &source.id,
                 &info.sandbox_id,
+                &runtime_tokens.state_generation,
                 &target_template,
                 &source.network_policy,
                 &row_policy_cidrs(&source.network_policy, &resolved),
@@ -1544,7 +1572,9 @@ impl InstanceService {
             "recreate-in-place: starting clean swap"
         );
 
-        let runtime_tokens = self.runtime_tokens_for_instance(&source.id).await?;
+        let runtime_tokens = self
+            .runtime_tokens_for_instance(&source.id, &plan.target_state_generation)
+            .await?;
         let replay_state_files = self.state_files.clone();
         let info = self
             .create_in_place_swap_sandbox(
@@ -1584,6 +1614,7 @@ impl InstanceService {
             .replace_cube_sandbox(
                 &source.id,
                 &info.sandbox_id,
+                &runtime_tokens.state_generation,
                 &plan.target_template_id,
                 &plan.target_policy,
                 &row_policy_cidrs(&plan.target_policy, &plan.resolved_policy),
@@ -1643,7 +1674,9 @@ impl InstanceService {
             "reset-in-place: starting clean rebuild with sealed state replay"
         );
 
-        let runtime_tokens = self.runtime_tokens_for_instance(&source.id).await?;
+        let runtime_tokens = self
+            .runtime_tokens_for_instance(&source.id, &plan.target_state_generation)
+            .await?;
         let info = self
             .create_in_place_swap_sandbox(&plan, &runtime_tokens, None, true)
             .await?;
@@ -1676,6 +1709,7 @@ impl InstanceService {
             .replace_cube_sandbox(
                 &source.id,
                 &info.sandbox_id,
+                &runtime_tokens.state_generation,
                 &plan.target_template_id,
                 &plan.target_policy,
                 &row_policy_cidrs(&plan.target_policy, &plan.resolved_policy),
@@ -2041,6 +2075,7 @@ impl InstanceService {
 
         let id = self.mint_unique_instance_id(owner_id).await?;
         let bearer = Uuid::new_v4().simple().to_string();
+        let state_generation = mint_state_generation();
         let now = now_secs();
         // Dysons are long-lived employees, not throwaway batch jobs —
         // default to no expiry.  The TTL sweeper filters
@@ -2113,6 +2148,7 @@ impl InstanceService {
             name: name.clone(),
             task: task.clone(),
             cube_sandbox_id: None,
+            state_generation: state_generation.clone(),
             template_id: req.template_id.clone(),
             status: InstanceStatus::Cold,
             bearer_token: bearer.clone(),
@@ -2136,7 +2172,10 @@ impl InstanceService {
         // in `proxy_tokens`.  Same revoke path (`revoke_for_instance`
         // at destroy) so we don't need a parallel cleanup hook.
         let ingest_token = self.tokens.mint_ingest(&id).await?;
-        let state_sync_token = self.tokens.mint_state_sync(&id).await?;
+        let state_sync_token = self
+            .tokens
+            .mint_state_sync_for_generation(&id, &state_generation)
+            .await?;
 
         // Persist MCP server records under the owner's cipher so the
         // proxy path can decrypt them per-request.  We do this BEFORE
@@ -3366,6 +3405,7 @@ impl InstanceService {
     ) -> Result<CreatedInstance, SwarmError> {
         let id = self.mint_unique_instance_id(owner_id).await?;
         let bearer = Uuid::new_v4().simple().to_string();
+        let state_generation = mint_state_generation();
         let now = now_secs();
         // Same default-no-expiry policy as `create`; opt-in via ttl_seconds.
         let expires_at = req.ttl_seconds.map(|ttl| now + ttl);
@@ -3394,6 +3434,7 @@ impl InstanceService {
             name: restored_name.clone(),
             task: restored_task.clone(),
             cube_sandbox_id: None,
+            state_generation: state_generation.clone(),
             template_id: req.template_id.clone(),
             status: InstanceStatus::Cold,
             bearer_token: bearer.clone(),
@@ -3417,7 +3458,10 @@ impl InstanceService {
         // a brand-new instance id and bearer, so a sibling token here
         // is a fresh row, not a reused one.
         let ingest_token = self.tokens.mint_ingest(&id).await?;
-        let state_sync_token = self.tokens.mint_state_sync(&id).await?;
+        let state_sync_token = self
+            .tokens
+            .mint_state_sync_for_generation(&id, &state_generation)
+            .await?;
 
         // Identity envelope. Re-injected on restore so a fresh sandbox
         // (no SOUL.md) can seed itself; an inherited image with prior

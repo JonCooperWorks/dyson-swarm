@@ -335,8 +335,8 @@ export class SwarmClient {
   // ─── Swarm-side artifact cache ─────────────────────────────────
   //
   // Backs the "all my artifacts" panel and the share-mint affordance.
-  // Cubes are ephemeral; this surface persists past cube reset (bytes
-  // live on swarm under [backup].local_cache_dir).  Each row is
+  // Cubes are ephemeral; this surface persists past cube reset (sealed
+  // bytes live in the swarm store). Each row is
   // `{id, instance_id, chat_id, kind, title, mime, bytes, created_at,
   // cached_at}`.
 
@@ -452,7 +452,7 @@ export class SwarmClient {
     return { blob, mime, text };
   }
 
-  /// Drop a row + its on-disk body.  Idempotent — 204 even when no
+  /// Drop a row + its stored body.  Idempotent — 204 even when no
   /// row existed or the row wasn't owned by the caller.
   deleteInstanceArtifact(instanceId, artifactId) {
     return this._json(

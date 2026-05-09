@@ -201,10 +201,10 @@ struct ResolvedArtefact {
 /// Read-through, write-through artefact resolver.
 ///
 /// Order of operations:
-/// 1. Cache lookup — if the row exists AND its on-disk body is still
-///    there, serve it directly.  This is the post-cube-reset path:
-///    once we've cached an artefact, the share URL keeps working
-///    even if its source cube is destroyed.
+/// 1. Store lookup — if the row exists with a sealed body, serve it
+///    directly. This is the post-cube-reset path: once swarm has an
+///    artefact body, the share URL keeps working even if its source
+///    cube is destroyed.
 /// 2. Upstream fetch from the live cube via the per-instance bearer.
 /// 3. Discover title / kind via the cube's
 ///    `/api/conversations/:chat/artefacts` listing (best effort).
@@ -216,8 +216,8 @@ async fn resolve_artefact(
     state: &AppState,
     verified: &crate::shares::service::VerifiedShare,
 ) -> Option<ResolvedArtefact> {
-    // 1. Cache lookup.  We require BOTH the row and an on-disk body
-    // to be present; a row without a body falls through to upstream
+    // 1. Store lookup.  We require BOTH the row and a stored body to
+    // be present; a row without a body falls through to upstream
     // (and re-ingests on the way back).
     if let Ok(Some(row)) = state
         .artefact_cache

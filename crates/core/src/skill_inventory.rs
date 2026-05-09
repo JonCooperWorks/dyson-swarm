@@ -247,22 +247,17 @@ mod tests {
 
     const ALICE: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
-    async fn svc() -> (StateFileService, tempfile::TempDir, tempfile::TempDir) {
+    async fn svc() -> (StateFileService, tempfile::TempDir) {
         let pool = open_in_memory().await.unwrap();
-        let dir = tempfile::tempdir().unwrap();
         let keys = tempfile::tempdir().unwrap();
         let ciphers: Arc<dyn crate::envelope::CipherDirectory> =
             Arc::new(crate::envelope::AgeCipherDirectory::new(keys.path()).unwrap());
-        (
-            StateFileService::new(pool, dir.path().to_path_buf(), ciphers),
-            dir,
-            keys,
-        )
+        (StateFileService::new(pool, ciphers), keys)
     }
 
     #[tokio::test]
     async fn derives_marketplace_and_learned_skills_from_state_files() {
-        let (svc, _dir, _keys) = svc().await;
+        let (svc, _keys) = svc().await;
         svc.ingest(
             crate::state_files::StateFileMeta {
                 instance_id: "inst-a",
@@ -331,7 +326,7 @@ mod tests {
 
     #[tokio::test]
     async fn tombstoned_skill_files_disappear_from_inventory() {
-        let (svc, _dir, _keys) = svc().await;
+        let (svc, _keys) = svc().await;
         svc.ingest(
             crate::state_files::StateFileMeta {
                 instance_id: "inst-a",

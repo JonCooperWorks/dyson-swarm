@@ -81,6 +81,7 @@ mod tests {
             name: String::new(),
             task: String::new(),
             cube_sandbox_id: sandbox_id.map(str::to_owned),
+            state_generation: String::new(),
             template_id: String::new(),
             status: InstanceStatus::Live,
             bearer_token: "tok".into(),

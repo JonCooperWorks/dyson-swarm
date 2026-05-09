@@ -63,6 +63,9 @@ impl StateFileService {
         validate_instance_id(meta.instance_id)?;
         validate_state_file_path(meta.namespace, meta.path)?;
         validate_body(meta.namespace, meta.path, body)?;
+        if let Some(existing) = self.preserve_existing_chat_row(&meta, body).await? {
+            return Ok(existing);
+        }
         let cipher = self
             .ciphers
             .for_user(meta.owner_id)
@@ -89,6 +92,37 @@ impl StateFileService {
             },
         )
         .await?)
+    }
+
+    async fn preserve_existing_chat_row(
+        &self,
+        meta: &StateFileMeta<'_>,
+        body: &[u8],
+    ) -> Result<Option<StateFileRow>, StateFileError> {
+        if !is_placeholder_chat_state(meta.namespace, meta.path, body) {
+            return Ok(None);
+        }
+        let incoming_bytes = i64::try_from(body.len()).unwrap_or(i64::MAX);
+        let Some(existing) =
+            store::find(&self.pool, meta.instance_id, meta.namespace, meta.path).await?
+        else {
+            return Ok(None);
+        };
+        if existing.deleted_at.is_none()
+            && existing.body_ciphertext.is_some()
+            && existing.bytes > incoming_bytes
+        {
+            tracing::info!(
+                instance = %meta.instance_id,
+                namespace = %meta.namespace,
+                path = %meta.path,
+                existing_bytes = existing.bytes,
+                incoming_bytes,
+                "state file store: ignored placeholder chat overwrite"
+            );
+            return Ok(Some(existing));
+        }
+        Ok(None)
     }
 
     pub async fn tombstone(&self, meta: StateFileMeta<'_>) -> Result<StateFileRow, StateFileError> {
@@ -267,6 +301,39 @@ pub fn is_zero_byte_chat_transcript(namespace: &str, path: &str, body: &[u8]) ->
     namespace == "chats" && path.ends_with("/transcript.json") && body.is_empty()
 }
 
+fn is_placeholder_chat_state(namespace: &str, path: &str, body: &[u8]) -> bool {
+    is_empty_chat_transcript(namespace, path, body)
+        || is_placeholder_chat_title(namespace, path, body)
+}
+
+fn is_empty_chat_transcript(namespace: &str, path: &str, body: &[u8]) -> bool {
+    namespace == "chats"
+        && path.ends_with("/transcript.json")
+        && trim_ascii_whitespace(body) == b"[]"
+}
+
+fn is_placeholder_chat_title(namespace: &str, path: &str, body: &[u8]) -> bool {
+    namespace == "chats"
+        && path.ends_with("/title.txt")
+        && trim_ascii_whitespace(body) == b"New conversation"
+}
+
+fn trim_ascii_whitespace(mut bytes: &[u8]) -> &[u8] {
+    while let Some((first, rest)) = bytes.split_first() {
+        if !first.is_ascii_whitespace() {
+            break;
+        }
+        bytes = rest;
+    }
+    while let Some((last, rest)) = bytes.split_last() {
+        if !last.is_ascii_whitespace() {
+            break;
+        }
+        bytes = rest;
+    }
+    bytes
+}
+
 fn validate_body(namespace: &str, path: &str, body: &[u8]) -> Result<(), StateFileError> {
     if is_zero_byte_chat_transcript(namespace, path, body) {
         return Err(StateFileError::Invalid(
@@ -335,6 +402,51 @@ mod tests {
         let err = svc.ingest(chat_meta, b"").await.unwrap_err();
 
         assert!(matches!(err, StateFileError::Invalid(_)));
+    }
+
+    #[tokio::test]
+    async fn placeholder_chat_transcript_does_not_replace_existing_body() {
+        let (svc, _keys) = svc().await;
+        let mut chat_meta = meta("c-1/transcript.json");
+        chat_meta.namespace = "chats";
+        chat_meta.mime = Some("application/json");
+
+        let row = svc
+            .ingest(
+                chat_meta.clone(),
+                br#"[{"role":"assistant","content":"kept"}]"#,
+            )
+            .await
+            .unwrap();
+        assert!(row.bytes > 2);
+
+        let row = svc.ingest(chat_meta, b"[]").await.unwrap();
+        assert!(row.bytes > 2);
+        assert_eq!(
+            svc.read_body(&row).await.unwrap().unwrap(),
+            br#"[{"role":"assistant","content":"kept"}]"#
+        );
+    }
+
+    #[tokio::test]
+    async fn placeholder_chat_title_does_not_replace_existing_title() {
+        let (svc, _keys) = svc().await;
+        let mut chat_meta = meta("c-1/title.txt");
+        chat_meta.namespace = "chats";
+        chat_meta.mime = Some("text/plain");
+
+        let row = svc
+            .ingest(chat_meta.clone(), b"Security review: programs")
+            .await
+            .unwrap();
+        assert!(row.bytes > "New conversation".len() as i64);
+
+        let row = svc.ingest(chat_meta, b"New conversation").await.unwrap();
+        assert_eq!(row.bytes, "Security review: programs".len() as i64);
+        assert_eq!(
+            svc.read_body(&row).await.unwrap().unwrap(),
+            b"Security review: programs"
+        );
     }
 
     #[tokio::test]

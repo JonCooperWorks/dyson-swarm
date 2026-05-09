@@ -2458,17 +2458,39 @@ impl InstanceService {
             // call ~1s on the happy path and avoids the race entirely.
             // Failure is fatal to the create — we'd rather surface the
             // problem at create time than ship a half-broken instance.
-            push_with_retry(reconfigurer.as_ref(), &id, &info.sandbox_id, &body)
-                .await
-                .map_err(|err| {
+            if let Err(err) =
+                push_with_retry(reconfigurer.as_ref(), &id, &info.sandbox_id, &body).await
+            {
+                tracing::warn!(
+                    error = %err,
+                    instance = %id,
+                    sandbox = %info.sandbox_id,
+                    "reconfigure: failed during create — destroying half-configured sandbox"
+                );
+                let _ = self.tokens.revoke_for_instance(&id).await;
+                if let Err(destroy_err) = self.cube.destroy_sandbox(&info.sandbox_id).await {
                     tracing::warn!(
-                        error = %err,
+                        error = %destroy_err,
                         instance = %id,
                         sandbox = %info.sandbox_id,
-                        "reconfigure: failed during create — instance would stay on warmup-placeholder"
+                        "reconfigure: failed-create sandbox cleanup failed"
                     );
-                    SwarmError::Internal(format!("configure-push failed: {err}"))
-                })?;
+                }
+                if let Err(status_err) = self
+                    .instances
+                    .update_status(&id, InstanceStatus::Destroyed)
+                    .await
+                {
+                    tracing::warn!(
+                        error = %status_err,
+                        instance = %id,
+                        "reconfigure: failed-create row cleanup failed"
+                    );
+                }
+                return Err(SwarmError::Internal(format!(
+                    "configure-push failed: {err}"
+                )));
+            }
         }
 
         Ok(CreatedInstance {

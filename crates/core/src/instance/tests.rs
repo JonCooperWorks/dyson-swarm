@@ -2103,6 +2103,52 @@ async fn runtime_config_sync_failure_is_visible_on_instance_probe_status() {
     }
 }
 
+#[tokio::test]
+async fn create_configure_failure_destroys_half_configured_sandbox() {
+    let (svc, cube, tokens, instances) = build().await;
+    let svc = svc.with_reconfigurer(Arc::new(FailingPushReconfigurer));
+
+    let err = svc
+        .create(
+            "legacy",
+            CreateRequest {
+                template_id: "tpl".into(),
+                name: Some("smoke".into()),
+                task: Some("say hello".into()),
+                env: env_with_model(),
+                ttl_seconds: Some(3600),
+                network_policy: NetworkPolicy::default(),
+                mcp_servers: Vec::new(),
+            },
+        )
+        .await
+        .expect_err("configure failure should fail the create");
+    assert!(
+        err.to_string().contains("configure-push failed"),
+        "unexpected error: {err}"
+    );
+
+    let rows = instances
+        .list(
+            "legacy",
+            ListFilter {
+                include_destroyed: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    let row = &rows[0];
+    assert_eq!(row.status, InstanceStatus::Destroyed);
+    assert_eq!(row.cube_sandbox_id.as_deref(), Some("sb-1"));
+    assert_eq!(cube.destroyed.lock().unwrap().as_slice(), ["sb-1"]);
+    assert!(
+        tokens.lookup_by_instance(&row.id).await.unwrap().is_none(),
+        "failed create must revoke its proxy token"
+    );
+}
+
 #[test]
 fn semantic_reconfigure_errors_are_not_retried() {
     assert!(is_non_retryable_reconfigure_error(

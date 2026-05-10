@@ -17,21 +17,14 @@ protected rows are excluded according to the service rules.
 
 ## Startup Binary Rotation
 
-Swarm now treats binary rotation as a normal startup behaviour, not an
-optional one-off sweep.
+Startup binary rotation is opt-in. When `rotate_binary_on_startup = true`,
+swarm restarts sweep live instances whose template lags the current default.
+Each matching instance is rotated through snapshot/restore-style orchestration,
+then the old sandbox is replaced by a fresh one running the new binary.
 
-The important current behaviour is:
-
-- live instances whose template lags the current default are rotated
-- rotation is done through snapshot/restore-style orchestration
-- user-visible state is preserved through swarm-managed state
-- the old sandbox is replaced by a fresh one running the new binary
-- the old `rotate_binary_on_startup` config flag is kept only for
-  compatibility; the value is ignored
-
-This is different from the older posture where rotation was documented as an
-opt-in sweep that stranded the old URL. The current config comments are the
-source of truth.
+Keep `rotate_binary_on_startup = false` for ordinary deploys. Swarm-managed
+state is replayed during rotation, but arbitrary local files inside a running
+cube are outside that mirror and can be lost if the source sandbox is replaced.
 
 ## Startup MCP Runtime Restart
 

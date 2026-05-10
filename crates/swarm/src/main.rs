@@ -40,6 +40,16 @@ fn env_flag(name: &str) -> bool {
     )
 }
 
+fn startup_rotation_target(enabled: bool, default_template_id: Option<&str>) -> Option<String> {
+    if !enabled {
+        return None;
+    }
+    default_template_id
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(ToOwned::to_owned)
+}
+
 #[derive(Debug, Parser)]
 #[command(
     name = "swarm",
@@ -64,6 +74,30 @@ The admin API at /v1/* will accept requests with no bearer token.
 Every authenticated response carries X-Swarm-Insecure.
 Do not run this configuration outside a trusted network.
 =================================================================";
+
+#[cfg(test)]
+mod tests {
+    use super::startup_rotation_target;
+
+    #[test]
+    fn startup_rotation_requires_explicit_enable() {
+        assert_eq!(startup_rotation_target(false, Some("tpl-new")), None);
+    }
+
+    #[test]
+    fn startup_rotation_uses_trimmed_default_template_when_enabled() {
+        assert_eq!(
+            startup_rotation_target(true, Some(" tpl-new ")),
+            Some("tpl-new".to_string())
+        );
+    }
+
+    #[test]
+    fn startup_rotation_skips_empty_default_template() {
+        assert_eq!(startup_rotation_target(true, Some("   ")), None);
+        assert_eq!(startup_rotation_target(true, None), None);
+    }
+}
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -352,31 +386,16 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     // Binary rotation sweep.  Opt-in: every Live instance whose cube
     // template is older than `default_template_id` is snapshot+
     // restored onto the current default and the source destroyed.
-    // This closes the gap left by config-only rewires (the image-gen
-    // sweep above) when the fix lives in the dyson binary — config
-    // pushes can't add a new ConfigureBody field, can't change tool
-    // registration logic, can't fix the no-skills-block boot bug.
-    //
-    // Sequenced AFTER the image-gen sweep with a longer settle delay:
-    // config push is cheap; if the lighter work fixes the dyson
-    // there's no reason to bear the snapshot+restore cost.  ≥30s lets
-    // the cubeproxy upstream routing fully warm so the new restore's
-    // configure-push doesn't race a cold nginx and lose to 502s.
-    //
-    // Always run the rotate-binary sweep on startup, IN THE BACKGROUND
-    // so swarm starts accepting traffic immediately while rotations
-    // proceed.  Sequenced one at a time inside `rotate_binary_all` so
-    // the host never carries 2× cube memory at once.  The Phase 0
-    // quiesce gate inside `rotate_in_place` waits for each dyson to go
-    // naturally idle before snapshotting, so users mid-conversation
-    // aren't forced into a 503 — they pause, we swap silently, they
-    // resume on the new cube under the same subdomain.  Skipped only
-    // when `default_template_id` is unset (single-tenant test mode).
+    // This is intentionally not tied to ordinary restarts/deploys:
+    // the durable mirror only covers swarm-managed state, while
+    // running dysons may also hold local workspace state inside the
+    // cube.  Operators can still turn this on for a deliberate binary
+    // migration, but deploys must not silently replace live sandboxes.
     {
-        let target_template = cfg
-            .default_template_id
-            .clone()
-            .filter(|s| !s.trim().is_empty());
+        let target_template = startup_rotation_target(
+            cfg.rotate_binary_on_startup,
+            cfg.default_template_id.as_deref(),
+        );
         if let Some(target) = target_template {
             let isvc = instance_svc.clone();
             let ssvc = snapshot_svc.clone();
@@ -409,8 +428,10 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
                     ),
                 }
             });
-        } else {
+        } else if cfg.rotate_binary_on_startup {
             tracing::debug!("rotate-binary: default_template_id unset — startup sweep skipped");
+        } else {
+            tracing::info!("rotate-binary: startup sweep disabled by config");
         }
     }
 

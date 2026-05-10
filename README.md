@@ -88,8 +88,8 @@ Swarm now has a dedicated docs tree, mirroring the structure used in
 
 ## Notes
 
-- `rotate_binary_on_startup` is kept only for backwards compatibility.
-  Current swarm treats startup binary rotation as an always-on operational
-  behaviour; see [Operations](docs/operations.md).
+- `rotate_binary_on_startup` defaults to false. Keep it off for normal
+  deploys; enable it only for a deliberate binary migration of live instances.
+  See [Operations](docs/operations.md).
 - The host-side `swarmctl mint-api-key` flow is a break-glass tenant access
   path, not an admin-role override; see [Auth and Keys](docs/auth-and-keys.md).

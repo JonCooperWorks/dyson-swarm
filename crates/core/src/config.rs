@@ -96,16 +96,12 @@ pub struct Config {
     #[serde(default)]
     pub openrouter: Option<OpenRouterConfig>,
 
-    /// Deprecated.  Startup binary-rotation is now always-on: every
-    /// swarm restart sweeps Live instances whose cube template is
-    /// older than `default_template_id` and snapshot+swap+destroys
-    /// each onto the current default, one at a time, gated on a
-    /// `/api/admin/quiesce` handshake with each dyson so users
-    /// mid-conversation don't see a 503.  Subdomain + bearer survive
-    /// the swap (rotate_in_place keeps `<id>.<hostname>` stable), so
-    /// the original "rotation is destructive of the URL" rationale
-    /// no longer applies.  Field kept for back-compat with existing
-    /// config TOMLs; value is ignored.
+    /// Opt-in startup binary rotation.  When true, every swarm restart
+    /// sweeps Live instances whose cube template is older than
+    /// `default_template_id` and snapshot+swap+destroys each onto the
+    /// current default, one at a time.  Keep false for normal deploys:
+    /// the state mirror only covers swarm-managed files, not arbitrary
+    /// local workspace state inside a running cube.
     #[serde(default, alias = "rotate_binary_on_startup")]
     pub rotate_binary_on_startup: bool,
 }
@@ -631,6 +627,7 @@ local_cache_dir = "/tmp/cache"
         assert_eq!(cfg.bind, "0.0.0.0:8080");
         assert_eq!(cfg.cube.api_key, "k");
         assert_eq!(cfg.health_probe_interval_seconds, 60);
+        assert!(!cfg.rotate_binary_on_startup);
         assert_eq!(cfg.backup.sink, BackupSinkKind::Local);
         assert_eq!(
             cfg.providers.get("anthropic").unwrap().api_key.as_deref(),

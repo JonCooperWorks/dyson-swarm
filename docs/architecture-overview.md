@@ -37,7 +37,8 @@ this order:
 9. start background loops:
    - instance health probing
    - TTL reaping
-   - startup binary rotation / config rewiring sweeps
+   - config rewiring sweeps
+   - optional startup binary rotation when explicitly enabled
 10. assemble the Axum router and serve
 
 ## Core Data Flows

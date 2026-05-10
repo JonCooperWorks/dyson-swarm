@@ -70,7 +70,7 @@ impl ProxyService {
         providers: Providers,
         default_policy: InstancePolicy,
     ) -> Result<Self, reqwest::Error> {
-        let http = InternalHttpClient::new()?;
+        let http = InternalHttpClient::with_timeout(http::LLM_STREAM_TIMEOUT)?;
         Ok(Self {
             tokens,
             instances,

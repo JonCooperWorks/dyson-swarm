@@ -113,7 +113,16 @@ impl ExternalHttpClient {
         &self,
         validated: &ValidatedOutboundUrl,
     ) -> Result<(reqwest::Client, Url), OutboundUrlError> {
+        self.for_validated_with_timeout(validated, DEFAULT_TIMEOUT)
+    }
+
+    pub fn for_validated_with_timeout(
+        &self,
+        validated: &ValidatedOutboundUrl,
+        timeout: Duration,
+    ) -> Result<(reqwest::Client, Url), OutboundUrlError> {
         let client = shared_defaults(pinned_outbound_client_builder(validated))
+            .timeout(timeout)
             .redirect(redirect_pinned_to(validated))
             .build()
             .map_err(|e| OutboundUrlError::Build(e.to_string()))?;

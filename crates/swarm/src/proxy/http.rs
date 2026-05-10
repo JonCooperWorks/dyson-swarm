@@ -13,12 +13,12 @@
 //! 6. Writes an `llm_audit` row regardless of outcome.
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::Router;
 use axum::body::Body;
 use axum::extract::{Path, Request, State};
-use axum::http::{HeaderMap, HeaderName, Response, StatusCode, Uri};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, Response, StatusCode, Uri, header};
 use axum::routing::any;
 use futures::TryStreamExt;
 use serde::Serialize;
@@ -49,10 +49,12 @@ fn build_pinned_byo_client(
 ) -> Result<reqwest::Client, String> {
     state
         .external_http
-        .for_validated(validated)
+        .for_validated_with_timeout(validated, LLM_STREAM_TIMEOUT)
         .map(|(client, _)| client)
         .map_err(|e| e.to_string())
 }
+
+pub(super) const LLM_STREAM_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 /// Build the `/llm/*` router. Carries its own state and per-instance-bearer
 /// middleware — the admin auth layer does not apply here.
@@ -249,6 +251,15 @@ async fn handle(
     // every hop-by-hop, every cookie, every X-* header, every
     // platform-key-bearing `OpenAI-Organization`/`X-Api-Key`/etc.
     sanitize_request_headers(&mut parts.headers, &provider);
+    // reqwest auto-decodes compressed response bodies. If the tenant's
+    // Accept-Encoding reaches the upstream, long SSE responses can fail
+    // inside reqwest's decoder, or reach Dyson with a stale encoding header
+    // over already-decoded bytes. Ask for identity and treat compression as
+    // hop-local to this proxy.
+    parts.headers.insert(
+        header::ACCEPT_ENCODING,
+        HeaderValue::from_static("identity"),
+    );
     adapter.rewrite_auth(&mut parts.headers, &mut upstream_uri, &real_key);
     if provider == "anthropic" {
         anthropic_adapter::apply_version(&mut parts.headers, &provider_cfg);
@@ -269,13 +280,17 @@ async fn handle(
     // B's prompt by hashing collision.  BYOK doesn't have this issue
     // (each user authenticates with their own Anthropic api-key →
     // their own namespace).
-    let outbound_body = if provider == "anthropic"
+    let mut outbound_json = body_json.clone();
+    let mut outbound_json_changed = false;
+    if provider == "anthropic"
         && matches!(resolved.source, KeySource::Platform)
         && !body_bytes.is_empty()
     {
-        let mut v = body_json.clone();
-        strip_cache_control_in_body(&mut v);
-        match serde_json::to_vec(&v) {
+        strip_cache_control_in_body(&mut outbound_json);
+        outbound_json_changed = true;
+    }
+    let outbound_body = if outbound_json_changed && !body_bytes.is_empty() {
+        match serde_json::to_vec(&outbound_json) {
             Ok(b) => bytes_from_vec(b),
             Err(_) => body_bytes.clone(),
         }
@@ -396,7 +411,7 @@ async fn handle(
     {
         let headers = response.headers_mut().expect("fresh builder has headers");
         for (k, v) in &upstream_headers {
-            if !is_hop_by_hop_str(k.as_str()) {
+            if !is_hop_by_hop_str(k.as_str()) && !is_stream_response_header(k.as_str()) {
                 headers.insert(k.clone(), v.clone());
             }
         }
@@ -437,10 +452,8 @@ fn sanitize_request_headers(headers: &mut HeaderMap, provider: &str) {
 /// headers (e.g. `anthropic-version` on the Anthropic path).
 fn is_allowlisted_header(name: &str, provider: &str) -> bool {
     let n = name.to_ascii_lowercase();
-    matches!(
-        n.as_str(),
-        "content-type" | "accept" | "accept-encoding" | "user-agent"
-    ) || (provider == "anthropic" && n == "anthropic-version")
+    matches!(n.as_str(), "content-type" | "accept" | "user-agent")
+        || (provider == "anthropic" && n == "anthropic-version")
 }
 
 /// Drop any `anthropic-beta` header on the platform-key path so the
@@ -497,6 +510,10 @@ fn is_hop_by_hop(name: &HeaderName) -> bool {
 
 fn is_hop_by_hop_str(name: &str) -> bool {
     HOP_BY_HOP.iter().any(|h| name.eq_ignore_ascii_case(h))
+}
+
+fn is_stream_response_header(name: &str) -> bool {
+    name.eq_ignore_ascii_case("content-length")
 }
 
 #[derive(Serialize)]
@@ -885,6 +902,41 @@ mod tests {
         let body = resp.bytes().await.unwrap();
         assert_eq!(body.as_ref(), expected.as_slice());
         assert_eq!(upstream_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn proxy_forces_identity_encoding_upstream() {
+        let (upstream_url, captured, _) =
+            spawn_streaming_upstream_full(vec![b"data: [DONE]\n\n".to_vec()]).await;
+
+        let pool = open_in_memory().await.unwrap();
+        let (svc, token, _keys) = build_byok_seeded(
+            pool,
+            "openai",
+            upstream_url,
+            "sk-byok-test",
+            permissive_policy(),
+        )
+        .await;
+        let proxy_base = spawn_proxy(svc).await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("{proxy_base}/llm/openai/v1/chat/completions"))
+            .bearer_auth(&token)
+            .header("accept-encoding", "gzip, br, zstd")
+            .json(&serde_json::json!({"model": "gpt-4o", "messages": []}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let _ = resp.bytes().await.unwrap();
+
+        let seen = captured.lock().unwrap().clone().expect("upstream headers");
+        assert_eq!(
+            seen.get("accept-encoding").and_then(|v| v.to_str().ok()),
+            Some("identity"),
+            "the LLM proxy must not forward client compression preferences to streaming upstreams",
+        );
     }
 
     #[tokio::test]
@@ -1507,9 +1559,9 @@ mod tests {
         // Allowlisted — survive.
         h.insert("content-type", HeaderValue::from_static("application/json"));
         h.insert("accept", HeaderValue::from_static("text/event-stream"));
-        h.insert("accept-encoding", HeaderValue::from_static("gzip"));
         h.insert("user-agent", HeaderValue::from_static("ua/1"));
         // Stripped — every one of these is a known leak vector.
+        h.insert("accept-encoding", HeaderValue::from_static("gzip"));
         h.insert("openai-organization", HeaderValue::from_static("org-evil"));
         h.insert("cookie", HeaderValue::from_static("sess=abc"));
         h.insert("x-api-key", HeaderValue::from_static("sk-leaked"));
@@ -1527,10 +1579,10 @@ mod tests {
 
         assert!(h.get("content-type").is_some());
         assert!(h.get("accept").is_some());
-        assert!(h.get("accept-encoding").is_some());
         assert!(h.get("user-agent").is_some());
 
         for stripped in [
+            "accept-encoding",
             "openai-organization",
             "cookie",
             "x-api-key",

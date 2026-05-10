@@ -134,7 +134,7 @@ where
 impl<S, E> Stream for RecordingBody<S, E>
 where
     S: Stream<Item = Result<Bytes, E>> + Unpin,
-    E: Unpin,
+    E: std::fmt::Display + Unpin,
 {
     type Item = Result<Bytes, E>;
 
@@ -150,6 +150,11 @@ where
                 Poll::Ready(None)
             }
             Poll::Ready(Some(Err(e))) => {
+                tracing::warn!(
+                    bytes_seen = this.bytes_seen,
+                    error = %e,
+                    "llm proxy upstream stream failed"
+                );
                 this.finished = true;
                 Poll::Ready(Some(Err(e)))
             }

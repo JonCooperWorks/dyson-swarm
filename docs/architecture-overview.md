@@ -70,6 +70,13 @@ this order:
 - public reads hit `share.<hostname>`
 - swarm validates the signature, consults its artefact cache first, then the live Dyson if needed
 
+### Restore and clone
+
+- restore creates a fresh instance id from a selected snapshot
+- full clone snapshots the source, restores under a fresh id, and copies Swarm-owned config/secrets/MCP records
+- empty clone skips the snapshot and carries only Swarm-owned config/secrets/MCP records
+- reset, rotate, and network-policy changes keep the same Swarm id while swapping the sandbox underneath
+
 ## Why Swarm Keeps State Outside the Sandbox
 
 Sandboxes are disposable. To make that practical, swarm persists the parts

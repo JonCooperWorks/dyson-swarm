@@ -60,6 +60,20 @@ systemctl status dyson-egress-proxy
 jq . /run/dyson-egress/policies.json
 ```
 
+## Smoke Checks
+
+After a deploy that touches proxying, sharing, restore, or clone paths:
+
+- run a long model turn through a live Dyson and watch for `/llm/*` 502s or
+  incomplete `llm_audit` rows
+- mint a share and open the returned `share.<hostname>/v1/<token>` URL plus its
+  `/raw` form
+- verify that `share.<hostname>/v1/<jti>` returns 404; the `jti` is not the
+  public capability
+- clone a known instance to a fresh host, open the returned
+  `<instance_id>.<hostname>` URL, and run a prompt that reads known state
+- for MCP-bearing instances, confirm the clone lists the expected MCP tools
+
 ## Break-Glass Access
 
 When normal auth is down but you still have host access, use:

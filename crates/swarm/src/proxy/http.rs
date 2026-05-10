@@ -8,8 +8,8 @@
 //!    code on denial).
 //! 4. Picks the adapter for `<provider>`, asks it to rewrite the auth
 //!    headers/URL using the real upstream key from config.
-//! 5. Forwards the request body via `reqwest::Body::wrap_stream` and streams
-//!    the response back via `axum::body::Body::from_stream` — no buffering.
+//! 5. Buffers the request body for validation/provider rewrites, forwards it,
+//!    then streams the response back via `axum::body::Body::from_stream`.
 //! 6. Writes an `llm_audit` row regardless of outcome.
 
 use std::sync::Arc;

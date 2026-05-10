@@ -11,6 +11,11 @@ over it before enabling the state-sync worker again. The snapshot base preserves
 local workspace files that are outside the mirror or have not synced yet; the
 mirror still wins for paths it has recorded.
 
+Clone and restore follow the same rule. A full clone starts from a Cube
+snapshot and also copies Swarm-owned config, secrets, policy, tools, and MCP
+records to a fresh instance id. An empty clone skips the snapshot and therefore
+only carries Swarm-owned state.
+
 ## Ownership Matrix
 
 | State | Authoritative store | VM copy | Notes |

@@ -1,7 +1,9 @@
 # Shares
 
 Swarm serves anonymous public share URLs for selected artefacts without handing
-the browser a direct path to the live Dyson sandbox.
+the browser a direct path to the live Dyson sandbox. The public URL is a signed
+capability; possession of the URL is the read permission until expiry,
+revocation, or signing-key rotation.
 
 Relevant code:
 
@@ -10,77 +12,79 @@ Relevant code:
 - [render.rs](../crates/core/src/shares/render.rs)
 - [artefacts.jsx](../crates/swarm/src/http/web/src/components/artefacts.jsx)
 
-## Host and URL Shape
+## URL Shape
 
-Public shares are served from:
+Public reads go through `share.<hostname>`:
 
-- `share.<configured_hostname>`
+```text
+GET /v1/<token>       rendered share page
+GET /v1/<token>/raw   raw artefact bytes
+```
 
-The public path shape is:
+`<token>` is not the database `jti`. It is:
 
-- `GET /v1/<token>` — rendered share page
-- `GET /v1/<token>/raw` — raw artefact bytes
+```text
+base64url(postcard SharePayload).base64url(HMAC tag)
+```
 
-Anything else returns the same fixed 404 body. Swarm does that deliberately so
-expired, revoked, malformed, and unknown tokens are not distinguishable to a
-scanner.
+The `jti` is a 32-character hex row identifier used by authenticated SPA/API
+routes for revoke, reissue, audit-log lookup, and URL re-derivation:
 
-## Why Shares Read Through Swarm
+```text
+GET    /v1/shares/<jti>/url
+DELETE /v1/shares/<jti>
+POST   /v1/shares/<jti>/reissue
+GET    /v1/shares/<jti>/accesses
+```
 
-Swarm sits in front of shared artefacts so it can:
+Opening `https://share.<hostname>/v1/<jti>` returns the fixed 404 body by
+design. It is not a public share URL.
 
-- verify the HMAC-backed share token
-- enforce expiry and revocation
-- record access audit rows
-- keep the share working after a cube reset by serving from the artefact cache
+## Why 404 Is Deliberately Boring
 
-This means a share URL is stable even when the underlying sandbox is not.
+Malformed tokens, unknown rows, revoked shares, expired shares, and wrong-path
+requests all collapse to the same public 404 response. That keeps scanners
+from learning whether a share existed, expired, or was mistyped.
 
-## Cache-First Resolution
+Authenticated owner routes can distinguish active, expired, revoked, and
+missing rows because they already know the user identity.
+
+## Mint And Re-Derive
+
+Minting a share:
+
+1. ensures the owner has a sealed per-user `share_signing_key`
+2. builds a `SharePayload` with instance, chat, artefact, expiry, and random
+   `jti`
+3. signs it with HMAC-SHA256
+4. stores the `jti` row
+5. returns both `{ url, jti, expires_at, ... }`
+
+Swarm does not store the full public URL. `GET /v1/shares/<jti>/url`
+reconstructs it for an active owner-owned row using the same signing key and
+payload fields. Revoked or expired rows return no URL.
+
+## Cache-First Reads
 
 The public share path resolves artefacts in this order:
 
-1. verify the share token
-2. look for a matching cached artefact row and on-disk body
-3. if the cache is cold, fetch from the live cube
-4. write the bytes back into the swarm artefact cache
-5. serve either raw bytes or a rendered HTML page
+1. parse and verify the signed token
+2. load the matching, non-revoked `jti` row
+3. serve from Swarm's artefact cache when present
+4. otherwise fetch from the live Dyson instance
+5. write the fetched bytes back to the Swarm cache
+6. render HTML or return `/raw` bytes
 
-That makes shares read-through and write-through on first access.
+This is why cached shares can survive sandbox reset or destroy.
 
-## Rendering Modes
+## Rendering And Audit
 
-Swarm chooses a simple renderer based on artefact kind and MIME:
+Renderers are intentionally simple:
 
-- markdown artefacts render as server-side HTML
-- images render inside an image viewer page
-- everything else renders as a download-focused page
+- Markdown becomes server-rendered HTML.
+- Images render inside an image viewer page.
+- Other MIME types render as download-focused pages.
 
-The `/raw` endpoint always serves the underlying bytes.
-
-## Access Audit
-
-Every successful or failed share resolution that makes it past token
-verification records an access row with:
-
-- share id
-- remote address, if present
-- user agent, if present
-- response status
-
-The artefact/share UI surfaces that audit log so operators and users can see
-whether a share has actually been used.
-
-## Relationship to Artefacts
-
-Shares are layered on top of the swarm artefact cache, not separate from it.
-
-In practice:
-
-- sharing a cached artefact is immediate
-- opening a share can populate the cache if it was cold
-- resetting or destroying the source cube does not break a share that swarm has
-  already cached
-
-If you are trying to understand why a share still works after an instance is
-gone, this cache-first design is the reason.
+The `/raw` endpoint always returns the underlying bytes. Share access rows
+record the `jti`, remote address when available, user agent when available, and
+response status.

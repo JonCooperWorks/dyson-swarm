@@ -79,8 +79,10 @@ Swarm now has a dedicated docs tree, mirroring the structure used in
 - [Artefacts](docs/artefacts.md)
 - [Shares](docs/shares.md)
 - [LLM Proxy](docs/llm-proxy.md)
+- [Restore and Clone](docs/restore-and-clone.md)
 - [MCP and OAuth](docs/mcp-and-oauth.md)
 - [Network Policies](docs/network-policies.md)
+- [State Ownership](docs/state-ownership.md)
 - [Storage and Secrets](docs/storage-and-secrets.md)
 - [HTTP and SPA](docs/http-and-spa.md)
 - [Operations](docs/operations.md)
@@ -91,5 +93,8 @@ Swarm now has a dedicated docs tree, mirroring the structure used in
 - `rotate_binary_on_startup` defaults to false. Keep it off for normal
   deploys; enable it only for a deliberate binary migration of live instances.
   See [Operations](docs/operations.md).
+- Public share URLs use a signed capability token. The share `jti` is only an
+  authenticated API row id; using it as `/v1/<token>` correctly returns 404.
+  See [Shares](docs/shares.md).
 - The host-side `swarmctl mint-api-key` flow is a break-glass tenant access
   path, not an admin-role override; see [Auth and Keys](docs/auth-and-keys.md).

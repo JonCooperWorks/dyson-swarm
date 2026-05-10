@@ -18,11 +18,11 @@
 //! - one user's signing key compromise never lets the attacker forge
 //!   shares into another user's instance.
 //!
-//! Hot-path verification is `parse → exp → key-load → HMAC → DB`,
-//! ordered so scanner-noise (parse-fail, expired) costs zero DB and
-//! zero secret-store I/O.  See `verify_url` for the implementation
-//! and `crate::http::share_public::dispatch` for how it wires into
-//! the host-based router.
+//! Hot-path verification is `parse -> exp -> key-load -> HMAC -> DB`,
+//! ordered so scanner noise (parse-fail, expired) costs zero DB and
+//! zero secret-store I/O. See `ShareService::verify` for the
+//! implementation and `crate::http::share_public::dispatch` for how
+//! it wires into the host-based router.
 
 use std::sync::Arc;
 
@@ -54,7 +54,7 @@ const SIGNING_KEY_BYTES: usize = 32;
 /// concatenated with the b64url-encoded HMAC tag separated by `.`.
 ///
 /// `v` is a version byte so future changes to the layout don't have
-/// to live alongside v1 in the same parser; `verify_url` rejects
+/// to live alongside v1 in the same parser; verification rejects
 /// anything that isn't a `v=1` envelope.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SharePayload {

@@ -1033,6 +1033,58 @@ async fn create_pushes_proxy_base_without_trailing_v1() {
     );
 }
 
+#[tokio::test]
+async fn reconfigure_payload_sends_legacy_identity_task_as_identity_doc() {
+    let pool = open_in_memory().await.unwrap();
+    let cube = MockCube::new();
+    let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(
+        pool.clone(),
+        crate::db::test_system_cipher(),
+    ));
+    let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(
+        pool,
+        crate::db::test_system_cipher(),
+    ));
+    let svc = InstanceService::new(cube, instances, tokens, "https://dyson.example.com/llm");
+    let identity_doc = "# Identity\nlegacy agent identity";
+    let row = InstanceRow {
+        id: "legacy-id".into(),
+        owner_id: "legacy-owner".into(),
+        name: "legacy".into(),
+        task: identity_doc.into(),
+        cube_sandbox_id: Some("sandbox".into()),
+        state_generation: "sg".into(),
+        template_id: "tpl".into(),
+        status: InstanceStatus::Live,
+        bearer_token: "bearer".into(),
+        pinned: false,
+        expires_at: None,
+        last_active_at: 0,
+        last_probe_at: None,
+        last_probe_status: None,
+        created_at: 0,
+        destroyed_at: None,
+        rotated_to: None,
+        network_policy: NetworkPolicy::Open,
+        network_policy_cidrs: Vec::new(),
+        models: vec!["openrouter/model".into()],
+        tools: Vec::new(),
+    };
+
+    let body = svc.configure_body_from_parts(&row, "proxy", "ingest", "state", None, None);
+    let value = serde_json::to_value(&body).expect("reconfigure body serializes");
+
+    assert_eq!(
+        value.get("identity_doc").and_then(serde_json::Value::as_str),
+        Some(identity_doc),
+        "legacy full identity task must be sent as identity_doc so dyson restore configure does not reject it"
+    );
+    assert!(
+        value.get("task").is_none(),
+        "legacy full identity task must not be sent as task because dyson rejects full IDENTITY.md in task"
+    );
+}
+
 /// Helper: stand up an InstanceService backed by sqlx stores and a
 /// recording reconfigurer. Used by runtime config sync tests
 /// below; folded into a helper because every test needs the same

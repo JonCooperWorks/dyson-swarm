@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::path::Path as FsPath;
 use std::sync::Arc;
 
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::http::{HeaderValue, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 
@@ -15,6 +15,8 @@ use super::McpService;
 use super::errors::error_resp;
 use super::tools::filter_tools_list_body;
 use super::{validate_remote_mcp_auth_urls, validate_remote_mcp_url};
+
+const MAX_RUNTIME_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Serialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -194,8 +196,10 @@ pub(super) async fn forward_runtime_stdio(
             HeaderValue::from(body.len()),
         );
     }
+    let body_stream =
+        futures::stream::once(async move { Ok::<Bytes, std::io::Error>(Bytes::from(body)) });
     builder
-        .body(Body::from(body))
+        .body(Body::from_stream(body_stream))
         .unwrap_or_else(|_| error_resp(StatusCode::INTERNAL_SERVER_ERROR, "build resp"))
 }
 
@@ -282,7 +286,7 @@ pub(super) async fn call_runtime(
     socket_path: &FsPath,
     request: &RuntimeRequest<'_>,
 ) -> Result<RuntimeForwardResponse, String> {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixStream;
 
     let mut stream = UnixStream::connect(socket_path)
@@ -300,18 +304,48 @@ pub(super) async fn call_runtime(
     stream.flush().await.map_err(|e| format!("flush: {e}"))?;
 
     let mut reader = BufReader::new(stream);
-    let mut out = String::new();
-    let n = tokio::time::timeout(
+    let out = tokio::time::timeout(
         std::time::Duration::from_secs(125),
-        reader.read_line(&mut out),
+        read_line_capped(&mut reader, MAX_RUNTIME_RESPONSE_BYTES),
     )
     .await
     .map_err(|_| "runtime response timed out".to_owned())?
     .map_err(|e| format!("read response: {e}"))?;
-    if n == 0 {
+    if out.is_empty() {
         return Err("runtime closed without response".into());
     }
+    let out = String::from_utf8(out).map_err(|e| format!("runtime response was not utf-8: {e}"))?;
     serde_json::from_str(&out).map_err(|e| format!("decode response: {e}"))
+}
+
+async fn read_line_capped<R>(reader: &mut R, max_bytes: usize) -> Result<Vec<u8>, std::io::Error>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
+    use tokio::io::AsyncBufReadExt;
+
+    let mut out = Vec::new();
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            return Ok(out);
+        }
+        let take = available
+            .iter()
+            .position(|b| *b == b'\n')
+            .map_or(available.len(), |pos| pos + 1);
+        if out.len().saturating_add(take) > max_bytes {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "runtime response exceeded 16 MiB cap",
+            ));
+        }
+        out.extend_from_slice(&available[..take]);
+        reader.consume(take);
+        if out.last() == Some(&b'\n') {
+            return Ok(out);
+        }
+    }
 }
 
 pub async fn stop_runtime_server(

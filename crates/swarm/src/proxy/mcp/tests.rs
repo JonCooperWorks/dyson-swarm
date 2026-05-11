@@ -620,8 +620,7 @@ async fn runtime_forward_rejects_oversized_single_line_response() {
         last_check_error: None,
         enabled_tools: None,
     };
-    let (svc, token, _keys) =
-        build_mcp_proxy_fixture_for_entry(pool, entry, Some(socket)).await;
+    let (svc, token, _keys) = build_mcp_proxy_fixture_for_entry(pool, entry, Some(socket)).await;
     let base = spawn_mcp_proxy(svc).await;
 
     let resp = reqwest::Client::new()

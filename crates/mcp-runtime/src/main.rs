@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use clap::Parser;
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{Mutex, oneshot};
@@ -23,6 +23,7 @@ const DEFAULT_SECRET_ROOT: &str = "/run/dyson-mcp-runtime/secrets";
 const CONTAINER_SECRET_DIR: &str = "/run/secrets";
 const SECRET_ENTRYPOINT_CONTAINER_PATH: &str = "/run/dyson-mcp-runtime-secret-entrypoint";
 const SECRET_ENTRYPOINT_SHELL: &str = "/bin/sh";
+const MAX_RUNTIME_BODY_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Parser)]
 #[command(name = "dyson-mcp-runtime")]
@@ -271,11 +272,16 @@ impl Runtime {
 
         let response = session.session.send(req.request_json, id_key).await;
         match response {
-            Ok(Some(body)) => ForwardResponse {
-                status: 200,
-                content_type: Some("application/json"),
-                body,
-            },
+            Ok(Some(body)) => {
+                if body.len() > MAX_RUNTIME_BODY_BYTES {
+                    return err(502, "MCP runtime response exceeded 16 MiB cap");
+                }
+                ForwardResponse {
+                    status: 200,
+                    content_type: Some("application/json"),
+                    body,
+                }
+            }
             Ok(None) => ForwardResponse {
                 status: 202,
                 content_type: None,
@@ -562,8 +568,24 @@ impl DockerStdioSession {
         let pending_reader = Arc::clone(&pending);
         let server_name = server_name.to_owned();
         let reader = tokio::spawn(async move {
-            let mut lines = BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
+            let mut stdout = BufReader::new(stdout);
+            loop {
+                let line = match read_line_capped(&mut stdout, MAX_RUNTIME_BODY_BYTES).await {
+                    Ok(line) if line.is_empty() => break,
+                    Ok(line) => line,
+                    Err(err) => {
+                        tracing::warn!(
+                            error = %err,
+                            server = %server_name,
+                            "MCP runtime stdout line exceeded response cap"
+                        );
+                        break;
+                    }
+                };
+                let Ok(line) = String::from_utf8(line) else {
+                    tracing::debug!(server = %server_name, "ignoring non-UTF-8 MCP stdout line");
+                    continue;
+                };
                 let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
                     tracing::debug!(server = %server_name, "ignoring non-JSON MCP stdout line");
                     continue;
@@ -714,15 +736,16 @@ impl McpSession for HttpStreamableSession {
             req = req.header("MCP-Protocol-Version", protocol_version);
         }
 
-        let resp = tokio::time::timeout(Duration::from_secs(120), req.body(request_json).send())
-            .await
-            .map_err(|_| "HTTP MCP server response timed out".to_owned())?
-            .map_err(|e| {
-                format!(
-                    "send: {}",
-                    dyson_swarm_core::mcp_servers::redact_reqwest_err(&e, &self.url)
-                )
-            })?;
+        let mut resp =
+            tokio::time::timeout(Duration::from_secs(120), req.body(request_json).send())
+                .await
+                .map_err(|_| "HTTP MCP server response timed out".to_owned())?
+                .map_err(|e| {
+                    format!(
+                        "send: {}",
+                        dyson_swarm_core::mcp_servers::redact_reqwest_err(&e, &self.url)
+                    )
+                })?;
         let status = resp.status();
         let headers = resp.headers().clone();
         let content_type = headers
@@ -730,10 +753,13 @@ impl McpSession for HttpStreamableSession {
             .and_then(|v| v.to_str().ok())
             .unwrap_or("")
             .to_lowercase();
-        let bytes = tokio::time::timeout(Duration::from_secs(120), resp.bytes())
-            .await
-            .map_err(|_| "HTTP MCP server body timed out".to_owned())?
-            .map_err(|e| format!("read body: {e}"))?;
+        let bytes = tokio::time::timeout(
+            Duration::from_secs(120),
+            read_reqwest_body_capped(&mut resp, MAX_RUNTIME_BODY_BYTES),
+        )
+        .await
+        .map_err(|_| "HTTP MCP server body timed out".to_owned())?
+        .map_err(|e| format!("read body: {e}"))?;
 
         if status == reqwest::StatusCode::ACCEPTED && bytes.is_empty() {
             return Ok(None);
@@ -948,6 +974,48 @@ async fn remove_pending(
     if let Some(id) = id {
         pending.lock().await.remove(id);
     }
+}
+
+async fn read_line_capped<R>(reader: &mut R, max_bytes: usize) -> Result<Vec<u8>, std::io::Error>
+where
+    R: AsyncBufRead + Unpin,
+{
+    let mut out = Vec::new();
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            return Ok(out);
+        }
+        let take = available
+            .iter()
+            .position(|b| *b == b'\n')
+            .map_or(available.len(), |pos| pos + 1);
+        if out.len().saturating_add(take) > max_bytes {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "line exceeded 16 MiB cap",
+            ));
+        }
+        out.extend_from_slice(&available[..take]);
+        reader.consume(take);
+        if out.last() == Some(&b'\n') {
+            return Ok(out);
+        }
+    }
+}
+
+async fn read_reqwest_body_capped(
+    resp: &mut reqwest::Response,
+    max_bytes: usize,
+) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(|e| e.to_string())? {
+        if out.len().saturating_add(chunk.len()) > max_bytes {
+            return Err("HTTP MCP server response exceeded 16 MiB cap".into());
+        }
+        out.extend_from_slice(&chunk);
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -1569,42 +1637,44 @@ async fn main() -> std::process::ExitCode {
 
 async fn handle_connection(runtime: Arc<Runtime>, stream: UnixStream) {
     let mut reader = BufReader::new(stream);
-    let mut line = String::new();
-    let response = match reader.read_line(&mut line).await {
-        Ok(0) => err(400, "empty request"),
-        Ok(_) => match serde_json::from_str::<RuntimeRequest>(&line) {
-            Ok(RuntimeRequest::Forward {
-                instance_id,
-                server_name,
-                transport,
-                request_json,
-            }) => {
-                runtime
-                    .forward(ForwardRequest {
-                        instance_id,
-                        server_name,
-                        transport,
-                        request_json,
-                    })
-                    .await
-            }
-            Ok(RuntimeRequest::StopServer {
-                instance_id,
-                server_name,
-            }) => stop_response(runtime.stop_server(&instance_id, &server_name).await),
-            Ok(RuntimeRequest::StopInstance { instance_id }) => {
-                stop_response(runtime.stop_instance(&instance_id).await)
-            }
-            Ok(RuntimeRequest::RestartServer {
-                instance_id,
-                server_name,
-                transport,
-            }) => {
-                runtime
-                    .restart_server(instance_id, server_name, transport)
-                    .await
-            }
-            Err(e) => err(400, &format!("invalid request: {e}")),
+    let response = match read_line_capped(&mut reader, MAX_RUNTIME_BODY_BYTES).await {
+        Ok(line) if line.is_empty() => err(400, "empty request"),
+        Ok(line) => match String::from_utf8(line) {
+            Ok(line) => match serde_json::from_str::<RuntimeRequest>(&line) {
+                Ok(RuntimeRequest::Forward {
+                    instance_id,
+                    server_name,
+                    transport,
+                    request_json,
+                }) => {
+                    runtime
+                        .forward(ForwardRequest {
+                            instance_id,
+                            server_name,
+                            transport,
+                            request_json,
+                        })
+                        .await
+                }
+                Ok(RuntimeRequest::StopServer {
+                    instance_id,
+                    server_name,
+                }) => stop_response(runtime.stop_server(&instance_id, &server_name).await),
+                Ok(RuntimeRequest::StopInstance { instance_id }) => {
+                    stop_response(runtime.stop_instance(&instance_id).await)
+                }
+                Ok(RuntimeRequest::RestartServer {
+                    instance_id,
+                    server_name,
+                    transport,
+                }) => {
+                    runtime
+                        .restart_server(instance_id, server_name, transport)
+                        .await
+                }
+                Err(e) => err(400, &format!("invalid request: {e}")),
+            },
+            Err(e) => err(400, &format!("request was not utf-8: {e}")),
         },
         Err(e) => err(400, &format!("read request: {e}")),
     };

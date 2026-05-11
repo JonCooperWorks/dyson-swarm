@@ -904,7 +904,7 @@ impl InstanceService {
         let Some(reconfigurer) = self.reconfigurer.as_ref() else {
             return Ok((0, 0));
         };
-        let live = self
+        let mut rows = self
             .instances
             .list(
                 SYSTEM_OWNER,
@@ -914,8 +914,19 @@ impl InstanceService {
                 },
             )
             .await?;
+        rows.extend(
+            self.instances
+                .list(
+                    SYSTEM_OWNER,
+                    ListFilter {
+                        status: Some(InstanceStatus::Configuring),
+                        include_destroyed: false,
+                    },
+                )
+                .await?,
+        );
         let mut succeeded = 0usize;
-        for row in &live {
+        for row in &rows {
             let Some(sandbox_id) = &row.cube_sandbox_id else {
                 tracing::debug!(
                     instance = %row.id,
@@ -972,10 +983,36 @@ impl InstanceService {
             .await;
             match result {
                 Ok(()) => {
+                    if row.status == InstanceStatus::Configuring {
+                        self.instances
+                            .update_status(&row.id, InstanceStatus::Live)
+                            .await?;
+                    }
                     succeeded += 1;
                     tracing::debug!(instance = %row.id, "runtime-config-sync: pushed");
                 }
                 Err(e) => {
+                    if row.status == InstanceStatus::Configuring {
+                        tracing::warn!(
+                            instance = %row.id,
+                            sandbox = %sandbox_id,
+                            error = %e,
+                            "runtime-config-sync: Configuring recovery failed; destroying sandbox"
+                        );
+                        let _ = self.tokens.revoke_for_instance(&row.id).await;
+                        if let Err(destroy_err) = self.cube.destroy_sandbox(sandbox_id).await {
+                            tracing::warn!(
+                                instance = %row.id,
+                                sandbox = %sandbox_id,
+                                error = %destroy_err,
+                                "runtime-config-sync: failed to destroy unrecoverable Configuring sandbox"
+                            );
+                        }
+                        self.instances
+                            .update_status(&row.id, InstanceStatus::Destroyed)
+                            .await?;
+                        continue;
+                    }
                     tracing::warn!(
                         instance = %row.id,
                         error = %e,
@@ -993,7 +1030,7 @@ impl InstanceService {
                 }
             }
         }
-        let visited = live.len();
+        let visited = rows.len();
         tracing::info!(visited, succeeded, "runtime-config-sync: sweep complete");
         Ok((visited, succeeded))
     }

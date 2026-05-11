@@ -43,6 +43,8 @@ pub struct ReconfigureBody {
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub task: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub identity_doc: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

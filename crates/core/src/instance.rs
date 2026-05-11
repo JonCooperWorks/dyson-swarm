@@ -117,6 +117,18 @@ fn is_non_retryable_reconfigure_error(error: &str) -> bool {
         || error.contains("/api/admin/configure response parse")
 }
 
+fn looks_like_full_identity_doc(body: &str) -> bool {
+    let trimmed = body.trim_start();
+    trimmed.starts_with("# IDENTITY.md") || trimmed.starts_with("# Identity")
+}
+
+fn reconfigure_task_fields(task: Option<String>) -> (Option<String>, Option<String>) {
+    match task {
+        Some(task) if looks_like_full_identity_doc(&task) => (None, Some(task)),
+        other => (other, None),
+    }
+}
+
 /// Same cubeproxy warm-up race as [`push_with_retry`], but for the
 /// reset replay endpoint.  Reset calls this before the final configure
 /// push enables the background state-sync worker, so losing the first
@@ -715,9 +727,12 @@ impl InstanceService {
         image_gen_defaults: Option<&ImageGenDefaults>,
         mcp_servers: Option<serde_json::Map<String, serde_json::Value>>,
     ) -> ReconfigureBody {
+        let (task, identity_doc) =
+            reconfigure_task_fields(Some(source.task.clone()).filter(|s| !s.is_empty()));
         ReconfigureBody {
             name: Some(source.name.clone()).filter(|s| !s.is_empty()),
-            task: Some(source.task.clone()).filter(|s| !s.is_empty()),
+            task,
+            identity_doc,
             models: source.models.clone(),
             instance_id: Some(source.id.clone()),
             proxy_token: Some(proxy_token.to_owned()),
@@ -2507,6 +2522,8 @@ impl InstanceService {
         // sandbox is Configuring by here but the dyson HTTP server inside
         // can take a beat to settle, especially on cold cubeproxy.
         if let Some(reconfigurer) = self.reconfigurer.as_ref() {
+            let (task, identity_doc) =
+                reconfigure_task_fields(req.task.clone().filter(|s| !s.is_empty()));
             let image_gen_defaults = self.image_gen_defaults.as_ref().map(|defaults| {
                 let mut defaults = defaults.clone();
                 if let Some(model) = req
@@ -2521,7 +2538,8 @@ impl InstanceService {
             });
             let body = ReconfigureBody {
                 name: req.name.clone().filter(|s| !s.is_empty()),
-                task: req.task.clone().filter(|s| !s.is_empty()),
+                task,
+                identity_doc,
                 models: models.clone(),
                 instance_id: Some(id.clone()),
                 // Push the freshly-minted proxy_token + the resolved
@@ -2820,9 +2838,12 @@ impl InstanceService {
             self.reconfigurer.as_ref(),
             row.cube_sandbox_id.as_deref().filter(|s| !s.is_empty()),
         ) {
+            let (task, identity_doc) =
+                reconfigure_task_fields(Some(task.to_owned()).filter(|s| !s.is_empty()));
             let body = ReconfigureBody {
                 name: Some(name.to_owned()).filter(|s| !s.is_empty()),
-                task: Some(task.to_owned()).filter(|s| !s.is_empty()),
+                task,
+                identity_doc,
                 models: Vec::new(), // identity-only update; leave models alone
                 instance_id: Some(id.to_owned()),
                 // Identity update doesn't touch provider config; leave

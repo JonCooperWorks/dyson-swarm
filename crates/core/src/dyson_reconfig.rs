@@ -822,6 +822,7 @@ mod tests {
         let body = ReconfigureBody {
             name: Some("axelrod".into()),
             task: Some("research".into()),
+            identity_doc: Some("# Identity\nName: axelrod".into()),
             models: vec!["deepseek/deepseek-v4-pro".into()],
             instance_id: Some("i-1".into()),
             proxy_token: Some("pt_test".into()),
@@ -843,6 +844,7 @@ mod tests {
         for key in [
             "name",
             "task",
+            "identity_doc",
             "models",
             "instance_id",
             "proxy_token",

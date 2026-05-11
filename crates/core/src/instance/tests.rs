@@ -1041,10 +1041,8 @@ async fn reconfigure_payload_sends_legacy_identity_task_as_identity_doc() {
         pool.clone(),
         crate::db::test_system_cipher(),
     ));
-    let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(
-        pool,
-        crate::db::test_system_cipher(),
-    ));
+    let tokens: Arc<dyn TokenStore> =
+        Arc::new(SqlxTokenStore::new(pool, crate::db::test_system_cipher()));
     let svc = InstanceService::new(cube, instances, tokens, "https://dyson.example.com/llm");
     let identity_doc = "# Identity\nlegacy agent identity";
     let row = InstanceRow {
@@ -1075,7 +1073,9 @@ async fn reconfigure_payload_sends_legacy_identity_task_as_identity_doc() {
     let value = serde_json::to_value(&body).expect("reconfigure body serializes");
 
     assert_eq!(
-        value.get("identity_doc").and_then(serde_json::Value::as_str),
+        value
+            .get("identity_doc")
+            .and_then(serde_json::Value::as_str),
         Some(identity_doc),
         "legacy full identity task must be sent as identity_doc so dyson restore configure does not reject it"
     );

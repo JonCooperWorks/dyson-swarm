@@ -1008,6 +1008,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn proxy_token_rejects_unexpected_source_ip() {
+        let (upstream_url, upstream_calls) = spawn_streaming_upstream(vec![b"x".to_vec()]).await;
+
+        let pool = open_in_memory().await.unwrap();
+        let (svc, token, _keys) = build_byok_seeded(
+            pool.clone(),
+            "openai",
+            upstream_url,
+            "sk-byok-test",
+            permissive_policy(),
+        )
+        .await;
+        let _ = sqlx::query("ALTER TABLE proxy_tokens ADD COLUMN expected_src_ip TEXT")
+            .execute(&pool)
+            .await;
+        sqlx::query("UPDATE proxy_tokens SET expected_src_ip = '203.0.113.10'")
+            .execute(&pool)
+            .await
+            .expect("bind proxy token source ip");
+        let base = spawn_proxy(svc).await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("{base}/llm/openai/v1/chat/completions"))
+            .bearer_auth(&token)
+            .json(&serde_json::json!({"model": "gpt-4o"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            401,
+            "proxy_token must reject requests from an IP other than the bound sandbox source IP",
+        );
+        assert_eq!(
+            upstream_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "source-IP token rejection must happen before upstream forwarding",
+        );
+    }
+
+    #[tokio::test]
     async fn policy_denial_returns_403_with_closed_enum_code() {
         let pool = open_in_memory().await.unwrap();
         let (_id, token) = seed_instance_with_token(&pool).await;

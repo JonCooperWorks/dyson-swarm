@@ -283,6 +283,51 @@ async fn runtime_model_selection_updates_row_without_reconfigure() {
 }
 
 #[tokio::test]
+async fn destroy_racing_update_models_cannot_rewrite_destroyed_row() {
+    let (svc, _cube, _tokens, instances) = build().await;
+    let created = svc
+        .create(
+            "legacy",
+            CreateRequest {
+                template_id: "tpl".into(),
+                name: None,
+                task: None,
+                env: env_with_model(),
+                ttl_seconds: None,
+                network_policy: NetworkPolicy::default(),
+                mcp_servers: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+    let original = instances.get(&created.id).await.unwrap().unwrap().models;
+    let reconfigurer = Arc::new(BlockingPushReconfigurer::default());
+    let entered = reconfigurer.entered.notified();
+    let svc = Arc::new(svc.with_reconfigurer(reconfigurer.clone()));
+    let update_svc = svc.clone();
+    let update_id = created.id.clone();
+    let post_destroy_models = vec!["openai/post-destroy".to_string()];
+
+    let update = tokio::spawn(async move {
+        update_svc
+            .update_models("legacy", &update_id, post_destroy_models)
+            .await
+    });
+    entered.await;
+
+    svc.destroy("legacy", &created.id, false).await.unwrap();
+    reconfigurer.release.notify_waiters();
+    let _ = update.await.unwrap();
+
+    let row = instances.get(&created.id).await.unwrap().unwrap();
+    assert_eq!(row.status, InstanceStatus::Destroyed);
+    assert_eq!(
+        row.models, original,
+        "destroy/update race must not let post-destroy models overwrite a Destroyed row",
+    );
+}
+
+#[tokio::test]
 async fn rename_updates_row_but_does_not_re_emit_env() {
     // Per the design, edits in swarm don't propagate to a running
     // sandbox.  This test is the contract: rename mutates the row,

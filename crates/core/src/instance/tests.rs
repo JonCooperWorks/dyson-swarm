@@ -3069,6 +3069,61 @@ async fn create_airgap_without_llm_cidr_returns_bad_request() {
     assert!(matches!(err, SwarmError::BadRequest(_)));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn create_enforces_per_owner_active_instance_limit_under_concurrency() {
+    const LIMIT: usize = 20;
+    let (svc, _cube, _tokens, instances) = build().await;
+    let svc = Arc::new(svc);
+    let barrier = Arc::new(tokio::sync::Barrier::new(LIMIT + 1));
+    let mut tasks = Vec::new();
+    for idx in 0..=LIMIT {
+        let svc = svc.clone();
+        let barrier = barrier.clone();
+        tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            svc.create(
+                "legacy",
+                CreateRequest {
+                    template_id: "tpl".into(),
+                    name: Some(format!("worker-{idx}")),
+                    task: None,
+                    env: env_with_model(),
+                    ttl_seconds: None,
+                    network_policy: NetworkPolicy::default(),
+                    mcp_servers: Vec::new(),
+                },
+            )
+            .await
+        }));
+    }
+
+    let mut successes = 0usize;
+    let mut failures = 0usize;
+    for task in tasks {
+        match task.await.unwrap() {
+            Ok(_) => successes += 1,
+            Err(_) => failures += 1,
+        }
+    }
+    assert_eq!(
+        successes, LIMIT,
+        "per-owner instance quota must allow exactly {LIMIT} concurrent creates"
+    );
+    assert_eq!(
+        failures, 1,
+        "the N+1 concurrent create must be rejected instead of persisted"
+    );
+    let rows = instances
+        .list("legacy", ListFilter::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.len(),
+        LIMIT,
+        "quota enforcement must leave exactly {LIMIT} non-destroyed rows"
+    );
+}
+
 #[tokio::test]
 async fn create_with_invalid_cidr_returns_bad_request() {
     let (isvc, _ssvc, _cube, _instances, _users, _recorder) = build_with_snapshot_and_policy(

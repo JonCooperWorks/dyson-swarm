@@ -2,8 +2,8 @@
 //!
 //! Two pieces:
 //! - [`HttpHealthProber`] implements [`HealthProber`] over HTTP. It issues a
-//!   `GET https://<sandbox_id>.<sandbox_domain>/healthz` with the
-//!   per-instance bearer and a hard timeout.
+//!   `GET https://<instance_id>.<hostname>/healthz` with the per-instance
+//!   probe bearer and a hard timeout.
 //! - [`spawn_loop`] runs a background task that ticks every
 //!   `health_probe_interval_seconds`, lists live instances, probes each
 //!   serially, and persists the result. Three consecutive `Unreachable`
@@ -77,11 +77,13 @@ impl HealthProber for HttpHealthProber {
                 reason: "swarm hostname not configured (set `hostname` in config.toml)".into(),
             };
         };
-        // /healthz is anonymous through dispatch — see
-        // dyson_proxy::dispatch's anonymous-probe carve-out.  We send
-        // no Authorization header so a leaked instance id can't be
-        // used to mint a deeper attack surface.
-        let resp = match self.http.get(&url).send().await {
+        let resp = match self
+            .http
+            .get(&url)
+            .bearer_auth(&instance.bearer_token)
+            .send()
+            .await
+        {
             Ok(r) => r,
             Err(e) => {
                 return ProbeResult::Unreachable {

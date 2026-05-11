@@ -47,11 +47,11 @@ use std::time::Duration;
 
 use axum::body::Body;
 use axum::extract::Request;
-use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, Response, StatusCode, header};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, Response, StatusCode, Uri, header};
 use axum::middleware::Next;
 use futures::TryStreamExt;
 
-use crate::auth::{Authenticator, user::resolve_active_user_with_sessions};
+use crate::auth::{Authenticator, extract_bearer, user::resolve_active_user_with_sessions};
 use crate::http::AppState;
 use crate::traits::{InstanceRow, InstanceStatus};
 
@@ -172,83 +172,71 @@ async fn forward(state: DispatchState, instance_id: String, req: Request) -> Res
     //    its plumbing with user_middleware — JIT-create on first
     //    sighting, refuse non-Active accounts.
     //
-    //    Anonymous-probe carve-out: `/healthz` requests are forwarded
-    //    without any auth or owner check so swarm's internal health
-    //    prober can exercise the same end-to-end chain the user's
-    //    browser does (Caddy → dispatch → cubeproxy → dyson) without
-    //    needing a system credential.  /healthz returns just a tiny
-    //    "ok"-ish payload; the only information leak is whether the
-    //    sandbox is currently alive at this id, which is no worse
-    //    than the wildcard cert already exposing the id's existence.
+    //    Probe carve-out: `/healthz` may bypass user ownership only
+    //    when it carries the instance probe bearer, which the
+    //    background prober injects. Without that bearer it takes the
+    //    same user-auth path as every other Dyson subdomain request.
     //
-    //    Otherwise: Authorization bearers authenticate directly; if
+    //    Authorization bearers authenticate directly; if
     //    absent, an opaque `dyson_swarm_session` cookie maps through
     //    the server-side sessions table.  This is what makes the
     //    SPA's "open ↗" link work — a plain anchor click can't set
     //    Authorization but it ships cookies for the parent domain.
     let path = req.uri().path();
-    let anonymous_probe = path == "/healthz";
+    let probe_bearer = (path == "/healthz")
+        .then(|| extract_bearer(req.headers()))
+        .flatten();
 
     // 2. Look up the instance row.  Owner-scoped for normal user
-    //    requests; system-scoped for the anonymous probe carve-out
-    //    (which lacks a user identity to scope by).
-    let row: InstanceRow = if anonymous_probe {
-        match state.app.instances.get_unscoped(&instance_id).await {
-            Ok(r) => r,
-            Err(crate::error::SwarmError::NotFound) => {
-                return error_response(StatusCode::NOT_FOUND, "no such instance");
-            }
+    //    requests; system-scoped only for the health prober's
+    //    per-instance bearer.
+    let (row, probe_authenticated): (InstanceRow, bool) = if let Some(bearer) = probe_bearer {
+        let probe_row = match state.app.instances.get_unscoped(&instance_id).await {
+            Ok(r) => Some(r),
+            Err(crate::error::SwarmError::NotFound) => None,
             Err(_) => {
                 return error_response(StatusCode::INTERNAL_SERVER_ERROR, "instance lookup failed");
             }
+        };
+        if let Some(row) = probe_row
+            && ct_eq(&bearer, &row.bearer_token)
+        {
+            (row, true)
+        } else {
+            let row = match lookup_user_scoped_row(
+                &state,
+                &instance_id,
+                req.method().clone(),
+                req.headers().clone(),
+                req.uri().clone(),
+            )
+            .await
+            {
+                Ok(row) => row,
+                Err(resp) => return resp,
+            };
+            (row, false)
         }
     } else {
-        let caller_user_id = match resolve_active_user_with_sessions(
-            state.authenticator.as_ref(),
-            state.app.users.as_ref(),
-            Some(state.app.sessions.as_ref()),
-            req.headers(),
+        let row = match lookup_user_scoped_row(
+            &state,
+            &instance_id,
+            req.method().clone(),
+            req.headers().clone(),
+            req.uri().clone(),
         )
         .await
         {
-            Ok(id) => id,
-            Err(resp) => {
-                // Browser top-level navigations (Accept: text/html on a
-                // GET) get bounced to the apex login page with a
-                // `return_to=<original URL>` query — once the SPA
-                // exchanges its OIDC code, it parks the session cookie
-                // on the parent domain and navigates back to this
-                // subdomain.  Without this hop the user just sees a
-                // bare 401 with no recovery path.  XHR / API callers
-                // and non-GET verbs still get the original auth error
-                // response (their callers handle 401 their own way and
-                // following a 302 would silently swallow the
-                // failure).
-                if resp.status() == StatusCode::UNAUTHORIZED
-                    && wants_login_redirect(req.method(), req.headers())
-                    && let Some(redirect) =
-                        build_login_redirect(state.hostname.as_deref(), req.headers(), req.uri())
-                {
-                    return redirect;
-                }
-                return resp;
-            }
+            Ok(row) => row,
+            Err(resp) => return resp,
         };
-        match state.app.instances.get(&caller_user_id, &instance_id).await {
-            Ok(r) => r,
-            Err(crate::error::SwarmError::NotFound) => {
-                return error_response(StatusCode::NOT_FOUND, "no such instance");
-            }
-            Err(_) => {
-                return error_response(StatusCode::INTERNAL_SERVER_ERROR, "instance lookup failed");
-            }
-        }
+        (row, false)
     };
     let sandbox_id = match row.cube_sandbox_id.as_deref() {
         Some(s) if !s.is_empty() => s,
         _ => return error_response(StatusCode::SERVICE_UNAVAILABLE, "sandbox not yet ready"),
     };
-    if !may_forward_user_traffic(row.status, anonymous_probe) {
+    if !may_forward_user_traffic(row.status, probe_authenticated) {
         return error_response(StatusCode::SERVICE_UNAVAILABLE, "instance not ready");
     }
 
@@ -264,10 +252,10 @@ async fn forward(state: DispatchState, instance_id: String, req: Request) -> Res
     //      need this shape.
     let req_path = req.uri().path();
     if req_path == "/_swarm/share-mint" && req.method() == axum::http::Method::POST {
-        // anonymous_probe is the /healthz carve-out; it never has a
+        // probe_authenticated is the /healthz carve-out; it never has a
         // resolved user.  Reject share-mint there because the action
         // is user-attributed.
-        let caller = if anonymous_probe {
+        let caller = if probe_authenticated {
             return error_response(StatusCode::UNAUTHORIZED, "auth required");
         } else {
             row.owner_id.clone()
@@ -381,8 +369,66 @@ async fn forward(state: DispatchState, instance_id: String, req: Request) -> Res
     })
 }
 
-fn may_forward_user_traffic(status: InstanceStatus, anonymous_probe: bool) -> bool {
-    anonymous_probe || matches!(status, InstanceStatus::Live)
+async fn lookup_user_scoped_row(
+    state: &DispatchState,
+    instance_id: &str,
+    method: Method,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<InstanceRow, Response<Body>> {
+    let caller_user_id = match resolve_active_user_with_sessions(
+        state.authenticator.as_ref(),
+        state.app.users.as_ref(),
+        Some(state.app.sessions.as_ref()),
+        &headers,
+    )
+    .await
+    {
+        Ok(id) => id,
+        Err(resp) => {
+            // Browser top-level navigations (Accept: text/html on a
+            // GET) get bounced to the apex login page with a
+            // `return_to=<original URL>` query — once the SPA
+            // exchanges its OIDC code, it parks the session cookie
+            // on the parent domain and navigates back to this
+            // subdomain.  Without this hop the user just sees a
+            // bare 401 with no recovery path.  XHR / API callers
+            // and non-GET verbs still get the original auth error
+            // response (their callers handle 401 their own way and
+            // following a 302 would silently swallow the failure).
+            if resp.status() == StatusCode::UNAUTHORIZED
+                && wants_login_redirect(&method, &headers)
+                && let Some(redirect) =
+                    build_login_redirect(state.hostname.as_deref(), &headers, &uri)
+            {
+                return Err(redirect);
+            }
+            return Err(resp);
+        }
+    };
+    match state.app.instances.get(&caller_user_id, instance_id).await {
+        Ok(r) => Ok(r),
+        Err(crate::error::SwarmError::NotFound) => {
+            Err(error_response(StatusCode::NOT_FOUND, "no such instance"))
+        }
+        Err(_) => Err(error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "instance lookup failed",
+        )),
+    }
+}
+
+fn may_forward_user_traffic(status: InstanceStatus, probe_authenticated: bool) -> bool {
+    probe_authenticated || matches!(status, InstanceStatus::Live)
+}
+
+fn ct_eq(a: &str, b: &str) -> bool {
+    use subtle::ConstantTimeEq;
+
+    if a.len() != b.len() {
+        return false;
+    }
+    bool::from(a.as_bytes().ct_eq(b.as_bytes()))
 }
 
 fn dyson_model_selection_from_request(method: &Method, path: &str, body: &[u8]) -> Option<String> {

@@ -806,9 +806,10 @@ async fn run_deploy_recreate_live(
             target_template
         );
         let started = Instant::now();
+        let recreate_owner_id = deploy_recreate_owner_id(&row).to_owned();
         match services
             .instance_svc
-            .recreate_in_place(SYSTEM_OWNER, &row.id, &target_template, None)
+            .recreate_in_place(&recreate_owner_id, &row.id, &target_template, None)
             .await
         {
             Ok(new_row) => {
@@ -938,6 +939,10 @@ async fn run_deploy_recreate_live(
         eprintln!("error: failed instance(s): {}", failed.join(", "));
         ExitCode::FAILURE
     }
+}
+
+fn deploy_recreate_owner_id(row: &InstanceRow) -> &str {
+    row.owner_id.as_str()
 }
 
 fn deploy_target_template(
@@ -1356,5 +1361,44 @@ async fn run_restore(
             eprintln!("error: {err:#}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row_with_owner(owner_id: &str) -> InstanceRow {
+        InstanceRow {
+            id: "inst-1".into(),
+            owner_id: owner_id.into(),
+            name: "agent".into(),
+            task: "task".into(),
+            cube_sandbox_id: Some("cube-1".into()),
+            state_generation: "gen-1".into(),
+            template_id: "tpl-old".into(),
+            status: InstanceStatus::Live,
+            bearer_token: "bearer".into(),
+            pinned: false,
+            expires_at: None,
+            last_active_at: 0,
+            last_probe_at: None,
+            last_probe_status: None,
+            created_at: 0,
+            destroyed_at: None,
+            rotated_to: None,
+            network_policy: dyson_swarm_core::network_policy::NetworkPolicy::Open,
+            network_policy_cidrs: Vec::new(),
+            models: Vec::new(),
+            tools: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn deploy_recreate_uses_instance_owner_not_system_owner() {
+        let row = row_with_owner("user-123");
+
+        assert_eq!(deploy_recreate_owner_id(&row), "user-123");
+        assert_ne!(deploy_recreate_owner_id(&row), SYSTEM_OWNER);
     }
 }

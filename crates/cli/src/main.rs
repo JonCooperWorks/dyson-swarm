@@ -3,6 +3,7 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
@@ -13,11 +14,12 @@ use dyson_swarm_core::{
     backup::{local::LocalDiskBackupSink, s3::S3BackupSink},
     config, cube_client, db,
     db::{instances::SqlxInstanceStore, tokens::SqlxTokenStore},
+    http::InternalHttpClient,
     instance::{InstanceService, SYSTEM_OWNER},
     snapshot::SnapshotService,
     traits::{
-        BackupSink, CubeClient, InstanceStatus, InstanceStore, ListFilter, SnapshotStore,
-        TokenStore,
+        BackupSink, CubeClient, InstanceRow, InstanceStatus, InstanceStore, ListFilter,
+        SnapshotStore, TokenStore,
     },
 };
 
@@ -127,6 +129,23 @@ async fn main() -> ExitCode {
         Command::DeploySnapshotLive { output } => run_deploy_snapshot_live(&cfg, output).await,
         Command::DeployRestoreLive { manifest, template } => {
             run_deploy_restore_live(&cfg, manifest, template).await
+        }
+        Command::DeployRecreateLive {
+            progress,
+            template,
+            include_current_template,
+            dry_run,
+            no_verify_conversations,
+        } => {
+            run_deploy_recreate_live(
+                &cfg,
+                progress,
+                template,
+                include_current_template,
+                dry_run,
+                !no_verify_conversations,
+            )
+            .await
         }
         Command::DysonSkills { id } => run_dyson_skills(&cfg, id).await,
         Command::MintApiKey { user_id, label } => run_mint_api_key(&cfg, user_id, label).await,
@@ -276,6 +295,7 @@ async fn run_dyson_skills(cfg: &config::Config, id: String) -> ExitCode {
 
 struct OpsServices {
     instances: Arc<dyn InstanceStore>,
+    instance_svc: Arc<InstanceService>,
     snapshots: Arc<SnapshotService>,
 }
 
@@ -320,6 +340,10 @@ async fn build_ops_services(cfg: &config::Config) -> Result<OpsServices, String>
     ));
     let user_secrets_svc = Arc::new(dyson_swarm_core::secrets::UserSecretsService::new(
         user_secrets_store,
+        cipher_dir.clone(),
+    ));
+    let state_files = Arc::new(dyson_swarm_core::state_files::StateFileService::new(
+        pool.clone(),
         cipher_dir,
     ));
 
@@ -341,6 +365,12 @@ async fn build_ops_services(cfg: &config::Config) -> Result<OpsServices, String>
     let mut instance_svc =
         InstanceService::new(cube.clone(), instances.clone(), tokens, proxy_base)
             .with_llm_cidr(llm_cidr)
+            .with_mcp_upstream_policy(dyson_swarm_core::upstream_policy::OutboundUrlPolicy {
+                enabled: cfg.byo.enabled,
+                allow_localhost: cfg.byo.allow_localhost,
+                allow_internal: cfg.byo.allow_internal,
+            })
+            .with_state_files(state_files)
             .with_mcp_secrets(user_secrets_svc);
     if let Ok(r) = dyson_swarm_core::dyson_reconfig::DysonReconfigurerHttp::new(
         cfg.cube.sandbox_domain.clone(),
@@ -369,11 +399,12 @@ async fn build_ops_services(cfg: &config::Config) -> Result<OpsServices, String>
         instances.clone(),
         snapshots_store,
         backup_sink,
-        instance_svc,
+        instance_svc.clone(),
     ));
 
     Ok(OpsServices {
         instances,
+        instance_svc,
         snapshots,
     })
 }
@@ -506,7 +537,8 @@ async fn run_deploy_restore_live(
         }
     };
 
-    let mut failed = Vec::new();
+    let mut failed_restores = Vec::new();
+    let mut failed_deletes = Vec::new();
     for entry in &manifest.entries {
         let target_template = template_override
             .clone()
@@ -529,20 +561,542 @@ async fn run_deploy_restore_live(
             Ok(row) => {
                 let sandbox = row.cube_sandbox_id.as_deref().unwrap_or("");
                 println!("restored {} -> {}", row.id, sandbox);
+                if let Err(err) = services
+                    .snapshots
+                    .delete(SYSTEM_OWNER, &entry.snapshot_id)
+                    .await
+                {
+                    eprintln!(
+                        "error: delete restored snapshot {} for {} failed: {err:#}",
+                        entry.snapshot_id, entry.instance_id
+                    );
+                    failed_deletes.push(format!("{} ({})", entry.instance_id, entry.snapshot_id));
+                } else {
+                    println!("deleted restored snapshot {}", entry.snapshot_id);
+                }
             }
             Err(err) => {
                 eprintln!("error: restore {} failed: {err:#}", entry.instance_id);
-                failed.push(entry.instance_id.clone());
+                failed_restores.push(entry.instance_id.clone());
             }
         }
     }
 
+    if failed_restores.is_empty() && failed_deletes.is_empty() {
+        ExitCode::SUCCESS
+    } else {
+        if !failed_restores.is_empty() {
+            eprintln!(
+                "error: {} instance restore(s) failed: {}",
+                failed_restores.len(),
+                failed_restores.join(", ")
+            );
+        }
+        if !failed_deletes.is_empty() {
+            eprintln!(
+                "error: {} restored snapshot cleanup(s) failed: {}",
+                failed_deletes.len(),
+                failed_deletes.join(", ")
+            );
+        }
+        ExitCode::FAILURE
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct DeployRecreateProgressEvent {
+    version: u32,
+    ts: i64,
+    status: String,
+    instance_id: String,
+    name: String,
+    old_sandbox_id: Option<String>,
+    new_sandbox_id: Option<String>,
+    old_template_id: String,
+    target_template_id: String,
+    duration_ms: Option<u64>,
+    healthz_ok: Option<bool>,
+    conversations_ok: Option<bool>,
+    conversation_count: Option<usize>,
+    error: Option<String>,
+}
+
+#[derive(Debug)]
+struct DeployRecreateVerification {
+    healthz_ok: bool,
+    conversations_ok: Option<bool>,
+    conversation_count: Option<usize>,
+}
+
+async fn run_deploy_recreate_live(
+    cfg: &config::Config,
+    progress: PathBuf,
+    template_override: Option<String>,
+    include_current_template: bool,
+    dry_run: bool,
+    verify_conversations: bool,
+) -> ExitCode {
+    let target_template = match deploy_target_template(cfg, template_override) {
+        Ok(t) => t,
+        Err(err) => {
+            eprintln!("error: {err}");
+            return ExitCode::from(2);
+        }
+    };
+    if let Err(err) = ensure_progress_log_parent(&progress) {
+        eprintln!("error: progress log {}: {err}", progress.display());
+        return ExitCode::FAILURE;
+    }
+
+    let services = match build_ops_services(cfg).await {
+        Ok(s) => s,
+        Err(err) => {
+            eprintln!("error: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let live = match services
+        .instances
+        .list(
+            SYSTEM_OWNER,
+            ListFilter {
+                status: Some(InstanceStatus::Live),
+                include_destroyed: false,
+            },
+        )
+        .await
+    {
+        Ok(rows) => rows,
+        Err(err) => {
+            eprintln!("error: list live instances: {err:#}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if live.is_empty() {
+        println!("no live instances to recreate");
+        return ExitCode::SUCCESS;
+    }
+
+    let mut ok = 0usize;
+    let mut skipped = 0usize;
+    let mut failed = Vec::new();
+    let mut durations = Vec::new();
+    for row in live {
+        let old_sandbox_id = row.cube_sandbox_id.clone();
+        if old_sandbox_id.as_deref().is_none_or(str::is_empty) {
+            let err =
+                "live row has no cube_sandbox_id; recreate requires a current cube".to_owned();
+            if append_recreate_progress(
+                &progress,
+                DeployRecreateProgressEvent {
+                    version: 1,
+                    ts: dyson_swarm_core::now_secs(),
+                    status: "fail".into(),
+                    instance_id: row.id.clone(),
+                    name: row.name.clone(),
+                    old_sandbox_id,
+                    new_sandbox_id: None,
+                    old_template_id: row.template_id.clone(),
+                    target_template_id: target_template.clone(),
+                    duration_ms: None,
+                    healthz_ok: None,
+                    conversations_ok: None,
+                    conversation_count: None,
+                    error: Some(err.clone()),
+                },
+            )
+            .is_err()
+            {
+                eprintln!("error: failed writing progress log {}", progress.display());
+                return ExitCode::FAILURE;
+            }
+            eprintln!("error: recreate {} failed: {err}", row.id);
+            failed.push(row.id);
+            continue;
+        }
+
+        if row.template_id == target_template && !include_current_template {
+            if append_recreate_progress(
+                &progress,
+                DeployRecreateProgressEvent {
+                    version: 1,
+                    ts: dyson_swarm_core::now_secs(),
+                    status: "skip".into(),
+                    instance_id: row.id.clone(),
+                    name: row.name.clone(),
+                    old_sandbox_id,
+                    new_sandbox_id: None,
+                    old_template_id: row.template_id.clone(),
+                    target_template_id: target_template.clone(),
+                    duration_ms: None,
+                    healthz_ok: None,
+                    conversations_ok: None,
+                    conversation_count: None,
+                    error: Some("already on target template".into()),
+                },
+            )
+            .is_err()
+            {
+                eprintln!("error: failed writing progress log {}", progress.display());
+                return ExitCode::FAILURE;
+            }
+            skipped += 1;
+            continue;
+        }
+
+        if append_recreate_progress(
+            &progress,
+            DeployRecreateProgressEvent {
+                version: 1,
+                ts: dyson_swarm_core::now_secs(),
+                status: "start".into(),
+                instance_id: row.id.clone(),
+                name: row.name.clone(),
+                old_sandbox_id: old_sandbox_id.clone(),
+                new_sandbox_id: None,
+                old_template_id: row.template_id.clone(),
+                target_template_id: target_template.clone(),
+                duration_ms: None,
+                healthz_ok: None,
+                conversations_ok: None,
+                conversation_count: None,
+                error: None,
+            },
+        )
+        .is_err()
+        {
+            eprintln!("error: failed writing progress log {}", progress.display());
+            return ExitCode::FAILURE;
+        }
+
+        if dry_run {
+            if append_recreate_progress(
+                &progress,
+                DeployRecreateProgressEvent {
+                    version: 1,
+                    ts: dyson_swarm_core::now_secs(),
+                    status: "skip".into(),
+                    instance_id: row.id.clone(),
+                    name: row.name.clone(),
+                    old_sandbox_id,
+                    new_sandbox_id: None,
+                    old_template_id: row.template_id.clone(),
+                    target_template_id: target_template.clone(),
+                    duration_ms: None,
+                    healthz_ok: None,
+                    conversations_ok: None,
+                    conversation_count: None,
+                    error: Some("dry run".into()),
+                },
+            )
+            .is_err()
+            {
+                eprintln!("error: failed writing progress log {}", progress.display());
+                return ExitCode::FAILURE;
+            }
+            skipped += 1;
+            continue;
+        }
+
+        println!(
+            "recreate {} ({}) from {} to template {}",
+            row.id,
+            row.name.trim(),
+            old_sandbox_id.as_deref().unwrap_or(""),
+            target_template
+        );
+        let started = Instant::now();
+        match services
+            .instance_svc
+            .recreate_in_place(SYSTEM_OWNER, &row.id, &target_template, None)
+            .await
+        {
+            Ok(new_row) => {
+                let duration_ms = elapsed_ms(started);
+                match verify_recreated_instance(
+                    cfg,
+                    &new_row,
+                    &target_template,
+                    old_sandbox_id.as_deref(),
+                    verify_conversations,
+                )
+                .await
+                {
+                    Ok(verification) => {
+                        let new_sandbox = new_row.cube_sandbox_id.clone();
+                        if append_recreate_progress(
+                            &progress,
+                            DeployRecreateProgressEvent {
+                                version: 1,
+                                ts: dyson_swarm_core::now_secs(),
+                                status: "ok".into(),
+                                instance_id: new_row.id.clone(),
+                                name: new_row.name.clone(),
+                                old_sandbox_id,
+                                new_sandbox_id: new_sandbox.clone(),
+                                old_template_id: row.template_id.clone(),
+                                target_template_id: target_template.clone(),
+                                duration_ms: Some(duration_ms),
+                                healthz_ok: Some(verification.healthz_ok),
+                                conversations_ok: verification.conversations_ok,
+                                conversation_count: verification.conversation_count,
+                                error: None,
+                            },
+                        )
+                        .is_err()
+                        {
+                            eprintln!("error: failed writing progress log {}", progress.display());
+                            return ExitCode::FAILURE;
+                        }
+                        println!(
+                            "recreated {} -> {} ({} ms)",
+                            new_row.id,
+                            new_sandbox.as_deref().unwrap_or(""),
+                            duration_ms
+                        );
+                        ok += 1;
+                        durations.push(duration_ms);
+                    }
+                    Err(err) => {
+                        let new_sandbox = new_row.cube_sandbox_id.clone();
+                        if append_recreate_progress(
+                            &progress,
+                            DeployRecreateProgressEvent {
+                                version: 1,
+                                ts: dyson_swarm_core::now_secs(),
+                                status: "fail".into(),
+                                instance_id: new_row.id.clone(),
+                                name: new_row.name.clone(),
+                                old_sandbox_id,
+                                new_sandbox_id: new_sandbox,
+                                old_template_id: row.template_id.clone(),
+                                target_template_id: target_template.clone(),
+                                duration_ms: Some(duration_ms),
+                                healthz_ok: None,
+                                conversations_ok: None,
+                                conversation_count: None,
+                                error: Some(err.clone()),
+                            },
+                        )
+                        .is_err()
+                        {
+                            eprintln!("error: failed writing progress log {}", progress.display());
+                            return ExitCode::FAILURE;
+                        }
+                        eprintln!("error: recreate {} verification failed: {err}", new_row.id);
+                        failed.push(new_row.id);
+                    }
+                }
+            }
+            Err(err) => {
+                let duration_ms = elapsed_ms(started);
+                let msg = format!("{err:#}");
+                if append_recreate_progress(
+                    &progress,
+                    DeployRecreateProgressEvent {
+                        version: 1,
+                        ts: dyson_swarm_core::now_secs(),
+                        status: "fail".into(),
+                        instance_id: row.id.clone(),
+                        name: row.name.clone(),
+                        old_sandbox_id,
+                        new_sandbox_id: None,
+                        old_template_id: row.template_id.clone(),
+                        target_template_id: target_template.clone(),
+                        duration_ms: Some(duration_ms),
+                        healthz_ok: None,
+                        conversations_ok: None,
+                        conversation_count: None,
+                        error: Some(msg.clone()),
+                    },
+                )
+                .is_err()
+                {
+                    eprintln!("error: failed writing progress log {}", progress.display());
+                    return ExitCode::FAILURE;
+                }
+                eprintln!("error: recreate {} failed: {msg}", row.id);
+                failed.push(row.id);
+            }
+        }
+    }
+
+    if let Some(summary) = duration_summary(&durations) {
+        println!(
+            "deploy-recreate-live summary: ok={ok} skipped={skipped} failed={} {summary}",
+            failed.len()
+        );
+    } else {
+        println!(
+            "deploy-recreate-live summary: ok={ok} skipped={skipped} failed={}",
+            failed.len()
+        );
+    }
     if failed.is_empty() {
         ExitCode::SUCCESS
     } else {
-        eprintln!("error: {} instance restore(s) failed", failed.len());
+        eprintln!("error: failed instance(s): {}", failed.join(", "));
         ExitCode::FAILURE
     }
+}
+
+fn deploy_target_template(
+    cfg: &config::Config,
+    template_override: Option<String>,
+) -> Result<String, String> {
+    template_override
+        .or_else(|| cfg.default_template_id.clone())
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            "target template is required (pass --template or set default_template_id)".into()
+        })
+}
+
+fn ensure_progress_log_parent(path: &std::path::Path) -> Result<(), String> {
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create parent dir: {e}"))?;
+    }
+    Ok(())
+}
+
+fn append_recreate_progress(
+    path: &std::path::Path,
+    event: DeployRecreateProgressEvent,
+) -> Result<(), String> {
+    use std::io::Write;
+
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|e| format!("open progress log: {e}"))?;
+    serde_json::to_writer(&mut file, &event).map_err(|e| format!("encode progress event: {e}"))?;
+    file.write_all(b"\n")
+        .map_err(|e| format!("write progress event: {e}"))?;
+    Ok(())
+}
+
+async fn verify_recreated_instance(
+    cfg: &config::Config,
+    row: &InstanceRow,
+    target_template: &str,
+    old_sandbox_id: Option<&str>,
+    verify_conversations: bool,
+) -> Result<DeployRecreateVerification, String> {
+    if row.status != InstanceStatus::Live {
+        return Err(format!(
+            "row status is {}, expected live",
+            row.status.as_str()
+        ));
+    }
+    if row.template_id != target_template {
+        return Err(format!(
+            "row template_id is {}, expected {target_template}",
+            row.template_id
+        ));
+    }
+    let new_sandbox_id = row
+        .cube_sandbox_id
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "row has no cube_sandbox_id after recreate".to_owned())?;
+    if old_sandbox_id == Some(new_sandbox_id) {
+        return Err(format!(
+            "cube_sandbox_id did not change from {new_sandbox_id}"
+        ));
+    }
+
+    let hostname = cfg
+        .hostname
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            "server.hostname is not configured; cannot verify public instance".to_owned()
+        })?;
+    let hostname = hostname
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_end_matches('/');
+    let base = format!("https://{}.{}", row.id, hostname);
+    let client = InternalHttpClient::with_timeout(Duration::from_secs(
+        cfg.health_probe_timeout_seconds.max(1),
+    ))
+    .map_err(|e| format!("verification client: {e}"))?;
+
+    let health_url = format!("{base}/healthz");
+    let health_resp = client
+        .get(&health_url)
+        .bearer_auth(&row.bearer_token)
+        .send()
+        .await
+        .map_err(|e| format!("healthz send {health_url}: {e}"))?;
+    if !health_resp.status().is_success() {
+        let status = health_resp.status();
+        let body = bounded_body(health_resp).await;
+        return Err(format!("healthz {status}: {body}"));
+    }
+
+    let mut conversation_count = None;
+    let mut conversations_ok = None;
+    if verify_conversations {
+        let conversations_url = format!("{base}/api/conversations");
+        let conversations_resp = client
+            .get(&conversations_url)
+            .bearer_auth(&row.bearer_token)
+            .send()
+            .await
+            .map_err(|e| format!("conversations send {conversations_url}: {e}"))?;
+        if !conversations_resp.status().is_success() {
+            let status = conversations_resp.status();
+            let body = bounded_body(conversations_resp).await;
+            return Err(format!("conversations {status}: {body}"));
+        }
+        let value: serde_json::Value = conversations_resp
+            .json()
+            .await
+            .map_err(|e| format!("conversations parse: {e}"))?;
+        let count = value
+            .as_array()
+            .map(Vec::len)
+            .or_else(|| {
+                value
+                    .get("conversations")
+                    .and_then(serde_json::Value::as_array)
+                    .map(Vec::len)
+            })
+            .ok_or_else(|| "conversations response was not an array".to_owned())?;
+        conversation_count = Some(count);
+        conversations_ok = Some(true);
+    }
+
+    Ok(DeployRecreateVerification {
+        healthz_ok: true,
+        conversations_ok,
+        conversation_count,
+    })
+}
+
+async fn bounded_body(resp: reqwest::Response) -> String {
+    let body = resp.text().await.unwrap_or_default();
+    body.chars().take(500).collect()
+}
+
+fn elapsed_ms(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+fn duration_summary(durations: &[u64]) -> Option<String> {
+    if durations.is_empty() {
+        return None;
+    }
+    let mut sorted = durations.to_vec();
+    sorted.sort_unstable();
+    let min = sorted[0];
+    let median = sorted[sorted.len() / 2];
+    let max = sorted[sorted.len() - 1];
+    Some(format!("duration_ms=min:{min} median:{median} max:{max}"))
 }
 
 fn write_manifest_atomic(

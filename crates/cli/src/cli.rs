@@ -134,6 +134,25 @@ pub enum Command {
         #[arg(long)]
         template: Option<String>,
     },
+
+    /// Operator deploy helper: recreate live instances in place from swarm state.
+    DeployRecreateLive {
+        /// JSONL progress log to append. Each instance gets start + terminal event.
+        #[arg(long)]
+        progress: PathBuf,
+        /// Optional template override. Omit to use server.default_template_id.
+        #[arg(long)]
+        template: Option<String>,
+        /// Recreate instances even when they already reference the target template.
+        #[arg(long, default_value_t = false)]
+        include_current_template: bool,
+        /// List the work and write skip events without creating or destroying cubes.
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+        /// Skip the post-recreate /api/conversations readability check.
+        #[arg(long, default_value_t = false)]
+        no_verify_conversations: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -351,6 +370,41 @@ mod tests {
             "../../../etc/passwd",
         ] {
             assert!(!system_get_allowed(name), "must reject: {name:?}");
+        }
+    }
+
+    #[test]
+    fn parses_deploy_recreate_live_operator_command() {
+        use clap::Parser as _;
+
+        let parsed = Cli::try_parse_from([
+            "swarmctl",
+            "deploy-recreate-live",
+            "--progress",
+            "/tmp/progress.jsonl",
+            "--template",
+            "tpl-v2",
+            "--include-current-template",
+            "--dry-run",
+            "--no-verify-conversations",
+        ])
+        .unwrap();
+
+        match parsed.command {
+            Some(Command::DeployRecreateLive {
+                progress,
+                template,
+                include_current_template,
+                dry_run,
+                no_verify_conversations,
+            }) => {
+                assert_eq!(progress, PathBuf::from("/tmp/progress.jsonl"));
+                assert_eq!(template.as_deref(), Some("tpl-v2"));
+                assert!(include_current_template);
+                assert!(dry_run);
+                assert!(no_verify_conversations);
+            }
+            other => panic!("unexpected command: {other:?}"),
         }
     }
 }

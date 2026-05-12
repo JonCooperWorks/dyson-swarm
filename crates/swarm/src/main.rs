@@ -118,10 +118,15 @@ async fn main() -> ExitCode {
 }
 
 async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
-    let pool = match db::open(&cfg.db_path).await {
+    let pool = match db::open_configured_sqlite(&cfg).await {
         Ok(p) => p,
         Err(err) => {
-            tracing::error!(error = %err, db = %cfg.db_path.display(), "db open failed");
+            tracing::error!(
+                error = %err,
+                backend = %cfg.database_backend,
+                db = %cfg.db_path.display(),
+                "db open failed"
+            );
             return ExitCode::from(2);
         }
     };
@@ -191,7 +196,7 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     ));
     let sessions_store: Arc<dyn SessionStore> =
         Arc::new(db::sessions::SqliteSessionStore::new(pool.clone()));
-    let state_files = std::sync::Arc::new(dyson_swarm::state_files::StateFileService::new(
+    let state_files = std::sync::Arc::new(dyson_swarm::state_files::StateFileService::new_sqlite(
         pool.clone(),
         cipher_dir.clone(),
     ));
@@ -687,15 +692,14 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
 
     // Swarm-side artefact store. Metadata and sealed bytes live in the
     // swarm DB so shared artefacts outlive their cube and any one host.
-    let artefact_cache = std::sync::Arc::new(dyson_swarm::artefacts::ArtefactCacheService::new(
-        pool.clone(),
-        cipher_dir.clone(),
-    ));
+    let artefact_cache = std::sync::Arc::new(
+        dyson_swarm::artefacts::ArtefactCacheService::new_sqlite(pool.clone(), cipher_dir.clone()),
+    );
     // Anonymous artefact-share service — wires the SQLite pool, the
     // user-secrets handle (per-user signing keys are sealed under the
     // user's age cipher), the artefact cache used to verify mint
     // requests, and the apex hostname through one place.
-    let shares_svc = Arc::new(dyson_swarm::shares::ShareService::new(
+    let shares_svc = Arc::new(dyson_swarm::shares::ShareService::new_sqlite(
         pool.clone(),
         user_secrets_svc.clone(),
         instance_svc.clone(),
@@ -762,7 +766,12 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    tracing::info!(bind = %cfg.bind, db = %cfg.db_path.display(), "swarm started");
+    tracing::info!(
+        bind = %cfg.bind,
+        backend = %cfg.database_backend,
+        db = %cfg.db_path.display(),
+        "swarm started"
+    );
 
     let server = axum::serve(
         listener,

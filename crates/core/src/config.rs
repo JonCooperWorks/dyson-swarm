@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
+use std::fmt;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -8,7 +9,12 @@ use crate::mcp_servers::McpDockerCatalogServer;
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     pub bind: String,
+    #[serde(default = "default_db_path")]
     pub db_path: PathBuf,
+    #[serde(default)]
+    pub database_backend: DatabaseBackend,
+    #[serde(default)]
+    pub database_url: Option<String>,
 
     /// Directory holding per-user age root keys
     /// (`<keys_dir>/<user_id>.age`, mode 0400).  The system-scope key
@@ -104,6 +110,33 @@ pub struct Config {
     /// local workspace state inside a running cube.
     #[serde(default, alias = "rotate_binary_on_startup")]
     pub rotate_binary_on_startup: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum DatabaseBackend {
+    #[default]
+    Sqlite,
+    Postgres,
+}
+
+impl DatabaseBackend {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Sqlite => "sqlite",
+            Self::Postgres => "postgres",
+        }
+    }
+}
+
+impl fmt::Display for DatabaseBackend {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+fn default_db_path() -> PathBuf {
+    PathBuf::from("/var/lib/dyson-swarm/state.db")
 }
 
 /// One cube cell tiering profile.  Renders to a single
@@ -396,6 +429,8 @@ pub enum ConfigError {
     EmptyField(&'static str),
     #[error("DB file {path} has insecure permissions ({mode:o}); set mode 0600 (chmod 600 {path})")]
     InsecureDbPermissions { path: String, mode: u32 },
+    #[error("database_url must start with postgres:// or postgresql://")]
+    InvalidDatabaseUrl,
     #[error("backup.sink = \"s3\" requires [backup.s3] section")]
     MissingS3Section,
 }
@@ -443,6 +478,20 @@ impl Config {
         }
         if let Some(v) = env.get("SWARM_DB_PATH") {
             self.db_path = PathBuf::from(v);
+        }
+        if let Some(v) = env.get("SWARM_DATABASE_BACKEND") {
+            self.database_backend = match v.trim().to_ascii_lowercase().as_str() {
+                "sqlite" => DatabaseBackend::Sqlite,
+                "postgres" | "postgresql" => DatabaseBackend::Postgres,
+                _ => self.database_backend,
+            };
+        }
+        if let Some(v) = env.get("SWARM_DATABASE_URL") {
+            self.database_url = if v.trim().is_empty() {
+                None
+            } else {
+                Some(v.clone())
+            };
         }
         if let Some(v) = env.get("SWARM_KEYS_DIR") {
             self.keys_dir = if v.is_empty() {
@@ -533,8 +582,24 @@ impl Config {
         // role check, not a shared bearer.  `dangerous_no_auth` keeps
         // working as the local-dev bypass; production requires OIDC.
         let _ = dangerous_no_auth;
-        if self.db_path.as_os_str().is_empty() {
-            return Err(ConfigError::EmptyField("db_path"));
+        match self.database_backend {
+            DatabaseBackend::Sqlite => {
+                if self.db_path.as_os_str().is_empty() {
+                    return Err(ConfigError::EmptyField("db_path"));
+                }
+                check_db_path_permissions(&self.db_path)?;
+            }
+            DatabaseBackend::Postgres => {
+                let url = self
+                    .database_url
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .ok_or(ConfigError::EmptyField("database_url"))?;
+                if !url.starts_with("postgres://") && !url.starts_with("postgresql://") {
+                    return Err(ConfigError::InvalidDatabaseUrl);
+                }
+            }
         }
         if self.cube.url.trim().is_empty() {
             return Err(ConfigError::EmptyField("cube.url"));
@@ -548,7 +613,6 @@ impl Config {
         if matches!(self.backup.sink, BackupSinkKind::S3) && self.backup.s3.is_none() {
             return Err(ConfigError::MissingS3Section);
         }
-        check_db_path_permissions(&self.db_path)?;
         Ok(())
     }
 }
@@ -626,6 +690,8 @@ local_cache_dir = "/tmp/cache"
         let cfg = Config::load(&path, &BTreeMap::new(), false).expect("loads");
         assert_eq!(cfg.bind, "0.0.0.0:8080");
         assert_eq!(cfg.cube.api_key, "k");
+        assert_eq!(cfg.database_backend, DatabaseBackend::Sqlite);
+        assert_eq!(cfg.database_url, None);
         assert_eq!(cfg.health_probe_interval_seconds, 60);
         assert!(!cfg.rotate_binary_on_startup);
         assert_eq!(cfg.backup.sink, BackupSinkKind::Local);
@@ -651,6 +717,52 @@ local_cache_dir = "/tmp/cache"
             cfg.providers.get("anthropic").unwrap().api_key.as_deref(),
             Some("from-env")
         );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn postgres_backend_accepts_url_without_sqlite_path_check() {
+        let toml = example_toml().replace(
+            "db_path = \"/tmp/state.db\"\n",
+            "database_backend = \"postgres\"\ndatabase_url = \"postgresql://db.internal/swarm\"\n",
+        );
+        let path = write_tmp("postgres_backend.toml", &toml);
+        let cfg = Config::load(&path, &BTreeMap::new(), false).expect("loads");
+        assert_eq!(cfg.database_backend, DatabaseBackend::Postgres);
+        assert_eq!(
+            cfg.database_url.as_deref(),
+            Some("postgresql://db.internal/swarm")
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn postgres_backend_env_override() {
+        let path = write_tmp("postgres_env.toml", example_toml());
+        let mut env = BTreeMap::new();
+        env.insert("SWARM_DATABASE_BACKEND".into(), "postgresql".into());
+        env.insert(
+            "SWARM_DATABASE_URL".into(),
+            "postgres://db.internal/swarm".into(),
+        );
+        let cfg = Config::load(&path, &env, false).expect("loads");
+        assert_eq!(cfg.database_backend, DatabaseBackend::Postgres);
+        assert_eq!(
+            cfg.database_url.as_deref(),
+            Some("postgres://db.internal/swarm")
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn postgres_backend_rejects_non_postgres_url() {
+        let toml = example_toml().replace(
+            "db_path = \"/tmp/state.db\"\n",
+            "database_backend = \"postgres\"\ndatabase_url = \"sqlite:///tmp/state.db\"\n",
+        );
+        let path = write_tmp("postgres_bad_url.toml", &toml);
+        let err = Config::load(&path, &BTreeMap::new(), false).expect_err("rejects");
+        assert!(matches!(err, ConfigError::InvalidDatabaseUrl));
         std::fs::remove_file(&path).ok();
     }
 

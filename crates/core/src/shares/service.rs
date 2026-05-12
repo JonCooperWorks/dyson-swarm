@@ -1,7 +1,7 @@
 //! Application service that wires the share primitives together.
 //!
-//! Holds the SQLite pool, the per-user secrets service, the shared
-//! reqwest client used to talk to dyson, the configured sandbox
+//! Holds the current backend store handle, the per-user secrets service,
+//! the shared reqwest client used to talk to dyson, the configured sandbox
 //! domain, and an `Arc<ShareMetrics>` for the public read path.  HTTP
 //! handlers (`http::shares` for admin CRUD, `http::share_public` for
 //! the anonymous read endpoint) do nothing more than parse params,
@@ -74,7 +74,7 @@ pub struct VerifiedShare {
 }
 
 impl ShareService {
-    pub fn new(
+    pub fn new_sqlite(
         pool: SqlitePool,
         user_secrets: Arc<UserSecretsService>,
         instances: Arc<InstanceService>,

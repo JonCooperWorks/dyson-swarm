@@ -167,7 +167,7 @@ async fn run_mint_api_key(
         return ExitCode::from(2);
     }
 
-    let pool = match dyson_swarm_core::db::open(&cfg.db_path).await {
+    let pool = match dyson_swarm_core::db::open_configured_sqlite(cfg).await {
         Ok(p) => p,
         Err(err) => {
             eprintln!("db open: {err}");
@@ -206,7 +206,7 @@ async fn run_mint_api_key(
 /// are required to reach cubeproxy.
 async fn run_dyson_skills(cfg: &config::Config, id: String) -> ExitCode {
     use dyson_swarm_core::dyson_reconfig::DysonReconfigurerHttp;
-    let pool = match dyson_swarm_core::db::open(&cfg.db_path).await {
+    let pool = match dyson_swarm_core::db::open_configured_sqlite(cfg).await {
         Ok(p) => p,
         Err(err) => {
             eprintln!("db open: {err}");
@@ -300,9 +300,9 @@ struct OpsServices {
 }
 
 async fn build_ops_services(cfg: &config::Config) -> Result<OpsServices, String> {
-    let pool = db::open(&cfg.db_path)
+    let pool = db::open_configured_sqlite(cfg)
         .await
-        .map_err(|e| format!("db open {}: {e:#}", cfg.db_path.display()))?;
+        .map_err(|e| format!("db open (backend {}): {e:#}", cfg.database_backend))?;
     let cube = Arc::new(
         cube_client::HttpCubeClient::new(&cfg.cube).map_err(|e| format!("cube client: {e:#}"))?,
     ) as Arc<dyn CubeClient>;
@@ -342,7 +342,7 @@ async fn build_ops_services(cfg: &config::Config) -> Result<OpsServices, String>
         user_secrets_store,
         cipher_dir.clone(),
     ));
-    let state_files = Arc::new(dyson_swarm_core::state_files::StateFileService::new(
+    let state_files = Arc::new(dyson_swarm_core::state_files::StateFileService::new_sqlite(
         pool.clone(),
         cipher_dir,
     ));
@@ -1158,7 +1158,7 @@ async fn run_secrets(
 /// directly and pipes through [`SystemSecretsService`].  No HTTP, no
 /// admin bearer.
 async fn run_system_secret(cfg: &config::Config, action: SecretsAction) -> ExitCode {
-    let pool = match db::open(&cfg.db_path).await {
+    let pool = match db::open_configured_sqlite(cfg).await {
         Ok(p) => p,
         Err(err) => {
             eprintln!("error: db open failed: {err:#}");

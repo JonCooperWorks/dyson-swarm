@@ -14,6 +14,7 @@ use std::str::FromStr;
 use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 
+use crate::config::{Config, DatabaseBackend};
 use crate::error::StoreError;
 
 pub mod artefacts;
@@ -74,6 +75,23 @@ pub async fn open(path: &Path) -> Result<SqlitePool, sqlx::Error> {
         .map_err(|e| sqlx::Error::Migrate(Box::new(e)))?;
     secure_db_perms(path)?;
     Ok(pool)
+}
+
+/// Open the configured runtime database while the runtime stores are
+/// still SQLite-backed.
+///
+/// Postgres config is parsed and validated now so operators can stage
+/// config and the Pg implementation can land behind the same seam, but
+/// starting swarm with `database_backend = "postgres"` must fail
+/// explicitly until the direct-pool services have Pg stores.
+pub async fn open_configured_sqlite(cfg: &Config) -> Result<SqlitePool, StoreError> {
+    match cfg.database_backend {
+        DatabaseBackend::Sqlite => open(&cfg.db_path).await.map_err(map_sqlx),
+        DatabaseBackend::Postgres => Err(StoreError::Io(
+            "database_backend=postgres is configured, but Postgres-backed stores are not implemented yet"
+                .into(),
+        )),
+    }
 }
 
 #[cfg(unix)]

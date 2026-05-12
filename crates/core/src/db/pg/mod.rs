@@ -12,11 +12,11 @@
 //!    `PgSystemSecretStore`, `PgTokenStore`, `PgUserStore`,
 //!    `PgSnapshotStore`, `PgPolicyStore`, `PgAuditStore`
 //!    — one per existing trait, mirroring the sqlite/*.rs files.
-//! 2. Add a `db::open_pg(url)` that mirrors `db::open(path)` but builds a
-//!    `PgPool` and runs `migrations/postgres/`.
-//! 3. In `main.rs`, branch on the config (sqlite path vs postgres URL) at
-//!    pool construction; the rest of the wiring (services, routes, etc.)
-//!    is unchanged because every consumer holds `Arc<dyn ...Store>`.
+//! 2. Add a `db::open_pg(url)` that builds a `PgPool` and runs
+//!    `migrations/postgres/`.
+//! 3. Replace the temporary `open_configured_sqlite` guard with a
+//!    backend enum/runtime handle so `main.rs` wires Pg stores when
+//!    `database_backend = "postgres"`.
 //!
 //! See `migrations/postgres/*.sql` for the schema (kept in lockstep with
 //! the sqlite migrations).

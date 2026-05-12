@@ -243,7 +243,7 @@ async fn build() -> Fixture {
         cipher_dir.clone(),
     ));
     let apex = "swarm.test".to_string();
-    let artefact_cache = Arc::new(dyson_swarm::artefacts::ArtefactCacheService::new(
+    let artefact_cache = Arc::new(dyson_swarm::artefacts::ArtefactCacheService::new_sqlite(
         pool.clone(),
         cipher_dir.clone(),
     ));
@@ -264,7 +264,7 @@ async fn build() -> Fixture {
         )
         .await
         .unwrap();
-    let shares_svc = Arc::new(dyson_swarm::shares::ShareService::new(
+    let shares_svc = Arc::new(dyson_swarm::shares::ShareService::new_sqlite(
         pool.clone(),
         user_secrets_svc.clone(),
         instance_svc.clone(),
@@ -272,7 +272,7 @@ async fn build() -> Fixture {
         dyson_swarm::shares::ShareMetrics::new(),
         Some(apex.clone()),
     ));
-    let state_files = Arc::new(dyson_swarm::state_files::StateFileService::new(
+    let state_files = Arc::new(dyson_swarm::state_files::StateFileService::new_sqlite(
         pool.clone(),
         cipher_dir.clone(),
     ));

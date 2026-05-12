@@ -182,11 +182,11 @@ mod tests {
             Arc::new(crate::webhooks::NullWebhookDispatcher),
             cipher_dir.clone(),
         ));
-        let artefact_cache = Arc::new(crate::artefacts::ArtefactCacheService::new(
+        let artefact_cache = Arc::new(crate::artefacts::ArtefactCacheService::new_sqlite(
             pool.clone(),
             cipher_dir.clone(),
         ));
-        let shares_svc = Arc::new(crate::shares::ShareService::new(
+        let shares_svc = Arc::new(crate::shares::ShareService::new_sqlite(
             pool.clone(),
             user_secrets.clone(),
             instance_svc.clone(),
@@ -194,7 +194,7 @@ mod tests {
             crate::shares::ShareMetrics::new(),
             None,
         ));
-        let state_files = Arc::new(crate::state_files::StateFileService::new(
+        let state_files = Arc::new(crate::state_files::StateFileService::new_sqlite(
             pool.clone(),
             cipher_dir.clone(),
         ));

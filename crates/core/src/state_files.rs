@@ -51,7 +51,7 @@ pub struct StateFileMeta<'a> {
 }
 
 impl StateFileService {
-    pub fn new(pool: SqlitePool, ciphers: Arc<dyn CipherDirectory>) -> Self {
+    pub fn new_sqlite(pool: SqlitePool, ciphers: Arc<dyn CipherDirectory>) -> Self {
         Self { pool, ciphers }
     }
 
@@ -374,7 +374,7 @@ mod tests {
         let keys = tempfile::tempdir().unwrap();
         let ciphers: Arc<dyn CipherDirectory> =
             Arc::new(crate::envelope::AgeCipherDirectory::new(keys.path()).unwrap());
-        (StateFileService::new(pool, ciphers), keys)
+        (StateFileService::new_sqlite(pool, ciphers), keys)
     }
 
     fn meta<'a>(path: &'a str) -> StateFileMeta<'a> {

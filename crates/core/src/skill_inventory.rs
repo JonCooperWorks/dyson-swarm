@@ -252,7 +252,7 @@ mod tests {
         let keys = tempfile::tempdir().unwrap();
         let ciphers: Arc<dyn crate::envelope::CipherDirectory> =
             Arc::new(crate::envelope::AgeCipherDirectory::new(keys.path()).unwrap());
-        (StateFileService::new(pool, ciphers), keys)
+        (StateFileService::new_sqlite(pool, ciphers), keys)
     }
 
     #[tokio::test]

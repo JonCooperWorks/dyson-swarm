@@ -71,9 +71,9 @@ pub struct IngestMeta<'a> {
 }
 
 impl ArtefactCacheService {
-    /// Wire the service to a pool and the per-user cipher directory
-    /// used to seal bodies at rest.
-    pub fn new(pool: SqlitePool, ciphers: Arc<dyn CipherDirectory>) -> Self {
+    /// Wire the service to a SQLite pool and the per-user cipher
+    /// directory used to seal bodies at rest.
+    pub fn new_sqlite(pool: SqlitePool, ciphers: Arc<dyn CipherDirectory>) -> Self {
         Self { pool, ciphers }
     }
 
@@ -289,7 +289,7 @@ mod tests {
         let keys = tempfile::tempdir().unwrap();
         let ciphers: Arc<dyn CipherDirectory> =
             Arc::new(crate::envelope::AgeCipherDirectory::new(keys.path()).unwrap());
-        let svc = ArtefactCacheService::new(pool, ciphers);
+        let svc = ArtefactCacheService::new_sqlite(pool, ciphers);
         (svc, keys)
     }
 

@@ -13,7 +13,7 @@
 //! constant-time `ConstantTimeEq`; bearer compares use the same.
 //!
 //! Request bodies are kept for audit but sealed under the instance
-//! owner's age cipher before insert, so a stolen SQLite file alone
+//! owner's age cipher before insert, so a stolen store file alone
 //! does not expose historical webhook payloads — an attacker would
 //! also need the owner's age key (kept outside the DB).  Body-text
 //! search across rows is not available at the store layer for the
@@ -420,7 +420,7 @@ pub struct WebhookService {
     user_secrets: Arc<UserSecretsService>,
     instances: Arc<InstanceService>,
     dispatcher: Arc<dyn WebhookDispatcher>,
-    /// Per-user age ciphers — used to seal audit bodies so the SQLite
+    /// Per-user age ciphers — used to seal audit bodies so the store
     /// file can't be read offline to recover historical webhook
     /// payloads.  Same directory used by the secret services so we
     /// don't bring a second key namespace into the picture.
@@ -752,7 +752,7 @@ impl WebhookService {
                 // Audit storage: keep the body for every delivery we
                 // accepted into the pipeline, sealed under the owner's
                 // age cipher.  An attacker with read access to the
-                // SQLite file alone can't recover historical webhook
+                // store file alone can't recover historical webhook
                 // payloads — they need the owner's age key too, which
                 // lives outside the DB.  body_size always reflects the
                 // *plaintext* length so audits can tell "no body" from

@@ -2262,8 +2262,8 @@ async fn runtime_config_sync_replays_mirrored_chats_for_configuring_rows() {
     let keys = Box::leak(Box::new(tempfile::tempdir().unwrap()));
     let ciphers: Arc<dyn crate::envelope::CipherDirectory> =
         Arc::new(crate::envelope::AgeCipherDirectory::new(keys.path()).unwrap());
-    let state_files = Arc::new(crate::state_files::StateFileService::new_sqlite(
-        pool.clone(),
+    let state_files = Arc::new(crate::state_files::StateFileService::new(
+        crate::db::state_file_store(pool.clone()),
         ciphers,
     ));
     let svc = Arc::new(
@@ -3782,8 +3782,8 @@ async fn restore_snapshot_in_place_uses_snapshot_base_and_replays_mirror_when_st
     let keys = Box::leak(Box::new(tempfile::tempdir().unwrap()));
     let ciphers: Arc<dyn crate::envelope::CipherDirectory> =
         Arc::new(crate::envelope::AgeCipherDirectory::new(keys.path()).unwrap());
-    let state_files = Arc::new(crate::state_files::StateFileService::new_sqlite(
-        pool.clone(),
+    let state_files = Arc::new(crate::state_files::StateFileService::new(
+        crate::db::state_file_store(pool.clone()),
         ciphers.clone(),
     ));
     let user_secrets_store: Arc<dyn crate::traits::UserSecretStore> =
@@ -3957,8 +3957,8 @@ async fn restore_snapshot_in_place_uses_snapshot_when_mirror_has_no_replayable_b
     let keys = Box::leak(Box::new(tempfile::tempdir().unwrap()));
     let ciphers: Arc<dyn crate::envelope::CipherDirectory> =
         Arc::new(crate::envelope::AgeCipherDirectory::new(keys.path()).unwrap());
-    let state_files = Arc::new(crate::state_files::StateFileService::new_sqlite(
-        pool.clone(),
+    let state_files = Arc::new(crate::state_files::StateFileService::new(
+        crate::db::state_file_store(pool.clone()),
         ciphers,
     ));
     let isvc = Arc::new(
@@ -4516,7 +4516,10 @@ async fn reset_replays_sealed_state_before_enabling_sync() {
     let user_secrets_store: Arc<dyn crate::traits::UserSecretStore> =
         Arc::new(crate::db::secrets::SqlxUserSecretStore::new(pool.clone()));
     let user_secrets = Arc::new(UserSecretsService::new(user_secrets_store, ciphers.clone()));
-    let state_files = crate::state_files::StateFileService::new_sqlite(pool.clone(), ciphers);
+    let state_files = crate::state_files::StateFileService::new(
+        crate::db::state_file_store(pool.clone()),
+        ciphers,
+    );
     let isvc = Arc::new(
         InstanceService::new(
             cube.clone(),
@@ -4745,8 +4748,8 @@ async fn runtime_config_sync_does_not_replay_state_into_live_sandbox() {
     let ciphers: Arc<dyn crate::envelope::CipherDirectory> =
         Arc::new(crate::envelope::AgeCipherDirectory::new(keys.path()).unwrap());
     let ciphers_for_zero = ciphers.clone();
-    let state_files = Arc::new(crate::state_files::StateFileService::new_sqlite(
-        pool.clone(),
+    let state_files = Arc::new(crate::state_files::StateFileService::new(
+        crate::db::state_file_store(pool.clone()),
         ciphers.clone(),
     ));
     let user_secrets_store: Arc<dyn crate::traits::UserSecretStore> =
@@ -4910,8 +4913,8 @@ async fn runtime_config_sync_keeps_row_identity_when_mirrored_identity_has_no_bo
     let keys = Box::leak(Box::new(tempfile::tempdir().unwrap()));
     let ciphers: Arc<dyn crate::envelope::CipherDirectory> =
         Arc::new(crate::envelope::AgeCipherDirectory::new(keys.path()).unwrap());
-    let state_files = Arc::new(crate::state_files::StateFileService::new_sqlite(
-        pool.clone(),
+    let state_files = Arc::new(crate::state_files::StateFileService::new(
+        crate::db::state_file_store(pool.clone()),
         ciphers,
     ));
     let isvc = Arc::new(
@@ -4985,8 +4988,8 @@ async fn binary_rotation_replays_sealed_chats_before_enabling_sync() {
     let keys = Box::leak(Box::new(tempfile::tempdir().unwrap()));
     let ciphers: Arc<dyn crate::envelope::CipherDirectory> =
         Arc::new(crate::envelope::AgeCipherDirectory::new(keys.path()).unwrap());
-    let state_files = Arc::new(crate::state_files::StateFileService::new_sqlite(
-        pool.clone(),
+    let state_files = Arc::new(crate::state_files::StateFileService::new(
+        crate::db::state_file_store(pool.clone()),
         ciphers.clone(),
     ));
     let user_secrets_store: Arc<dyn crate::traits::UserSecretStore> =
@@ -5221,8 +5224,8 @@ async fn binary_rotation_uses_snapshot_base_when_mirror_rows_exist() {
     let keys = Box::leak(Box::new(tempfile::tempdir().unwrap()));
     let ciphers: Arc<dyn crate::envelope::CipherDirectory> =
         Arc::new(crate::envelope::AgeCipherDirectory::new(keys.path()).unwrap());
-    let state_files = Arc::new(crate::state_files::StateFileService::new_sqlite(
-        pool.clone(),
+    let state_files = Arc::new(crate::state_files::StateFileService::new(
+        crate::db::state_file_store(pool.clone()),
         ciphers,
     ));
     let isvc = Arc::new(

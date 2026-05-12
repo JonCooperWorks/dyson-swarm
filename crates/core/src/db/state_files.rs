@@ -4,37 +4,65 @@
 //! both the encrypted body bytes and row bookkeeping so workspace state
 //! is replayable from the swarm store without node-local cache affinity.
 
+use async_trait::async_trait;
 use sqlx::{Row, SqlitePool};
 
 use crate::db::map_sqlx;
 use crate::error::StoreError;
+use crate::traits::StateFileStore;
 
-#[derive(Debug, Clone)]
-pub struct StateFileRow {
-    pub id: i64,
-    pub instance_id: String,
-    pub owner_id: String,
-    pub namespace: String,
-    pub path: String,
-    pub mime: Option<String>,
-    pub bytes: i64,
-    pub body_ciphertext: Option<Vec<u8>>,
-    pub updated_at: i64,
-    pub synced_at: i64,
-    pub deleted_at: Option<i64>,
+pub use crate::traits::{StateFileRow, StateFileUpsertSpec as UpsertSpec};
+
+#[derive(Clone)]
+pub struct SqlxStateFileStore {
+    pool: SqlitePool,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct UpsertSpec<'a> {
-    pub instance_id: &'a str,
-    pub owner_id: &'a str,
-    pub namespace: &'a str,
-    pub path: &'a str,
-    pub mime: Option<&'a str>,
-    pub bytes: i64,
-    pub body_ciphertext: &'a [u8],
-    pub updated_at: i64,
-    pub synced_at: i64,
+impl SqlxStateFileStore {
+    pub fn new(pool: SqlitePool) -> Self {
+        Self { pool }
+    }
+}
+
+#[async_trait]
+impl StateFileStore for SqlxStateFileStore {
+    async fn upsert(&self, spec: UpsertSpec<'_>) -> Result<StateFileRow, StoreError> {
+        upsert(&self.pool, spec).await
+    }
+
+    async fn tombstone(
+        &self,
+        instance_id: &str,
+        owner_id: &str,
+        namespace: &str,
+        path: &str,
+        updated_at: i64,
+        synced_at: i64,
+    ) -> Result<StateFileRow, StoreError> {
+        tombstone(
+            &self.pool,
+            instance_id,
+            owner_id,
+            namespace,
+            path,
+            updated_at,
+            synced_at,
+        )
+        .await
+    }
+
+    async fn find(
+        &self,
+        instance_id: &str,
+        namespace: &str,
+        path: &str,
+    ) -> Result<Option<StateFileRow>, StoreError> {
+        find(&self.pool, instance_id, namespace, path).await
+    }
+
+    async fn list_for_instance(&self, instance_id: &str) -> Result<Vec<StateFileRow>, StoreError> {
+        list_for_instance(&self.pool, instance_id).await
+    }
 }
 
 pub async fn upsert(pool: &SqlitePool, spec: UpsertSpec<'_>) -> Result<StateFileRow, StoreError> {

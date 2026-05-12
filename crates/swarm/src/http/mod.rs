@@ -112,7 +112,7 @@ pub struct AppState {
     pub webhooks: Arc<crate::webhooks::WebhookService>,
     /// Anonymous artefact-share service — backs `/v1/instances/:id/...`
     /// admin CRUD and the public read path on `share.<apex>`.  Holds
-    /// the SQLite pool, the per-user-secrets handle, and the metrics
+    /// the share store, the per-user-secrets handle, and the metrics
     /// counters; stateless across requests.
     pub shares: Arc<crate::shares::ShareService>,
     /// Swarm-side cache of dyson-emitted artefacts.  Read-through and
@@ -347,7 +347,7 @@ mod tests {
             crate::db::users::SqlxUserStore::new(pool.clone(), cipher_dir.clone()),
         );
         let sessions_store: Arc<dyn crate::traits::SessionStore> =
-            Arc::new(crate::db::sessions::SqliteSessionStore::new(pool.clone()));
+            crate::db::session_store(pool.clone());
         let instance_svc = Arc::new(InstanceService::new(
             cube.clone(),
             instances_store.clone(),
@@ -355,8 +355,7 @@ mod tests {
             "http://test/llm",
         ));
         let backup: Arc<dyn BackupSink> = Arc::new(LocalDiskBackupSink::new(cube.clone()));
-        let snapshots_store: Arc<dyn SnapshotStore> =
-            Arc::new(crate::db::snapshots::SqliteSnapshotStore::new(pool.clone()));
+        let snapshots_store: Arc<dyn SnapshotStore> = crate::db::snapshot_store(pool.clone());
         let snapshot_svc = Arc::new(SnapshotService::new(
             cube,
             instances_store.clone(),
@@ -376,20 +375,20 @@ mod tests {
             Arc::new(crate::webhooks::NullWebhookDispatcher),
             cipher_dir.clone(),
         ));
-        let artefact_cache = Arc::new(crate::artefacts::ArtefactCacheService::new_sqlite(
-            pool.clone(),
+        let artefact_cache = Arc::new(crate::artefacts::ArtefactCacheService::new(
+            crate::db::artefact_cache_store(pool.clone()),
             cipher_dir.clone(),
         ));
-        let shares_svc = Arc::new(crate::shares::ShareService::new_sqlite(
-            pool.clone(),
+        let shares_svc = Arc::new(crate::shares::ShareService::new(
+            crate::db::share_store(pool.clone()),
             user_secrets.clone(),
             instance_svc.clone(),
             artefact_cache.clone(),
             crate::shares::ShareMetrics::new(),
             None,
         ));
-        let state_files = Arc::new(crate::state_files::StateFileService::new_sqlite(
-            pool.clone(),
+        let state_files = Arc::new(crate::state_files::StateFileService::new(
+            crate::db::state_file_store(pool.clone()),
             cipher_dir.clone(),
         ));
         let state = AppState {
@@ -402,7 +401,7 @@ mod tests {
             tokens: tokens_store,
             users: users_store.clone(),
             sessions: sessions_store,
-            admin_audit: Arc::new(crate::db::audit::SqliteAdminAuditStore::new(pool.clone())),
+            admin_audit: crate::db::admin_audit_store(pool.clone()),
             sandbox_domain: "cube.test".into(),
             hostname: None,
             auth_config: Arc::new(auth_config::AuthConfig::none()),

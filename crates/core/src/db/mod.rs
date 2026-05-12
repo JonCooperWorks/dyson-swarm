@@ -10,12 +10,17 @@
 
 use std::path::Path;
 use std::str::FromStr;
+use std::sync::Arc;
 
 use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 
 use crate::config::{Config, DatabaseBackend};
 use crate::error::StoreError;
+use crate::traits::{
+    AdminAuditStore, ArtefactCacheStore, AuditStore, McpAuditStore, PolicyStore, SessionStore,
+    ShareStore, SnapshotStore, StateFileStore,
+};
 
 pub mod artefacts;
 pub mod audit;
@@ -92,6 +97,42 @@ pub async fn open_configured_sqlite(cfg: &Config) -> Result<SqlitePool, StoreErr
                 .into(),
         )),
     }
+}
+
+pub fn artefact_cache_store(pool: SqlitePool) -> Arc<dyn ArtefactCacheStore> {
+    Arc::new(artefacts::SqlxArtefactStore::new(pool))
+}
+
+pub fn snapshot_store(pool: SqlitePool) -> Arc<dyn SnapshotStore> {
+    Arc::new(snapshots::SqliteSnapshotStore::new(pool))
+}
+
+pub fn policy_store(pool: SqlitePool) -> Arc<dyn PolicyStore> {
+    Arc::new(policies::SqlitePolicyStore::new(pool))
+}
+
+pub fn audit_store(pool: SqlitePool) -> Arc<dyn AuditStore> {
+    Arc::new(audit::SqliteAuditStore::new(pool))
+}
+
+pub fn mcp_audit_store(pool: SqlitePool) -> Arc<dyn McpAuditStore> {
+    Arc::new(audit::SqliteMcpAuditStore::new(pool))
+}
+
+pub fn admin_audit_store(pool: SqlitePool) -> Arc<dyn AdminAuditStore> {
+    Arc::new(audit::SqliteAdminAuditStore::new(pool))
+}
+
+pub fn session_store(pool: SqlitePool) -> Arc<dyn SessionStore> {
+    Arc::new(sessions::SqliteSessionStore::new(pool))
+}
+
+pub fn state_file_store(pool: SqlitePool) -> Arc<dyn StateFileStore> {
+    Arc::new(state_files::SqlxStateFileStore::new(pool))
+}
+
+pub fn share_store(pool: SqlitePool) -> Arc<dyn ShareStore> {
+    Arc::new(shares::SqlxShareStore::new(pool))
 }
 
 #[cfg(unix)]

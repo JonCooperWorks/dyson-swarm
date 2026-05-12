@@ -181,23 +181,18 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         Arc::new(SqlxInstanceStore::new(pool.clone(), token_cipher.clone()));
     let tokens_store: Arc<dyn TokenStore> =
         Arc::new(SqlxTokenStore::new(pool.clone(), token_cipher));
-    let snapshots_store: Arc<dyn SnapshotStore> =
-        Arc::new(db::snapshots::SqliteSnapshotStore::new(pool.clone()));
-    let policies_store: Arc<dyn PolicyStore> =
-        Arc::new(db::policies::SqlitePolicyStore::new(pool.clone()));
-    let audit_store: Arc<dyn AuditStore> = Arc::new(db::audit::SqliteAuditStore::new(pool.clone()));
-    let mcp_audit_store: Arc<dyn McpAuditStore> =
-        Arc::new(db::audit::SqliteMcpAuditStore::new(pool.clone()));
-    let admin_audit_store: Arc<dyn AdminAuditStore> =
-        Arc::new(db::audit::SqliteAdminAuditStore::new(pool.clone()));
+    let snapshots_store: Arc<dyn SnapshotStore> = db::snapshot_store(pool.clone());
+    let policies_store: Arc<dyn PolicyStore> = db::policy_store(pool.clone());
+    let audit_store: Arc<dyn AuditStore> = db::audit_store(pool.clone());
+    let mcp_audit_store: Arc<dyn McpAuditStore> = db::mcp_audit_store(pool.clone());
+    let admin_audit_store: Arc<dyn AdminAuditStore> = db::admin_audit_store(pool.clone());
     let users_store: Arc<dyn UserStore> = Arc::new(db::users::SqlxUserStore::new(
         pool.clone(),
         cipher_dir.clone(),
     ));
-    let sessions_store: Arc<dyn SessionStore> =
-        Arc::new(db::sessions::SqliteSessionStore::new(pool.clone()));
-    let state_files = std::sync::Arc::new(dyson_swarm::state_files::StateFileService::new_sqlite(
-        pool.clone(),
+    let sessions_store: Arc<dyn SessionStore> = db::session_store(pool.clone());
+    let state_files = std::sync::Arc::new(dyson_swarm::state_files::StateFileService::new(
+        db::state_file_store(pool.clone()),
         cipher_dir.clone(),
     ));
     let outbound_policy = Arc::new(dyson_swarm_core::upstream_policy::OutboundUrlPolicy {
@@ -692,15 +687,16 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
 
     // Swarm-side artefact store. Metadata and sealed bytes live in the
     // swarm DB so shared artefacts outlive their cube and any one host.
-    let artefact_cache = std::sync::Arc::new(
-        dyson_swarm::artefacts::ArtefactCacheService::new_sqlite(pool.clone(), cipher_dir.clone()),
-    );
-    // Anonymous artefact-share service — wires the SQLite pool, the
+    let artefact_cache = std::sync::Arc::new(dyson_swarm::artefacts::ArtefactCacheService::new(
+        db::artefact_cache_store(pool.clone()),
+        cipher_dir.clone(),
+    ));
+    // Anonymous artefact-share service — wires the share store, the
     // user-secrets handle (per-user signing keys are sealed under the
     // user's age cipher), the artefact cache used to verify mint
     // requests, and the apex hostname through one place.
-    let shares_svc = Arc::new(dyson_swarm::shares::ShareService::new_sqlite(
-        pool.clone(),
+    let shares_svc = Arc::new(dyson_swarm::shares::ShareService::new(
+        db::share_store(pool.clone()),
         user_secrets_svc.clone(),
         instance_svc.clone(),
         artefact_cache.clone(),

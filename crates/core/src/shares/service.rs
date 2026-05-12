@@ -13,19 +13,16 @@
 
 use std::sync::Arc;
 
-use sqlx::SqlitePool;
-
 use super::{
     RejectReason, ShareError, ShareMetrics, ShareTtl, build_url, decode_token, ensure_signing_key,
     jti_hex, load_signing_key, new_payload, rotate_signing_key, sign_token, verify_with_key,
 };
 use crate::artefacts::ArtefactCache;
-use crate::db::shares::{self, ShareRow, ShareSpec};
 use crate::error::{StoreError, SwarmError};
 use crate::instance::InstanceService;
 use crate::now_secs;
 use crate::secrets::{SecretsError, UserSecretsService};
-use crate::traits::InstanceRow;
+use crate::traits::{InstanceRow, ShareAccessRow, ShareRow, ShareSpec, ShareStore};
 
 /// Single application-level error type so handlers map to status
 /// codes in one place.  Internal arms are deliberately distinct from
@@ -59,7 +56,7 @@ impl From<SwarmError> for ShareServiceError {
 
 #[derive(Clone)]
 pub struct ShareService {
-    pool: SqlitePool,
+    shares: Arc<dyn ShareStore>,
     user_secrets: Arc<UserSecretsService>,
     instances: Arc<InstanceService>,
     artefact_cache: ArtefactCache,
@@ -74,8 +71,8 @@ pub struct VerifiedShare {
 }
 
 impl ShareService {
-    pub fn new_sqlite(
-        pool: SqlitePool,
+    pub fn new(
+        shares: Arc<dyn ShareStore>,
         user_secrets: Arc<UserSecretsService>,
         instances: Arc<InstanceService>,
         artefact_cache: ArtefactCache,
@@ -83,7 +80,7 @@ impl ShareService {
         apex: Option<String>,
     ) -> Self {
         Self {
-            pool,
+            shares,
             user_secrets,
             instances,
             artefact_cache,
@@ -148,9 +145,9 @@ impl ShareService {
             other => ShareServiceError::Upstream(other.to_string()),
         })?;
         let label_ref = label.as_deref();
-        let row = shares::mint(
-            &self.pool,
-            ShareSpec {
+        let row = self
+            .shares
+            .mint(ShareSpec {
                 jti: &jti,
                 instance_id,
                 chat_id,
@@ -158,9 +155,8 @@ impl ShareService {
                 created_by: caller_user_id,
                 expires_at,
                 label: label_ref,
-            },
-        )
-        .await?;
+            })
+            .await?;
         Ok(MintedShare {
             url: build_url(self.apex.as_deref(), &token),
             jti: row.jti,
@@ -184,7 +180,10 @@ impl ShareService {
                 SwarmError::NotFound => ShareServiceError::NotFound,
                 other => ShareServiceError::Upstream(other.to_string()),
             })?;
-        Ok(shares::list_for_instance(&self.pool, caller_user_id, instance_id).await?)
+        Ok(self
+            .shares
+            .list_for_instance(caller_user_id, instance_id)
+            .await?)
     }
 
     /// Idempotent revoke.  Always returns `Ok(())` to the SPA — it
@@ -193,7 +192,7 @@ impl ShareService {
     /// cross-tenant probe: a guessed jti from an admin shouldn't leak
     /// "this jti exists but isn't yours" via differential status.
     pub async fn revoke(&self, caller_user_id: &str, jti: &str) -> Result<(), ShareServiceError> {
-        let _ = shares::revoke(&self.pool, jti, caller_user_id).await?;
+        let _ = self.shares.revoke(jti, caller_user_id).await?;
         Ok(())
     }
 
@@ -208,7 +207,9 @@ impl ShareService {
         jti: &str,
         ttl: ShareTtl,
     ) -> Result<MintedShare, ShareServiceError> {
-        let row = shares::find_by_jti(&self.pool, jti)
+        let row = self
+            .shares
+            .find_by_jti(jti)
             .await?
             .ok_or(ShareServiceError::NotFound)?;
         if row.created_by != caller_user_id {
@@ -216,9 +217,9 @@ impl ShareService {
         }
         // Revoke first so a network blip mid-call leaves the user
         // with at most one valid URL outstanding (the new one) — never
-        // none, never both.  shares::mint is independent of the row
-        // we revoked, so a partial failure is recoverable: re-call.
-        let _ = shares::revoke(&self.pool, jti, caller_user_id).await?;
+        // none, never both.  Minting is independent of the row we
+        // revoked, so a partial failure is recoverable: re-call.
+        let _ = self.shares.revoke(jti, caller_user_id).await?;
         self.mint(
             caller_user_id,
             &row.instance_id,
@@ -274,7 +275,7 @@ impl ShareService {
         // missed-row / revoked-row map to BadSig (the cheapest 404
         // shape; clients can't tell which from the wire).
         let jti = jti_hex(payload.jti);
-        let row = match shares::find_by_jti(&self.pool, &jti).await {
+        let row = match self.shares.find_by_jti(&jti).await {
             Ok(Some(r)) if r.revoked_at.is_none() => r,
             Ok(_) => {
                 self.metrics.record_reject(RejectReason::BadSig);
@@ -317,8 +318,10 @@ impl ShareService {
         user_agent: Option<&str>,
         status: i32,
     ) {
-        if let Err(e) =
-            shares::record_access(&self.pool, jti, remote_addr, user_agent, status).await
+        if let Err(e) = self
+            .shares
+            .record_access(jti, remote_addr, user_agent, status)
+            .await
         {
             tracing::warn!(jti, %e, "share access audit insert failed");
         }
@@ -336,7 +339,9 @@ impl ShareService {
         caller_user_id: &str,
         jti: &str,
     ) -> Result<Option<String>, ShareServiceError> {
-        let row = shares::find_by_jti(&self.pool, jti)
+        let row = self
+            .shares
+            .find_by_jti(jti)
             .await?
             .ok_or(ShareServiceError::NotFound)?;
         if row.created_by != caller_user_id {
@@ -371,16 +376,18 @@ impl ShareService {
         caller_user_id: &str,
         jti: &str,
         limit: u32,
-    ) -> Result<Vec<crate::db::shares::ShareAccessRow>, ShareServiceError> {
+    ) -> Result<Vec<ShareAccessRow>, ShareServiceError> {
         // Ownership: the share must belong to caller before we expose
         // its access log.  Mirrors revoke()'s hidden-existence shape.
-        let row = shares::find_by_jti(&self.pool, jti)
+        let row = self
+            .shares
+            .find_by_jti(jti)
             .await?
             .ok_or(ShareServiceError::NotFound)?;
         if row.created_by != caller_user_id {
             return Err(ShareServiceError::NotFound);
         }
-        Ok(shares::list_accesses(&self.pool, jti, limit).await?)
+        Ok(self.shares.list_accesses(jti, limit).await?)
     }
 }
 

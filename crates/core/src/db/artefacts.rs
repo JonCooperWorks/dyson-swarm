@@ -7,44 +7,97 @@
 //! cube.  `update_body` stores the sealed body + size + mime once
 //! the body has been sealed.
 
+use async_trait::async_trait;
 use sqlx::{Row, SqlitePool};
 
 use crate::db::map_sqlx;
 use crate::error::StoreError;
 use crate::now_secs;
+use crate::traits::ArtefactCacheStore;
 
-/// One cached artefact row. `body_ciphertext` is sealed under the
-/// row owner before it enters the store. `None` means metadata-only:
-/// the artefact is known, but swarm does not yet have durable bytes.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CachedArtefact {
-    pub id: i64,
-    pub instance_id: String,
-    pub owner_id: String,
-    pub chat_id: String,
-    pub artefact_id: String,
-    pub kind: String,
-    pub title: String,
-    pub mime: Option<String>,
-    pub bytes: i64,
-    pub body_ciphertext: Option<Vec<u8>>,
-    pub metadata_json: Option<String>,
-    pub created_at: i64,
-    pub cached_at: i64,
+pub use crate::traits::{ArtefactUpsertSpec as UpsertSpec, CachedArtefact};
+
+#[derive(Clone)]
+pub struct SqlxArtefactStore {
+    pool: SqlitePool,
 }
 
-/// Insert (or refresh metadata of) a cached artefact row.  No body
-/// bytes are written here — the caller follows up with `update_body`.
-/// Existing body bytes are not clobbered by metadata-only refreshes.
-pub struct UpsertSpec<'a> {
-    pub instance_id: &'a str,
-    pub owner_id: &'a str,
-    pub chat_id: &'a str,
-    pub artefact_id: &'a str,
-    pub kind: &'a str,
-    pub title: &'a str,
-    pub created_at: i64,
-    pub metadata_json: Option<&'a str>,
+impl SqlxArtefactStore {
+    pub fn new(pool: SqlitePool) -> Self {
+        Self { pool }
+    }
+}
+
+#[async_trait]
+impl ArtefactCacheStore for SqlxArtefactStore {
+    async fn upsert_meta(&self, spec: UpsertSpec<'_>) -> Result<i64, StoreError> {
+        upsert_meta(&self.pool, spec).await
+    }
+
+    async fn update_body(
+        &self,
+        id: i64,
+        bytes: i64,
+        mime: Option<&str>,
+        body_ciphertext: &[u8],
+    ) -> Result<(), StoreError> {
+        update_body(&self.pool, id, bytes, mime, body_ciphertext).await
+    }
+
+    async fn find(
+        &self,
+        instance_id: &str,
+        chat_id: &str,
+        artefact_id: &str,
+    ) -> Result<Option<CachedArtefact>, StoreError> {
+        find(&self.pool, instance_id, chat_id, artefact_id).await
+    }
+
+    async fn list_for_instance(
+        &self,
+        owner_id: &str,
+        instance_id: &str,
+    ) -> Result<Vec<CachedArtefact>, StoreError> {
+        list_for_instance(&self.pool, owner_id, instance_id).await
+    }
+
+    async fn list_for_instance_page(
+        &self,
+        owner_id: &str,
+        instance_id: &str,
+        chat_id: Option<&str>,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<CachedArtefact>, StoreError> {
+        list_for_instance_page(&self.pool, owner_id, instance_id, chat_id, limit, offset).await
+    }
+
+    async fn list_for_owner(
+        &self,
+        owner_id: &str,
+        limit: u32,
+    ) -> Result<Vec<CachedArtefact>, StoreError> {
+        list_for_owner(&self.pool, owner_id, limit).await
+    }
+
+    async fn list_for_owner_page(
+        &self,
+        owner_id: &str,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<CachedArtefact>, StoreError> {
+        list_for_owner_page(&self.pool, owner_id, limit, offset).await
+    }
+
+    async fn delete(
+        &self,
+        owner_id: &str,
+        instance_id: &str,
+        chat_id: &str,
+        artefact_id: &str,
+    ) -> Result<bool, StoreError> {
+        delete(&self.pool, owner_id, instance_id, chat_id, artefact_id).await
+    }
 }
 
 /// UPSERT the metadata. Returns the row id. We never overwrite

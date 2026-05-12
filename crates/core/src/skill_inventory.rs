@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::db::state_files::StateFileRow;
 use crate::state_files::{StateFileError, StateFileService};
+use crate::traits::StateFileRow;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct SkillInventoryEntry {
@@ -252,7 +252,10 @@ mod tests {
         let keys = tempfile::tempdir().unwrap();
         let ciphers: Arc<dyn crate::envelope::CipherDirectory> =
             Arc::new(crate::envelope::AgeCipherDirectory::new(keys.path()).unwrap());
-        (StateFileService::new_sqlite(pool, ciphers), keys)
+        (
+            StateFileService::new(crate::db::state_file_store(pool), ciphers),
+            keys,
+        )
     }
 
     #[tokio::test]

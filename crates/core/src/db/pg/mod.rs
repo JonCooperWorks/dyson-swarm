@@ -10,7 +10,8 @@
 //!
 //! 1. Implement `PgInstanceStore`, `PgUserSecretStore`,
 //!    `PgSystemSecretStore`, `PgTokenStore`, `PgUserStore`,
-//!    `PgSnapshotStore`, `PgPolicyStore`, `PgAuditStore`
+//!    `PgSnapshotStore`, `PgPolicyStore`, `PgAuditStore`,
+//!    `PgArtefactStore`, `PgStateFileStore`, and `PgShareStore`
 //!    — one per existing trait, mirroring the sqlite/*.rs files.
 //! 2. Add a `db::open_pg(url)` that builds a `PgPool` and runs
 //!    `migrations/postgres/`.

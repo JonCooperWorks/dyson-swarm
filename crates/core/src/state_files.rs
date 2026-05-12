@@ -10,12 +10,10 @@
 use std::path::{Component, Path};
 use std::sync::Arc;
 
-use sqlx::SqlitePool;
-
-use crate::db::state_files::{self as store, StateFileRow};
 use crate::envelope::CipherDirectory;
 use crate::error::StoreError;
 use crate::now_secs;
+use crate::traits::{StateFileRow, StateFileStore, StateFileUpsertSpec};
 use crate::webhooks::AGE_ARMOR_PREFIX;
 
 #[derive(Debug, thiserror::Error)]
@@ -36,7 +34,7 @@ impl From<std::io::Error> for StateFileError {
 
 #[derive(Clone)]
 pub struct StateFileService {
-    pool: SqlitePool,
+    store: Arc<dyn StateFileStore>,
     ciphers: Arc<dyn CipherDirectory>,
 }
 
@@ -51,8 +49,8 @@ pub struct StateFileMeta<'a> {
 }
 
 impl StateFileService {
-    pub fn new_sqlite(pool: SqlitePool, ciphers: Arc<dyn CipherDirectory>) -> Self {
-        Self { pool, ciphers }
+    pub fn new(store: Arc<dyn StateFileStore>, ciphers: Arc<dyn CipherDirectory>) -> Self {
+        Self { store, ciphers }
     }
 
     pub async fn ingest(
@@ -77,9 +75,9 @@ impl StateFileService {
             return Err(StateFileError::Io("sealed body missing age armor".into()));
         }
         let bytes = i64::try_from(body.len()).unwrap_or(i64::MAX);
-        Ok(store::upsert(
-            &self.pool,
-            store::UpsertSpec {
+        Ok(self
+            .store
+            .upsert(StateFileUpsertSpec {
                 instance_id: meta.instance_id,
                 owner_id: meta.owner_id,
                 namespace: meta.namespace,
@@ -89,9 +87,8 @@ impl StateFileService {
                 body_ciphertext: &sealed_body,
                 updated_at: meta.updated_at,
                 synced_at: now_secs(),
-            },
-        )
-        .await?)
+            })
+            .await?)
     }
 
     async fn preserve_existing_chat_row(
@@ -103,8 +100,10 @@ impl StateFileService {
             return Ok(None);
         }
         let incoming_bytes = i64::try_from(body.len()).unwrap_or(i64::MAX);
-        let Some(existing) =
-            store::find(&self.pool, meta.instance_id, meta.namespace, meta.path).await?
+        let Some(existing) = self
+            .store
+            .find(meta.instance_id, meta.namespace, meta.path)
+            .await?
         else {
             return Ok(None);
         };
@@ -128,16 +127,17 @@ impl StateFileService {
     pub async fn tombstone(&self, meta: StateFileMeta<'_>) -> Result<StateFileRow, StateFileError> {
         validate_instance_id(meta.instance_id)?;
         validate_state_file_path(meta.namespace, meta.path)?;
-        Ok(store::tombstone(
-            &self.pool,
-            meta.instance_id,
-            meta.owner_id,
-            meta.namespace,
-            meta.path,
-            meta.updated_at,
-            now_secs(),
-        )
-        .await?)
+        Ok(self
+            .store
+            .tombstone(
+                meta.instance_id,
+                meta.owner_id,
+                meta.namespace,
+                meta.path,
+                meta.updated_at,
+                now_secs(),
+            )
+            .await?)
     }
 
     pub async fn find(
@@ -146,14 +146,14 @@ impl StateFileService {
         namespace: &str,
         path: &str,
     ) -> Result<Option<StateFileRow>, StateFileError> {
-        Ok(store::find(&self.pool, instance_id, namespace, path).await?)
+        Ok(self.store.find(instance_id, namespace, path).await?)
     }
 
     pub async fn list_for_instance(
         &self,
         instance_id: &str,
     ) -> Result<Vec<StateFileRow>, StateFileError> {
-        Ok(store::list_for_instance(&self.pool, instance_id).await?)
+        Ok(self.store.list_for_instance(instance_id).await?)
     }
 
     pub fn read_body(&self, row: &StateFileRow) -> Result<Option<Vec<u8>>, StateFileError> {
@@ -374,7 +374,10 @@ mod tests {
         let keys = tempfile::tempdir().unwrap();
         let ciphers: Arc<dyn CipherDirectory> =
             Arc::new(crate::envelope::AgeCipherDirectory::new(keys.path()).unwrap());
-        (StateFileService::new_sqlite(pool, ciphers), keys)
+        (
+            StateFileService::new(crate::db::state_file_store(pool), ciphers),
+            keys,
+        )
     }
 
     fn meta<'a>(path: &'a str) -> StateFileMeta<'a> {

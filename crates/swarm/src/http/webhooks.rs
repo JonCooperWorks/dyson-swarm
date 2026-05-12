@@ -462,8 +462,8 @@ async fn list_instance_deliveries(
         .filter(|s| !s.is_empty());
     let q_raw = qs.get("q").map(String::as_str).filter(|s| !s.is_empty());
     // Hard cap on the search needle — past a few hundred chars it's
-    // almost certainly a paste of a payload, and SQLite's LIKE on a
-    // BLOB cast happily eats CPU on long needles.
+    // almost certainly a paste of a payload, and store-side substring
+    // scans can burn CPU on long needles.
     if q_raw.is_some_and(|q| q.len() > 256) {
         return Err(StatusCode::BAD_REQUEST);
     }

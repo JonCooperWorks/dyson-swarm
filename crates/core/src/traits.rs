@@ -749,6 +749,191 @@ pub trait DeliveryStore: Send + Sync {
     ) -> Result<Option<DeliveryRow>, StoreError>;
 }
 
+/// One cached artefact row. `body_ciphertext` is sealed under the
+/// row owner before it enters the store. `None` means metadata-only:
+/// the artefact is known, but swarm does not yet have durable bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CachedArtefact {
+    pub id: i64,
+    pub instance_id: String,
+    pub owner_id: String,
+    pub chat_id: String,
+    pub artefact_id: String,
+    pub kind: String,
+    pub title: String,
+    pub mime: Option<String>,
+    pub bytes: i64,
+    pub body_ciphertext: Option<Vec<u8>>,
+    pub metadata_json: Option<String>,
+    pub created_at: i64,
+    pub cached_at: i64,
+}
+
+pub struct ArtefactUpsertSpec<'a> {
+    pub instance_id: &'a str,
+    pub owner_id: &'a str,
+    pub chat_id: &'a str,
+    pub artefact_id: &'a str,
+    pub kind: &'a str,
+    pub title: &'a str,
+    pub created_at: i64,
+    pub metadata_json: Option<&'a str>,
+}
+
+#[async_trait]
+pub trait ArtefactCacheStore: Send + Sync {
+    async fn upsert_meta(&self, spec: ArtefactUpsertSpec<'_>) -> Result<i64, StoreError>;
+    async fn update_body(
+        &self,
+        id: i64,
+        bytes: i64,
+        mime: Option<&str>,
+        body_ciphertext: &[u8],
+    ) -> Result<(), StoreError>;
+    async fn find(
+        &self,
+        instance_id: &str,
+        chat_id: &str,
+        artefact_id: &str,
+    ) -> Result<Option<CachedArtefact>, StoreError>;
+    async fn list_for_instance(
+        &self,
+        owner_id: &str,
+        instance_id: &str,
+    ) -> Result<Vec<CachedArtefact>, StoreError>;
+    async fn list_for_instance_page(
+        &self,
+        owner_id: &str,
+        instance_id: &str,
+        chat_id: Option<&str>,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<CachedArtefact>, StoreError>;
+    async fn list_for_owner(
+        &self,
+        owner_id: &str,
+        limit: u32,
+    ) -> Result<Vec<CachedArtefact>, StoreError>;
+    async fn list_for_owner_page(
+        &self,
+        owner_id: &str,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<CachedArtefact>, StoreError>;
+    async fn delete(
+        &self,
+        owner_id: &str,
+        instance_id: &str,
+        chat_id: &str,
+        artefact_id: &str,
+    ) -> Result<bool, StoreError>;
+}
+
+#[derive(Debug, Clone)]
+pub struct StateFileRow {
+    pub id: i64,
+    pub instance_id: String,
+    pub owner_id: String,
+    pub namespace: String,
+    pub path: String,
+    pub mime: Option<String>,
+    pub bytes: i64,
+    pub body_ciphertext: Option<Vec<u8>>,
+    pub updated_at: i64,
+    pub synced_at: i64,
+    pub deleted_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct StateFileUpsertSpec<'a> {
+    pub instance_id: &'a str,
+    pub owner_id: &'a str,
+    pub namespace: &'a str,
+    pub path: &'a str,
+    pub mime: Option<&'a str>,
+    pub bytes: i64,
+    pub body_ciphertext: &'a [u8],
+    pub updated_at: i64,
+    pub synced_at: i64,
+}
+
+#[async_trait]
+pub trait StateFileStore: Send + Sync {
+    async fn upsert(&self, spec: StateFileUpsertSpec<'_>) -> Result<StateFileRow, StoreError>;
+    async fn tombstone(
+        &self,
+        instance_id: &str,
+        owner_id: &str,
+        namespace: &str,
+        path: &str,
+        updated_at: i64,
+        synced_at: i64,
+    ) -> Result<StateFileRow, StoreError>;
+    async fn find(
+        &self,
+        instance_id: &str,
+        namespace: &str,
+        path: &str,
+    ) -> Result<Option<StateFileRow>, StoreError>;
+    async fn list_for_instance(&self, instance_id: &str) -> Result<Vec<StateFileRow>, StoreError>;
+}
+
+#[derive(Debug, Clone)]
+pub struct ShareRow {
+    pub jti: String,
+    pub instance_id: String,
+    pub chat_id: String,
+    pub artefact_id: String,
+    pub artefact_title: Option<String>,
+    pub created_by: String,
+    pub created_at: i64,
+    pub expires_at: i64,
+    pub revoked_at: Option<i64>,
+    pub label: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ShareSpec<'a> {
+    pub jti: &'a str,
+    pub instance_id: &'a str,
+    pub chat_id: &'a str,
+    pub artefact_id: &'a str,
+    pub created_by: &'a str,
+    pub expires_at: i64,
+    pub label: Option<&'a str>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ShareAccessRow {
+    pub id: i64,
+    pub jti: String,
+    pub accessed_at: i64,
+    pub remote_addr: Option<String>,
+    pub user_agent: Option<String>,
+    pub status: i32,
+}
+
+#[async_trait]
+pub trait ShareStore: Send + Sync {
+    async fn mint(&self, spec: ShareSpec<'_>) -> Result<ShareRow, StoreError>;
+    async fn find_by_jti(&self, jti: &str) -> Result<Option<ShareRow>, StoreError>;
+    async fn list_for_instance(
+        &self,
+        user_id: &str,
+        instance_id: &str,
+    ) -> Result<Vec<ShareRow>, StoreError>;
+    async fn revoke(&self, jti: &str, user_id: &str) -> Result<bool, StoreError>;
+    async fn record_access(
+        &self,
+        jti: &str,
+        remote_addr: Option<&str>,
+        user_agent: Option<&str>,
+        status: i32,
+    ) -> Result<(), StoreError>;
+    async fn list_accesses(&self, jti: &str, limit: u32)
+    -> Result<Vec<ShareAccessRow>, StoreError>;
+}
+
 #[async_trait]
 pub trait AuditStore: Send + Sync {
     /// Insert an audit row.  Returns the auto-assigned row id so the

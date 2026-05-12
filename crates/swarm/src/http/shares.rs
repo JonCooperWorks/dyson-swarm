@@ -14,10 +14,10 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
 use crate::auth::CallerIdentity;
-use crate::db::shares::{ShareAccessRow, ShareRow};
 use crate::http::AppState;
 use crate::shares::ShareTtl;
 use crate::shares::service::{MintedShare, ShareServiceError};
+use crate::traits::{ShareAccessRow, ShareRow};
 
 pub fn router(state: AppState) -> Router {
     Router::new()

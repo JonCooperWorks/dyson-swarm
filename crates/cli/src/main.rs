@@ -325,8 +325,7 @@ async fn build_ops_services(cfg: &config::Config) -> Result<OpsServices, String>
     let instances: Arc<dyn InstanceStore> =
         Arc::new(SqlxInstanceStore::new(pool.clone(), system_cipher.clone()));
     let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(pool.clone(), system_cipher));
-    let snapshots_store: Arc<dyn SnapshotStore> =
-        Arc::new(db::snapshots::SqliteSnapshotStore::new(pool.clone()));
+    let snapshots_store: Arc<dyn SnapshotStore> = db::snapshot_store(pool.clone());
 
     let system_secrets_store: Arc<dyn dyson_swarm_core::traits::SystemSecretStore> = Arc::new(
         dyson_swarm_core::db::secrets::SqlxSystemSecretStore::new(pool.clone()),
@@ -342,8 +341,8 @@ async fn build_ops_services(cfg: &config::Config) -> Result<OpsServices, String>
         user_secrets_store,
         cipher_dir.clone(),
     ));
-    let state_files = Arc::new(dyson_swarm_core::state_files::StateFileService::new_sqlite(
-        pool.clone(),
+    let state_files = Arc::new(dyson_swarm_core::state_files::StateFileService::new(
+        dyson_swarm_core::db::state_file_store(pool.clone()),
         cipher_dir,
     ));
 

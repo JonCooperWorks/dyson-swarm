@@ -6,35 +6,66 @@
 //! tokens.  Bytes are never stored; the artefact body comes from the
 //! per-instance dyson agent on demand.
 
+use async_trait::async_trait;
 use sqlx::{Row, SqlitePool};
 
 use crate::db::map_sqlx;
 use crate::error::StoreError;
 use crate::now_secs;
+use crate::traits::ShareStore;
 
-#[derive(Debug, Clone)]
-pub struct ShareRow {
-    pub jti: String,
-    pub instance_id: String,
-    pub chat_id: String,
-    pub artefact_id: String,
-    pub artefact_title: Option<String>,
-    pub created_by: String,
-    pub created_at: i64,
-    pub expires_at: i64,
-    pub revoked_at: Option<i64>,
-    pub label: Option<String>,
+pub use crate::traits::{ShareAccessRow, ShareRow, ShareSpec};
+
+#[derive(Clone)]
+pub struct SqlxShareStore {
+    pool: SqlitePool,
 }
 
-#[derive(Debug, Clone)]
-pub struct ShareSpec<'a> {
-    pub jti: &'a str,
-    pub instance_id: &'a str,
-    pub chat_id: &'a str,
-    pub artefact_id: &'a str,
-    pub created_by: &'a str,
-    pub expires_at: i64,
-    pub label: Option<&'a str>,
+impl SqlxShareStore {
+    pub fn new(pool: SqlitePool) -> Self {
+        Self { pool }
+    }
+}
+
+#[async_trait]
+impl ShareStore for SqlxShareStore {
+    async fn mint(&self, spec: ShareSpec<'_>) -> Result<ShareRow, StoreError> {
+        mint(&self.pool, spec).await
+    }
+
+    async fn find_by_jti(&self, jti: &str) -> Result<Option<ShareRow>, StoreError> {
+        find_by_jti(&self.pool, jti).await
+    }
+
+    async fn list_for_instance(
+        &self,
+        user_id: &str,
+        instance_id: &str,
+    ) -> Result<Vec<ShareRow>, StoreError> {
+        list_for_instance(&self.pool, user_id, instance_id).await
+    }
+
+    async fn revoke(&self, jti: &str, user_id: &str) -> Result<bool, StoreError> {
+        revoke(&self.pool, jti, user_id).await
+    }
+
+    async fn record_access(
+        &self,
+        jti: &str,
+        remote_addr: Option<&str>,
+        user_agent: Option<&str>,
+        status: i32,
+    ) -> Result<(), StoreError> {
+        record_access(&self.pool, jti, remote_addr, user_agent, status).await
+    }
+
+    async fn list_accesses(
+        &self,
+        jti: &str,
+        limit: u32,
+    ) -> Result<Vec<ShareAccessRow>, StoreError> {
+        list_accesses(&self.pool, jti, limit).await
+    }
 }
 
 /// Insert a freshly-minted share row.
@@ -209,16 +240,6 @@ pub async fn list_accesses(
             })
         })
         .collect()
-}
-
-#[derive(Debug, Clone)]
-pub struct ShareAccessRow {
-    pub id: i64,
-    pub jti: String,
-    pub accessed_at: i64,
-    pub remote_addr: Option<String>,
-    pub user_agent: Option<String>,
-    pub status: i32,
 }
 
 fn row_to_share(r: sqlx::sqlite::SqliteRow) -> Result<ShareRow, StoreError> {

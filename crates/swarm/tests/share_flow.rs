@@ -175,9 +175,7 @@ async fn build() -> Fixture {
         cipher_dir.clone(),
     ));
     let backup: Arc<dyn BackupSink> = Arc::new(LocalDiskBackupSink::new(cube.clone()));
-    let snapshots_store: Arc<dyn SnapshotStore> = Arc::new(
-        dyson_swarm::db::snapshots::SqliteSnapshotStore::new(pool.clone()),
-    );
+    let snapshots_store: Arc<dyn SnapshotStore> = dyson_swarm::db::snapshot_store(pool.clone());
     let users_store: Arc<dyn UserStore> = Arc::new(dyson_swarm::db::users::SqlxUserStore::new(
         pool.clone(),
         cipher_dir.clone(),
@@ -243,8 +241,8 @@ async fn build() -> Fixture {
         cipher_dir.clone(),
     ));
     let apex = "swarm.test".to_string();
-    let artefact_cache = Arc::new(dyson_swarm::artefacts::ArtefactCacheService::new_sqlite(
-        pool.clone(),
+    let artefact_cache = Arc::new(dyson_swarm::artefacts::ArtefactCacheService::new(
+        dyson_swarm::db::artefact_cache_store(pool.clone()),
         cipher_dir.clone(),
     ));
     artefact_cache
@@ -264,16 +262,16 @@ async fn build() -> Fixture {
         )
         .await
         .unwrap();
-    let shares_svc = Arc::new(dyson_swarm::shares::ShareService::new_sqlite(
-        pool.clone(),
+    let shares_svc = Arc::new(dyson_swarm::shares::ShareService::new(
+        dyson_swarm::db::share_store(pool.clone()),
         user_secrets_svc.clone(),
         instance_svc.clone(),
         artefact_cache.clone(),
         dyson_swarm::shares::ShareMetrics::new(),
         Some(apex.clone()),
     ));
-    let state_files = Arc::new(dyson_swarm::state_files::StateFileService::new_sqlite(
-        pool.clone(),
+    let state_files = Arc::new(dyson_swarm::state_files::StateFileService::new(
+        dyson_swarm::db::state_file_store(pool.clone()),
         cipher_dir.clone(),
     ));
 
@@ -286,12 +284,8 @@ async fn build() -> Fixture {
         prober: Arc::new(StubProber),
         tokens: tokens_store.clone(),
         users: users_store,
-        sessions: Arc::new(dyson_swarm::db::sessions::SqliteSessionStore::new(
-            pool.clone(),
-        )),
-        admin_audit: Arc::new(dyson_swarm::db::audit::SqliteAdminAuditStore::new(
-            pool.clone(),
-        )),
+        sessions: dyson_swarm::db::session_store(pool.clone()),
+        admin_audit: dyson_swarm::db::admin_audit_store(pool.clone()),
         sandbox_domain: "127.0.0.1".to_string(),
         hostname: Some(apex.clone()),
         auth_config: Arc::new(http::auth_config::AuthConfig::none()),

@@ -444,7 +444,7 @@ mod tests {
         ));
         let backup: Arc<dyn BackupSink> = Arc::new(LocalDiskBackupSink::new(cube.clone()));
         let snapshots_store: Arc<dyn crate::traits::SnapshotStore> =
-            Arc::new(crate::db::snapshots::SqliteSnapshotStore::new(pool.clone()));
+            crate::db::snapshot_store(pool.clone());
         let snapshot_svc = Arc::new(SnapshotService::new(
             cube,
             instances_store,
@@ -475,20 +475,20 @@ mod tests {
             Arc::new(crate::webhooks::NullWebhookDispatcher),
             cipher_dir.clone(),
         ));
-        let artefact_cache = Arc::new(crate::artefacts::ArtefactCacheService::new_sqlite(
-            pool.clone(),
+        let artefact_cache = Arc::new(crate::artefacts::ArtefactCacheService::new(
+            crate::db::artefact_cache_store(pool.clone()),
             cipher_dir.clone(),
         ));
-        let shares_svc = Arc::new(crate::shares::ShareService::new_sqlite(
-            pool.clone(),
+        let shares_svc = Arc::new(crate::shares::ShareService::new(
+            crate::db::share_store(pool.clone()),
             user_secrets.clone(),
             instance_svc.clone(),
             artefact_cache.clone(),
             crate::shares::ShareMetrics::new(),
             None,
         ));
-        let state_files = Arc::new(crate::state_files::StateFileService::new_sqlite(
-            pool.clone(),
+        let state_files = Arc::new(crate::state_files::StateFileService::new(
+            crate::db::state_file_store(pool.clone()),
             cipher_dir.clone(),
         ));
         let state = AppState {
@@ -500,8 +500,8 @@ mod tests {
             prober: Arc::new(StubProber),
             tokens: tokens_store,
             users: users_store,
-            sessions: Arc::new(crate::db::sessions::SqliteSessionStore::new(pool.clone())),
-            admin_audit: Arc::new(crate::db::audit::SqliteAdminAuditStore::new(pool.clone())),
+            sessions: crate::db::session_store(pool.clone()),
+            admin_audit: crate::db::admin_audit_store(pool.clone()),
             sandbox_domain: "cube.test".into(),
             hostname: None,
             auth_config: Arc::new(crate::http::auth_config::AuthConfig::none()),

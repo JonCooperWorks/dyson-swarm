@@ -99,7 +99,7 @@ pub struct ArtefactView {
 }
 
 impl ArtefactView {
-    fn from_row(r: crate::db::artefacts::CachedArtefact) -> Self {
+    fn from_row(r: crate::traits::CachedArtefact) -> Self {
         Self {
             id: r.artefact_id,
             instance_id: r.instance_id,

@@ -15,11 +15,9 @@
 
 use std::sync::Arc;
 
-use sqlx::SqlitePool;
-
-use crate::db::artefacts::{self as store, CachedArtefact};
 use crate::envelope::CipherDirectory;
 use crate::error::StoreError;
+use crate::traits::{ArtefactCacheStore, ArtefactUpsertSpec, CachedArtefact};
 use crate::webhooks::AGE_ARMOR_PREFIX;
 
 /// Errors surfaced by the artefact service. Distinguished from
@@ -41,15 +39,15 @@ impl From<std::io::Error> for CacheError {
     }
 }
 
-/// Service handle. Cheap to clone — `pool` is an `Arc` inside and
-/// `ciphers` is an `Arc` to a directory.
+/// Service handle. Cheap to clone — the backing store and cipher
+/// directory are both held behind `Arc`s.
 ///
 /// Bodies are sealed under the row's `owner_id` cipher before they hit
 /// the store, so DB snapshots without the per-user age keys do not
 /// expose historical artefact contents.
 #[derive(Clone)]
 pub struct ArtefactCacheService {
-    pool: SqlitePool,
+    store: Arc<dyn ArtefactCacheStore>,
     ciphers: Arc<dyn CipherDirectory>,
 }
 
@@ -71,10 +69,10 @@ pub struct IngestMeta<'a> {
 }
 
 impl ArtefactCacheService {
-    /// Wire the service to a SQLite pool and the per-user cipher
-    /// directory used to seal bodies at rest.
-    pub fn new_sqlite(pool: SqlitePool, ciphers: Arc<dyn CipherDirectory>) -> Self {
-        Self { pool, ciphers }
+    /// Wire the service to a durable artefact store and the per-user
+    /// cipher directory used to seal bodies at rest.
+    pub fn new(store: Arc<dyn ArtefactCacheStore>, ciphers: Arc<dyn CipherDirectory>) -> Self {
+        Self { store, ciphers }
     }
 
     /// Fetch a cached row by identity tuple.  Misses return
@@ -85,7 +83,7 @@ impl ArtefactCacheService {
         chat_id: &str,
         artefact_id: &str,
     ) -> Result<Option<CachedArtefact>, CacheError> {
-        Ok(store::find(&self.pool, instance_id, chat_id, artefact_id).await?)
+        Ok(self.store.find(instance_id, chat_id, artefact_id).await?)
     }
 
     /// Read the body bytes from the swarm store. Returns `Ok(None)` if
@@ -138,12 +136,12 @@ impl ArtefactCacheService {
         owner_id: &str,
         instance_id: &str,
     ) -> Result<Vec<CachedArtefact>, CacheError> {
-        Ok(store::list_for_instance(&self.pool, owner_id, instance_id).await?)
+        Ok(self.store.list_for_instance(owner_id, instance_id).await?)
     }
 
     /// Owner-scoped instance page.  `limit` and `offset` are applied
-    /// in SQLite so the SPA can walk large caches without pulling the
-    /// entire instance history into memory.
+    /// in the store so the SPA can walk large caches without pulling
+    /// the entire instance history into memory.
     pub async fn list_for_instance_page(
         &self,
         owner_id: &str,
@@ -152,17 +150,10 @@ impl ArtefactCacheService {
         limit: u32,
         offset: u32,
     ) -> Result<Vec<CachedArtefact>, CacheError> {
-        Ok(
-            store::list_for_instance_page(
-                &self.pool,
-                owner_id,
-                instance_id,
-                chat_id,
-                limit,
-                offset,
-            )
-            .await?,
-        )
+        Ok(self
+            .store
+            .list_for_instance_page(owner_id, instance_id, chat_id, limit, offset)
+            .await?)
     }
 
     /// Owner-scoped global listing.
@@ -171,7 +162,7 @@ impl ArtefactCacheService {
         owner_id: &str,
         limit: u32,
     ) -> Result<Vec<CachedArtefact>, CacheError> {
-        Ok(store::list_for_owner(&self.pool, owner_id, limit).await?)
+        Ok(self.store.list_for_owner(owner_id, limit).await?)
     }
 
     /// Owner-scoped global page.
@@ -181,7 +172,10 @@ impl ArtefactCacheService {
         limit: u32,
         offset: u32,
     ) -> Result<Vec<CachedArtefact>, CacheError> {
-        Ok(store::list_for_owner_page(&self.pool, owner_id, limit, offset).await?)
+        Ok(self
+            .store
+            .list_for_owner_page(owner_id, limit, offset)
+            .await?)
     }
 
     /// Delete a cached row + its stored body. Owner-scoped: returns
@@ -194,7 +188,10 @@ impl ArtefactCacheService {
         chat_id: &str,
         artefact_id: &str,
     ) -> Result<bool, CacheError> {
-        Ok(store::delete(&self.pool, owner_id, instance_id, chat_id, artefact_id).await?)
+        Ok(self
+            .store
+            .delete(owner_id, instance_id, chat_id, artefact_id)
+            .await?)
     }
 
     /// Upsert the metadata row and, when `body` is `Some`, seal and
@@ -206,9 +203,9 @@ impl ArtefactCacheService {
         body: Option<&[u8]>,
     ) -> Result<CachedArtefact, CacheError> {
         validate_tuple(meta.instance_id, meta.chat_id, meta.artefact_id)?;
-        let id = store::upsert_meta(
-            &self.pool,
-            store::UpsertSpec {
+        let id = self
+            .store
+            .upsert_meta(ArtefactUpsertSpec {
                 instance_id: meta.instance_id,
                 owner_id: meta.owner_id,
                 chat_id: meta.chat_id,
@@ -217,9 +214,8 @@ impl ArtefactCacheService {
                 title: meta.title,
                 created_at: meta.created_at,
                 metadata_json: meta.metadata_json,
-            },
-        )
-        .await?;
+            })
+            .await?;
 
         if let Some(bytes) = body {
             // Seal under the owner's age cipher before store write.
@@ -239,9 +235,13 @@ impl ArtefactCacheService {
                     .seal(bytes)
                     .map_err(|e| CacheError::Io(format!("seal: {e}")))?
             };
-            store::update_body(&self.pool, id, plain_len, meta.mime, &stored_body).await?;
+            self.store
+                .update_body(id, plain_len, meta.mime, &stored_body)
+                .await?;
         }
-        let row = store::find(&self.pool, meta.instance_id, meta.chat_id, meta.artefact_id)
+        let row = self
+            .store
+            .find(meta.instance_id, meta.chat_id, meta.artefact_id)
             .await?
             .ok_or_else(|| CacheError::Io("ingested row vanished".into()))?;
         Ok(row)
@@ -289,7 +289,7 @@ mod tests {
         let keys = tempfile::tempdir().unwrap();
         let ciphers: Arc<dyn CipherDirectory> =
             Arc::new(crate::envelope::AgeCipherDirectory::new(keys.path()).unwrap());
-        let svc = ArtefactCacheService::new_sqlite(pool, ciphers);
+        let svc = ArtefactCacheService::new(crate::db::artefact_cache_store(pool), ciphers);
         (svc, keys)
     }
 

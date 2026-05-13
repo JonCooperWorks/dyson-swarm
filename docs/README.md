@@ -23,6 +23,7 @@ stores encrypted state, brokers LLM and MCP traffic, and serves the web UI.
 | [MCP and OAuth](mcp-and-oauth.md) | MCP server storage, proxying, OAuth start/callback, path-scoped discovery, operator expectations |
 | [Network Policies](network-policies.md) | `nolocalnet`, `open`, `airgap`, `allowlist`, `denylist`, egress proxy behaviour |
 | [Storage and Secrets](storage-and-secrets.md) | SQLite tables, artefact cache, state-file mirror, age envelope encryption, secret scopes |
+| [Multiple Databases](multiple-databases.md) | SQLite/Postgres backend selection, parity checks, explicit transfer command, switch runbook |
 | [State Ownership](state-ownership.md) | Matrix of durable swarm-owned state vs disposable sandbox cache |
 | [HTTP and SPA](http-and-spa.md) | Route layout, host-based dispatch, embedded React app, per-surface auth |
 | [Operations](operations.md) | Startup sweeps, binary rotation, health probes, TTL reaper, deploy posture, operator commands |

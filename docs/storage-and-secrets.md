@@ -4,6 +4,8 @@ Swarm keeps long-lived state outside the sandbox so sandboxes can be rotated
 and rebuilt safely.
 
 For the full source-of-truth matrix, see [State Ownership](state-ownership.md).
+For backend selection and SQLite/Postgres transfer, see
+[Multiple Databases](multiple-databases.md).
 
 ## Main Persistence Layers
 

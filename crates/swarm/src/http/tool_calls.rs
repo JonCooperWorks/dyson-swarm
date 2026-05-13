@@ -1,6 +1,6 @@
 //! Per-instance LLM tool-call audit routes.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::convert::Infallible;
 
 use axum::body::{Body, Bytes};
@@ -17,6 +17,7 @@ use crate::traits::{LlmToolCallFilters, LlmToolCallRow, LlmToolCallStatusFilter}
 
 const DEFAULT_LIMIT: u32 = 100;
 const MAX_LIMIT: u32 = 500;
+const SEARCH_SCAN_LIMIT: usize = 10_000;
 const STREAM_BOOTSTRAP_LIMIT: u32 = 50;
 const STREAM_POLL_LIMIT: usize = 500;
 
@@ -26,6 +27,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/instances/:id/audit/tool-calls/export",
             get(export_tool_calls),
+        )
+        .route(
+            "/v1/instances/:id/audit/tool-calls/facets",
+            get(tool_call_facets),
         )
         .route(
             "/v1/instances/:id/audit/tool-calls/stream",
@@ -58,6 +63,12 @@ pub struct ToolCallListResponse {
     pub next_cursor: Option<i64>,
 }
 
+#[derive(Debug, Serialize)]
+pub struct ToolCallFacetResponse {
+    pub tools: Vec<String>,
+    pub servers: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 struct Query {
     tool: Option<String>,
@@ -86,6 +97,11 @@ async fn list_tool_calls(
 ) -> Result<Json<ToolCallListResponse>, StatusCode> {
     ensure_instance_owner(&state, &caller.user_id, &instance_id).await?;
     let query = parse_query(uri.query().unwrap_or(""))?;
+    if query_has_text(&query) {
+        let (items, next_cursor) =
+            search_tool_calls(&state, &caller.user_id, &instance_id, &query).await?;
+        return Ok(Json(ToolCallListResponse { items, next_cursor }));
+    }
     let rows = state
         .llm_tool_calls
         .list(
@@ -93,7 +109,7 @@ async fn list_tool_calls(
             &instance_id,
             query.filters(),
             query.before,
-            fetch_limit_for_query(&query),
+            query.limit,
         )
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -103,6 +119,82 @@ async fn list_tool_calls(
     }
     let next_cursor = items.last().map(|r| r.id);
     Ok(Json(ToolCallListResponse { items, next_cursor }))
+}
+
+async fn search_tool_calls(
+    state: &AppState,
+    owner_id: &str,
+    instance_id: &str,
+    query: &Query,
+) -> Result<(Vec<ToolCallView>, Option<i64>), StatusCode> {
+    let mut before = query.before;
+    let mut scanned = 0usize;
+    let mut items = Vec::new();
+    loop {
+        let rows = state
+            .llm_tool_calls
+            .list(owner_id, instance_id, query.filters(), before, MAX_LIMIT)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        if rows.is_empty() {
+            break;
+        }
+        before = rows.last().map(|r| r.id);
+        scanned += rows.len();
+        let views = rows_to_views(state, owner_id, rows, query.q.as_deref())?;
+        items.extend(views);
+        if items.len() >= query.limit as usize || scanned >= SEARCH_SCAN_LIMIT {
+            break;
+        }
+    }
+    if items.len() > query.limit as usize {
+        items.truncate(query.limit as usize);
+    }
+    let next_cursor = items.last().map(|r| r.id);
+    Ok((items, next_cursor))
+}
+
+async fn tool_call_facets(
+    State(state): State<AppState>,
+    Extension(caller): Extension<CallerIdentity>,
+    Path(instance_id): Path<String>,
+) -> Result<Json<ToolCallFacetResponse>, StatusCode> {
+    ensure_instance_owner(&state, &caller.user_id, &instance_id).await?;
+    let mut before = None;
+    let mut scanned = 0usize;
+    let mut tools = BTreeSet::new();
+    let mut servers = BTreeSet::new();
+    loop {
+        let rows = state
+            .llm_tool_calls
+            .list(
+                &caller.user_id,
+                &instance_id,
+                LlmToolCallFilters::default(),
+                before,
+                MAX_LIMIT,
+            )
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        if rows.is_empty() {
+            break;
+        }
+        before = rows.last().map(|r| r.id);
+        scanned += rows.len();
+        for row in rows {
+            tools.insert(row.tool_name);
+            if let Some(server) = row.mcp_server {
+                servers.insert(server);
+            }
+        }
+        if scanned >= SEARCH_SCAN_LIMIT {
+            break;
+        }
+    }
+    Ok(Json(ToolCallFacetResponse {
+        tools: tools.into_iter().collect(),
+        servers: servers.into_iter().collect(),
+    }))
 }
 
 async fn export_tool_calls(
@@ -391,12 +483,8 @@ fn payload_contains(v: Option<&serde_json::Value>, needle: &str) -> bool {
         .is_some_and(|s| s.to_ascii_lowercase().contains(needle))
 }
 
-fn fetch_limit_for_query(query: &Query) -> u32 {
-    if query.q.as_deref().is_some_and(|q| !q.trim().is_empty()) {
-        query.limit.saturating_mul(5).clamp(1, MAX_LIMIT)
-    } else {
-        query.limit
-    }
+fn query_has_text(query: &Query) -> bool {
+    query.q.as_deref().is_some_and(|q| !q.trim().is_empty())
 }
 
 fn parse_query(qs: &str) -> Result<Query, StatusCode> {

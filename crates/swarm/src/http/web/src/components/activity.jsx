@@ -1,6 +1,6 @@
 import React from 'react';
 import { useApi } from '../hooks/useApi.jsx';
-import { exportToolCallsNdjson, listToolCalls, streamToolCalls } from '../api/audit.js';
+import { exportToolCallsNdjson, listToolCallFacets, listToolCalls, streamToolCalls } from '../api/audit.js';
 import { fmtTime } from '../utils/format.js';
 
 const PAGE_LIMIT = 100;
@@ -10,17 +10,23 @@ const RESULT_REFRESH_MS = 1500;
 export function ActivityPage({ instanceId, embedded = false }) {
   const { client } = useApi();
   const [rows, setRows] = React.useState(null);
+  const [facets, setFacets] = React.useState({ tools: [], servers: [] });
+  const [hasSeenRows, setHasSeenRows] = React.useState(false);
   const [selected, setSelected] = React.useState(null);
   const [err, setErr] = React.useState('');
-  const [filters, setFilters] = React.useState({ tool: '', status: 'all', server: '', q: '' });
+  const [filters, setFilters] = React.useState({ tool: '', status: '', server: '', q: '' });
   const [debounced, setDebounced] = React.useState(filters);
   const [live, setLive] = React.useState(true);
   const [paused, setPaused] = React.useState(false);
   const pausedBuffer = React.useRef([]);
+  const toolListId = React.useId();
+  const statusListId = React.useId();
+  const serverListId = React.useId();
 
   const mergeIncomingRows = React.useCallback((incoming) => {
     const clean = (Array.isArray(incoming) ? incoming : [incoming]).filter(Boolean);
     if (clean.length === 0) return;
+    setHasSeenRows(true);
     if (paused) {
       pausedBuffer.current = mergeRows([...clean, ...pausedBuffer.current]);
       return;
@@ -38,7 +44,11 @@ export function ActivityPage({ instanceId, embedded = false }) {
     setErr('');
     listToolCalls(client, instanceId, { ...debounced, limit: PAGE_LIMIT })
       .then(page => {
-        if (!cancelled) setRows(Array.isArray(page?.items) ? page.items : []);
+        if (!cancelled) {
+          const items = Array.isArray(page?.items) ? page.items : [];
+          if (items.length > 0) setHasSeenRows(true);
+          setRows(items);
+        }
       })
       .catch(e => {
         if (!cancelled) {
@@ -48,6 +58,23 @@ export function ActivityPage({ instanceId, embedded = false }) {
       });
     return () => { cancelled = true; };
   }, [client, instanceId, debounced]);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    listToolCallFacets(client, instanceId)
+      .then(next => {
+        if (!cancelled) {
+          setFacets({
+            tools: Array.isArray(next?.tools) ? next.tools : [],
+            servers: Array.isArray(next?.servers) ? next.servers : [],
+          });
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setFacets({ tools: [], servers: [] });
+      });
+    return () => { cancelled = true; };
+  }, [client, instanceId]);
 
   React.useEffect(() => {
     if (!live) return undefined;
@@ -91,9 +118,10 @@ export function ActivityPage({ instanceId, embedded = false }) {
     if (updated && updated !== selected) setSelected(updated);
   }, [rows, selected]);
 
-  const toolOptions = unique(rows, 'tool_name');
-  const serverOptions = unique(rows, 'mcp_server');
+  const toolOptions = mergeOptions(facets.tools, unique(rows, 'tool_name'));
+  const serverOptions = mergeOptions(facets.servers, unique(rows, 'mcp_server'));
   const hasRows = Array.isArray(rows) && rows.length > 0;
+  const hasAnyRows = hasRows || hasSeenRows || toolOptions.length > 0 || serverOptions.length > 0;
   const visibleRows = (rows || []).slice(0, 250);
   const Shell = embedded ? 'div' : 'main';
 
@@ -143,24 +171,45 @@ export function ActivityPage({ instanceId, embedded = false }) {
 
         {rows === null ? (
           <p className="muted small">loading…</p>
-        ) : !hasRows ? (
+        ) : !hasAnyRows ? (
           <p className="muted small">no tool calls yet — the agent hasn't called any tools on this instance.</p>
         ) : (
           <>
             <div className="activity-filters">
-              <select value={filters.tool} onChange={e => setFilter('tool', e.target.value)} aria-label="tool filter">
-                <option value="">all tools</option>
-                {toolOptions.map(t => <option key={t} value={t}>{t}</option>)}
-              </select>
-              <select value={filters.status} onChange={e => setFilter('status', e.target.value)} aria-label="status filter">
-                <option value="all">all</option>
-                <option value="ok">ok</option>
-                <option value="err">err</option>
-              </select>
-              <select value={filters.server} onChange={e => setFilter('server', e.target.value)} aria-label="server filter">
-                <option value="">all servers</option>
-                {serverOptions.map(s => <option key={s} value={s}>{s}</option>)}
-              </select>
+              <input
+                type="search"
+                list={toolListId}
+                value={filters.tool}
+                onChange={e => setFilter('tool', e.target.value)}
+                placeholder="any tool"
+                aria-label="tool filter"
+              />
+              <datalist id={toolListId}>
+                {toolOptions.map(t => <option key={t} value={t}/>)}
+              </datalist>
+              <input
+                type="search"
+                list={statusListId}
+                value={filters.status}
+                onChange={e => setFilter('status', e.target.value)}
+                placeholder="any status"
+                aria-label="status filter"
+              />
+              <datalist id={statusListId}>
+                <option value="ok"/>
+                <option value="err"/>
+              </datalist>
+              <input
+                type="search"
+                list={serverListId}
+                value={filters.server}
+                onChange={e => setFilter('server', e.target.value)}
+                placeholder="any mcp server"
+                aria-label="mcp server filter"
+              />
+              <datalist id={serverListId}>
+                {serverOptions.map(s => <option key={s} value={s}/>)}
+              </datalist>
               <input
                 type="search"
                 value={filters.q}
@@ -169,23 +218,27 @@ export function ActivityPage({ instanceId, embedded = false }) {
                 aria-label="search tool payloads"
               />
             </div>
-            <div className="activity-list" role="list">
-              {visibleRows.map(row => (
-                <button
-                  type="button"
-                  key={row.id}
-                  className={`activity-row ${row.is_error ? 'activity-row-error' : ''}`}
-                  onClick={() => setSelected(row)}
-                  role="listitem"
-                >
-                  <span className="activity-time">{fmtClock(row.called_at)}</span>
-                  <code className="activity-tool">{row.tool_name}</code>
-                  <span className="activity-duration">{duration(row)}</span>
-                  <span className="activity-status">{row.is_error ? '✗' : row.resulted_at ? '✓' : '…'}</span>
-                  <span className="activity-preview">{preview(row.input)}</span>
-                </button>
-              ))}
-            </div>
+            {!hasRows ? (
+              <p className="muted small">no tool calls match these filters.</p>
+            ) : (
+              <div className="activity-list" role="list">
+                {visibleRows.map(row => (
+                  <button
+                    type="button"
+                    key={row.id}
+                    className={`activity-row ${row.is_error ? 'activity-row-error' : ''}`}
+                    onClick={() => setSelected(row)}
+                    role="listitem"
+                  >
+                    <span className="activity-time">{fmtClock(row.called_at)}</span>
+                    <code className="activity-tool">{row.tool_name}</code>
+                    <span className="activity-duration">{duration(row)}</span>
+                    <span className="activity-status">{row.is_error ? '✗' : row.resulted_at ? '✓' : '…'}</span>
+                    <span className="activity-preview">{preview(row.input)}</span>
+                  </button>
+                ))}
+              </div>
+            )}
           </>
         )}
       </section>
@@ -243,6 +296,10 @@ function mergeRows(rows) {
 
 function unique(rows, key) {
   return [...new Set((rows || []).map(r => r?.[key]).filter(Boolean))].sort();
+}
+
+function mergeOptions(...sets) {
+  return [...new Set(sets.flat().filter(Boolean))].sort();
 }
 
 function preview(v) {

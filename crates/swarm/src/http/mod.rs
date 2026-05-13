@@ -1282,6 +1282,39 @@ mod tests {
             .collect();
         assert!(ids.contains(&bash));
 
+        let facets: serde_json::Value = client
+            .get(format!(
+                "{base}/v1/instances/inst-a/audit/tool-calls/facets"
+            ))
+            .bearer_auth("alice-token")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(
+            facets["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v == "bash")
+        );
+        assert!(
+            facets["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v == "mcp__github__create_issue")
+        );
+        assert!(
+            facets["servers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v == "github")
+        );
+
         let (bob_auth, _bob_id) = token_bound_user_auth(users, "bob", "bob-token").await;
         let bob_base = spawn(
             state,
@@ -1333,6 +1366,59 @@ mod tests {
         let text = String::from_utf8(chunk.to_vec()).unwrap();
         assert!(text.contains("event: tool_call"));
         assert!(text.contains("\"tool_name\":\"bash\""));
+    }
+
+    #[tokio::test]
+    async fn tool_call_audit_search_scans_past_first_page() {
+        let (state, users, instances) = build_state_with_instances().await;
+        let (alice_auth, alice_id) = token_bound_user_auth(users, "alice", "alice-token").await;
+        seed_owned_instance(&instances, &alice_id, "inst-a").await;
+        let target = seed_tool_call(
+            &state,
+            &alice_id,
+            "inst-a",
+            "deep-needle",
+            "bash",
+            None,
+            1,
+            None,
+        )
+        .await;
+        for i in 0..505 {
+            seed_tool_call(
+                &state,
+                &alice_id,
+                "inst-a",
+                &format!("ordinary-{i}"),
+                "bash",
+                None,
+                2 + i,
+                None,
+            )
+            .await;
+        }
+        let base = spawn(
+            state,
+            AuthState::enforced(crate::config::OidcRoles {
+                claim: "https://test/roles".into(),
+                admin: "rol_admin".into(),
+            }),
+            alice_auth,
+        )
+        .await;
+        let body: serde_json::Value = reqwest::Client::new()
+            .get(format!(
+                "{base}/v1/instances/inst-a/audit/tool-calls?q=deep-needle&limit=1"
+            ))
+            .bearer_auth("alice-token")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(body["items"].as_array().unwrap().len(), 1);
+        assert_eq!(body["items"][0]["id"], target);
     }
 
     #[tokio::test]

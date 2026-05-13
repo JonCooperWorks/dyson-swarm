@@ -72,6 +72,7 @@ Tenant-authenticated per-instance routes:
 ```text
 GET /v1/instances/:id/audit/tool-calls
 GET /v1/instances/:id/audit/tool-calls/export
+GET /v1/instances/:id/audit/tool-calls/facets
 GET /v1/instances/:id/audit/tool-calls/stream
 ```
 
@@ -95,10 +96,17 @@ heartbeat comment every 15 seconds.
 `/export` returns NDJSON for the current filters. It is intentionally explicit
 and uses the same decrypted row shape as the list endpoint.
 
+`/facets` returns instance-wide distinct tool names and MCP server names. The
+Activity UI uses it to populate searchable filter suggestions even when the
+current `status`, `tool`, `server`, or payload search filter has no matching
+rows.
+
 ## Web UI
 
 The instance detail page has an Activity tab. It shows a live timeline of tool
-calls with filters for tool, status, MCP server, and decrypted payload search.
+calls with searchable filters for tool, status, MCP server, and decrypted
+payload search. Filter no-match states keep the controls visible; only a truly
+empty audit history shows the first-run empty state.
 
 Rows show call time, tool name, duration when paired, status, and a short input
 preview. Opening a row shows the full decrypted input/result JSON plus MCP

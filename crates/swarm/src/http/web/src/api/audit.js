@@ -1,7 +1,7 @@
 export function toolCallQuery(filters = {}) {
   const params = new URLSearchParams();
   if (filters.tool) params.set('tool', filters.tool);
-  if (filters.status && filters.status !== 'all') params.set('status', filters.status);
+  if (filters.status === 'ok' || filters.status === 'err') params.set('status', filters.status);
   else params.set('status', 'all');
   if (filters.server) params.set('server', filters.server);
   if (filters.q) params.set('q', filters.q);
@@ -14,6 +14,13 @@ export function toolCallQuery(filters = {}) {
 export function listToolCalls(client, instanceId, filters = {}) {
   return client._json(
     `/v1/instances/${encodeURIComponent(instanceId)}/audit/tool-calls${toolCallQuery(filters)}`,
+    { headers: { Accept: 'application/json' } },
+  );
+}
+
+export function listToolCallFacets(client, instanceId) {
+  return client._json(
+    `/v1/instances/${encodeURIComponent(instanceId)}/audit/tool-calls/facets`,
     { headers: { Accept: 'application/json' } },
   );
 }

@@ -5,7 +5,7 @@ CREATE TABLE IF NOT EXISTS skill_marketplace_sources (
   id                   TEXT   PRIMARY KEY,
   source_type          TEXT   NOT NULL,
   location             TEXT   NOT NULL,
-  enabled              BOOLEAN NOT NULL DEFAULT TRUE,
+  enabled              BIGINT NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
   created_at           BIGINT NOT NULL,
   updated_at           BIGINT NOT NULL,
   deleted_at           BIGINT,

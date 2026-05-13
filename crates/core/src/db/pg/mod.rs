@@ -1,27 +1,43 @@
-//! Postgres backend skeleton.
-//!
-//! Enabled by the `postgres` cargo feature. The `*Store` traits in
-//! [`crate::traits`] are pool-agnostic; the Pg impls below mirror the
-//! SQLite ones in [`crate::db`] but bind to a `sqlx::PgPool` and use
-//! `$N` placeholders instead of `?`.
-//!
-//! This module ships *empty* in this codebase. Phase 7 lays down the seam
-//! so adding Pg later is a contained, additive change:
-//!
-//! 1. Implement one Pg store per trait (`PgInstanceStore`,
-//!    `PgTokenStore`, `PgUserStore`, `PgMcpDockerCatalogStore`,
-//!    `PgSkillMarketplaceSourceStore`, etc.), mirroring the sqlite
-//!    files under `crate::db`.
-//! 2. Add a `db::open_pg(url)` that builds a `PgPool` and runs
-//!    `migrations/postgres/`.
-//! 3. Replace the temporary SQLite-backed `open_configured` guard with a
-//!    backend enum/runtime handle so `main.rs` wires Pg stores when
-//!    `database_backend = "postgres"`.
-//!
-//! See `migrations/postgres/*.sql` for the schema (kept in lockstep with
-//! the sqlite migrations).
+//! Postgres-backed implementations of the `*Store` traits.
 
+use sqlx::postgres::PgPoolOptions;
+
+use crate::error::StoreError;
+
+pub mod artefacts;
+pub mod audit;
+pub mod instances;
+pub mod mcp_catalog;
+pub mod policies;
 pub mod runtime_migrations;
+pub mod secrets;
+pub mod sessions;
+pub mod shares;
+pub mod skill_marketplace;
+pub mod snapshots;
+pub mod state_files;
+pub mod tokens;
+pub mod users;
+pub mod webhooks;
 
 #[cfg(feature = "postgres")]
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations/postgres");
+
+pub(crate) fn map_sqlx(e: sqlx::Error) -> StoreError {
+    match e {
+        sqlx::Error::RowNotFound => StoreError::NotFound,
+        sqlx::Error::Database(db) if db.code().as_deref() == Some("23505") => {
+            StoreError::Constraint(db.to_string())
+        }
+        other => StoreError::Io(other.to_string()),
+    }
+}
+
+pub async fn open(url: &str) -> Result<sqlx::PgPool, sqlx::Error> {
+    let pool = PgPoolOptions::new().max_connections(8).connect(url).await?;
+    MIGRATOR
+        .run(&pool)
+        .await
+        .map_err(|e| sqlx::Error::Migrate(Box::new(e)))?;
+    Ok(pool)
+}

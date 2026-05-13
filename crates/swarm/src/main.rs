@@ -4,7 +4,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
-use clap::Parser;
+use clap::{Parser, Subcommand, ValueEnum};
 
 use dyson_swarm::{
     auth::AuthState,
@@ -63,6 +63,50 @@ struct ServerArgs {
     /// Disable the auth check on /v1/* routes. Loud and dangerous.
     #[arg(long = "dangerous-no-auth", default_value_t = false)]
     dangerous_no_auth: bool,
+
+    #[command(subcommand)]
+    command: Option<ServerCommand>,
+}
+
+#[derive(Debug, Subcommand)]
+enum ServerCommand {
+    /// Explicit database maintenance commands.
+    Db {
+        #[command(subcommand)]
+        action: DbAction,
+    },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum DbBackendArg {
+    Sqlite,
+    Postgres,
+}
+
+impl From<DbBackendArg> for config::DatabaseBackend {
+    fn from(value: DbBackendArg) -> Self {
+        match value {
+            DbBackendArg::Sqlite => Self::Sqlite,
+            DbBackendArg::Postgres => Self::Postgres,
+        }
+    }
+}
+
+#[derive(Debug, Subcommand)]
+enum DbAction {
+    /// Destructively transfer all rows between two empty/migrated backends.
+    Transfer {
+        #[arg(long)]
+        from: DbBackendArg,
+        #[arg(long)]
+        to: DbBackendArg,
+        #[arg(long)]
+        source_url: String,
+        #[arg(long)]
+        target_url: String,
+        #[arg(long, default_value_t = false)]
+        confirm: bool,
+    },
 }
 
 const DANGEROUS_BANNER: &str = "\
@@ -93,6 +137,9 @@ async fn main() -> ExitCode {
         }
     }
     let args = ServerArgs::parse();
+    if let Some(ServerCommand::Db { action }) = args.command {
+        return run_db(action).await;
+    }
     if args.dangerous_no_auth {
         if !env_flag("SWARM_DEV_MODE") && !env_flag("SWARM_DANGEROUS_NO_AUTH_OK") {
             eprintln!(
@@ -115,31 +162,43 @@ async fn main() -> ExitCode {
     run_server(cfg, args.dangerous_no_auth).await
 }
 
-async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
-    let pool = match db::open_configured(&cfg).await {
-        Ok(p) => p,
-        Err(err) => {
-            tracing::error!(
-                error = %err,
-                backend = %cfg.database_backend,
-                db = %cfg.db_path.display(),
-                "db open failed"
-            );
-            return ExitCode::from(2);
+async fn run_db(action: DbAction) -> ExitCode {
+    match action {
+        DbAction::Transfer {
+            from,
+            to,
+            source_url,
+            target_url,
+            confirm,
+        } => {
+            const RED: &str = "\x1b[31;1m";
+            const RESET: &str = "\x1b[0m";
+            if !confirm {
+                eprintln!(
+                    "{RED}DESTRUCTIVE DATABASE TRANSFER REFUSED{RESET}\n\
+                     target: {target_url}\n\
+                     This command writes every migrated table into the target and requires an empty target.\n\
+                     Re-run with --confirm only after verifying the target URL."
+                );
+                return ExitCode::from(2);
+            }
+            match db::transfer::run(from.into(), to.into(), &source_url, &target_url).await {
+                Ok(report) => {
+                    for item in report.counts {
+                        println!("{}\t{}", item.table, item.rows);
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(err) => {
+                    eprintln!("error: db transfer failed: {err:#}");
+                    ExitCode::FAILURE
+                }
+            }
         }
-    };
+    }
+}
 
-    let cube = match cube_client::HttpCubeClient::new(&cfg.cube) {
-        Ok(c) => Arc::new(c) as Arc<dyn CubeClient>,
-        Err(err) => {
-            tracing::error!(error = %err, "cube client init failed");
-            return ExitCode::from(2);
-        }
-    };
-    let user_secrets_store: Arc<dyn dyson_swarm::traits::UserSecretStore> =
-        db::user_secret_store(pool.clone());
-    let system_secrets_store: Arc<dyn dyson_swarm::traits::SystemSecretStore> =
-        db::system_secret_store(pool.clone());
+async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     // Per-user envelope encryption directory.  Lazy-creates an age
     // identity per user inside `keys_dir` on first secret seal/open.
     let cipher_dir: Arc<dyn dyson_swarm::envelope::CipherDirectory> =
@@ -157,10 +216,30 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    match db::runtime_migrator(pool.clone())
-        .migrate(token_cipher.as_ref())
-        .await
-    {
+    let database = match db::open_configured(&cfg, cipher_dir.clone(), token_cipher.clone()).await {
+        Ok(db) => db,
+        Err(err) => {
+            tracing::error!(
+                error = %err,
+                backend = %cfg.database_backend,
+                db = %cfg.db_path.display(),
+                "db open failed"
+            );
+            return ExitCode::from(2);
+        }
+    };
+    let stores = database.stores.clone();
+
+    let cube = match cube_client::HttpCubeClient::new(&cfg.cube) {
+        Ok(c) => Arc::new(c) as Arc<dyn CubeClient>,
+        Err(err) => {
+            tracing::error!(error = %err, "cube client init failed");
+            return ExitCode::from(2);
+        }
+    };
+    let user_secrets_store = stores.user_secrets.clone();
+    let system_secrets_store = stores.system_secrets.clone();
+    match stores.runtime_migrator.migrate(token_cipher.as_ref()).await {
         Ok(report) => {
             if report.applied {
                 tracing::info!(
@@ -176,18 +255,17 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
             return ExitCode::from(2);
         }
     }
-    let instances_store: Arc<dyn InstanceStore> =
-        db::instance_store(pool.clone(), token_cipher.clone());
-    let tokens_store: Arc<dyn TokenStore> = db::token_store(pool.clone(), token_cipher);
-    let snapshots_store: Arc<dyn SnapshotStore> = db::snapshot_store(pool.clone());
-    let policies_store: Arc<dyn PolicyStore> = db::policy_store(pool.clone());
-    let audit_store: Arc<dyn AuditStore> = db::audit_store(pool.clone());
-    let mcp_audit_store: Arc<dyn McpAuditStore> = db::mcp_audit_store(pool.clone());
-    let admin_audit_store: Arc<dyn AdminAuditStore> = db::admin_audit_store(pool.clone());
-    let users_store: Arc<dyn UserStore> = db::user_store(pool.clone(), cipher_dir.clone());
-    let sessions_store: Arc<dyn SessionStore> = db::session_store(pool.clone());
+    let instances_store: Arc<dyn InstanceStore> = stores.instances.clone();
+    let tokens_store: Arc<dyn TokenStore> = stores.tokens.clone();
+    let snapshots_store: Arc<dyn SnapshotStore> = stores.snapshots.clone();
+    let policies_store: Arc<dyn PolicyStore> = stores.policies.clone();
+    let audit_store: Arc<dyn AuditStore> = stores.audit.clone();
+    let mcp_audit_store: Arc<dyn McpAuditStore> = stores.mcp_audit.clone();
+    let admin_audit_store: Arc<dyn AdminAuditStore> = stores.admin_audit.clone();
+    let users_store: Arc<dyn UserStore> = stores.users.clone();
+    let sessions_store: Arc<dyn SessionStore> = stores.sessions.clone();
     let state_files = std::sync::Arc::new(dyson_swarm::state_files::StateFileService::new(
-        db::state_file_store(pool.clone()),
+        stores.state_files.clone(),
         cipher_dir.clone(),
     ));
     let outbound_policy = Arc::new(dyson_swarm_core::upstream_policy::OutboundUrlPolicy {
@@ -198,7 +276,7 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     let external_http = Arc::new(dyson_swarm_core::http::ExternalHttpClient::new(
         outbound_policy.clone(),
     ));
-    let skill_marketplace_store = db::skill_marketplace_source_store(pool.clone());
+    let skill_marketplace_store = stores.skill_marketplace_sources.clone();
     let skill_marketplace = Arc::new(
         dyson_swarm::skill_marketplace::SkillMarketplaceService::new_with_external_client(
             skill_marketplace_store,
@@ -549,7 +627,7 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
             ),
             None => (None, Vec::new(), false),
         };
-    let mcp_catalog_store = db::mcp_docker_catalog_store(pool.clone());
+    let mcp_catalog_store = stores.mcp_docker_catalog.clone();
     if let Err(err) = mcp_catalog_store.seed_config(&docker_catalog).await {
         tracing::error!(error = %err, "mcp docker catalog seed failed");
         return ExitCode::from(2);
@@ -644,14 +722,12 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     )
     .with_sessions(sessions_store.clone());
 
-    // Per-instance webhook ("tasks") plumbing.  Stores reuse the same
-    // sqlite pool every other table sits on; the dispatcher uses the
+    // Per-instance webhook ("tasks") plumbing.  The dispatcher uses the
     // shared cube-trusted reqwest client so it can reach a sandbox at
     // `<port>-<sandbox_id>.<sandbox_domain>` over cubeproxy's
     // mkcert-rooted TLS (same path `dyson_proxy::forward` takes).
-    let webhook_store: Arc<dyn dyson_swarm::traits::WebhookStore> = db::webhook_store(pool.clone());
-    let delivery_store: Arc<dyn dyson_swarm::traits::DeliveryStore> =
-        db::delivery_store(pool.clone());
+    let webhook_store: Arc<dyn dyson_swarm::traits::WebhookStore> = stores.webhooks.clone();
+    let delivery_store: Arc<dyn dyson_swarm::traits::DeliveryStore> = stores.deliveries.clone();
     let webhook_dispatcher: Arc<dyn dyson_swarm::webhooks::WebhookDispatcher> = {
         let http_client = match http::dyson_proxy::build_client() {
             Ok(c) => c,
@@ -677,7 +753,7 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     // Swarm-side artefact store. Metadata and sealed bytes live in the
     // swarm DB so shared artefacts outlive their cube and any one host.
     let artefact_cache = std::sync::Arc::new(dyson_swarm::artefacts::ArtefactCacheService::new(
-        db::artefact_cache_store(pool.clone()),
+        stores.artefacts.clone(),
         cipher_dir.clone(),
     ));
     // Anonymous artefact-share service — wires the share store, the
@@ -685,7 +761,7 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     // user's age cipher), the artefact cache used to verify mint
     // requests, and the apex hostname through one place.
     let shares_svc = Arc::new(dyson_swarm::shares::ShareService::new(
-        db::share_store(pool.clone()),
+        stores.shares.clone(),
         user_secrets_svc.clone(),
         instance_svc.clone(),
         artefact_cache.clone(),

@@ -2,5 +2,5 @@
 -- KEEP IN LOCKSTEP.
 
 ALTER TABLE webhook_deliveries ADD COLUMN body BYTEA;
-ALTER TABLE webhook_deliveries ADD COLUMN body_size INTEGER;
+ALTER TABLE webhook_deliveries ADD COLUMN body_size BIGINT;
 ALTER TABLE webhook_deliveries ADD COLUMN content_type TEXT;

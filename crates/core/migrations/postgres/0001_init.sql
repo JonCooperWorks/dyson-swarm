@@ -6,8 +6,8 @@
 --  * BIGSERIAL for the auto-increment audit id.
 --  * DOUBLE PRECISION instead of REAL for monthly_usd_budget so usage
 --    rollups don't lose precision under aggregation.
---  * BOOLEAN proper instead of INTEGER 0/1 (SQLite stores it as int either
---    way; Postgres has a real type).
+--  * BIGINT plus CHECK-compatible 0/1 semantics for boolean-like columns so
+--    row transfer stays byte-faithful with SQLite.
 --
 -- The Pg `db::pg::*` impls (deferred — phase 7 stub only) write the same
 -- queries as the sqlite impls modulo `?` -> `$N` placeholder syntax.
@@ -20,7 +20,7 @@ CREATE TABLE instances (
   template_id     TEXT NOT NULL,
   status          TEXT NOT NULL,
   bearer_token    TEXT NOT NULL,
-  pinned          BOOLEAN NOT NULL DEFAULT FALSE,
+  pinned          BIGINT NOT NULL DEFAULT 0,
   expires_at      BIGINT,
   last_active_at  BIGINT NOT NULL,
   last_probe_at   BIGINT,
@@ -80,7 +80,7 @@ CREATE TABLE llm_audit (
 );
 
 CREATE INDEX idx_instances_status ON instances(status);
-CREATE INDEX idx_instances_expires ON instances(expires_at) WHERE pinned = FALSE;
+CREATE INDEX idx_instances_expires ON instances(expires_at) WHERE pinned = 0;
 CREATE INDEX idx_snapshots_source ON snapshots(source_instance_id);
 CREATE INDEX idx_proxy_tokens_instance ON proxy_tokens(instance_id);
 CREATE INDEX idx_llm_audit_instance ON llm_audit(instance_id, occurred_at);

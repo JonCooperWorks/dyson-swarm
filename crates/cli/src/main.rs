@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
 
-use dyson_swarm_cli::{self as cli, Command, SecretsAction};
+use dyson_swarm_cli::{self as cli, Command, DbAction, SecretsAction};
 use dyson_swarm_core::{
     api_client::ApiClient,
     backup::{local::LocalDiskBackupSink, s3::S3BackupSink},
@@ -83,6 +83,7 @@ async fn main() -> ExitCode {
 
     match command {
         Command::Secrets { action } => run_secrets(&cfg, args.dangerous_no_auth, action).await,
+        Command::Db { action } => run_db(action).await,
         Command::New {
             template,
             env,
@@ -151,6 +152,49 @@ async fn main() -> ExitCode {
     }
 }
 
+async fn run_db(action: DbAction) -> ExitCode {
+    match action {
+        DbAction::Transfer {
+            from,
+            to,
+            source_url,
+            target_url,
+            confirm,
+        } => {
+            const RED: &str = "\x1b[31;1m";
+            const RESET: &str = "\x1b[0m";
+            if !confirm {
+                eprintln!(
+                    "{RED}DESTRUCTIVE DATABASE TRANSFER REFUSED{RESET}\n\
+                     target: {target_url}\n\
+                     This command writes every migrated table into the target and requires an empty target.\n\
+                     Re-run with --confirm only after verifying the target URL."
+                );
+                return ExitCode::from(2);
+            }
+            match dyson_swarm_core::db::transfer::run(
+                from.into(),
+                to.into(),
+                &source_url,
+                &target_url,
+            )
+            .await
+            {
+                Ok(report) => {
+                    for item in report.counts {
+                        println!("{}\t{}", item.table, item.rows);
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(err) => {
+                    eprintln!("error: db transfer failed: {err:#}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+    }
+}
+
 /// Mint an opaque user api-key without going through the HTTP admin
 /// surface.  Mirrors `secrets system-set` in posture: direct DB +
 /// cipher access on the swarm host, suitable for first-time setup
@@ -166,24 +210,31 @@ async fn run_mint_api_key(
         return ExitCode::from(2);
     }
 
-    let pool = match dyson_swarm_core::db::open_configured(cfg).await {
-        Ok(p) => p,
+    let cipher_dir =
+        match dyson_swarm_core::envelope::AgeCipherDirectory::new(cfg.resolved_keys_dir()) {
+            Ok(d) => std::sync::Arc::new(d)
+                as std::sync::Arc<dyn dyson_swarm_core::envelope::CipherDirectory>,
+            Err(err) => {
+                eprintln!("keys_dir open: {err}");
+                return ExitCode::from(2);
+            }
+        };
+    let system_cipher = match cipher_dir.system() {
+        Ok(c) => c,
+        Err(err) => {
+            eprintln!("system envelope init: {err}");
+            return ExitCode::from(2);
+        }
+    };
+    let database = match dyson_swarm_core::db::open_configured(cfg, cipher_dir, system_cipher).await
+    {
+        Ok(db) => db,
         Err(err) => {
             eprintln!("db open: {err}");
             return ExitCode::from(2);
         }
     };
-    let cipher_dir = match dyson_swarm_core::envelope::AgeCipherDirectory::new(
-        cfg.keys_dir.clone().unwrap_or_default(),
-    ) {
-        Ok(d) => std::sync::Arc::new(d)
-            as std::sync::Arc<dyn dyson_swarm_core::envelope::CipherDirectory>,
-        Err(err) => {
-            eprintln!("keys_dir open: {err}");
-            return ExitCode::from(2);
-        }
-    };
-    let users = dyson_swarm_core::db::user_store(pool, cipher_dir);
+    let users = database.stores.users;
     match users.mint_api_key(&user_id, label.as_deref()).await {
         Ok(token) => {
             println!("{token}");
@@ -204,13 +255,6 @@ async fn run_mint_api_key(
 /// are required to reach cubeproxy.
 async fn run_dyson_skills(cfg: &config::Config, id: String) -> ExitCode {
     use dyson_swarm_core::dyson_reconfig::DysonReconfigurerHttp;
-    let pool = match dyson_swarm_core::db::open_configured(cfg).await {
-        Ok(p) => p,
-        Err(err) => {
-            eprintln!("db open: {err}");
-            return ExitCode::from(2);
-        }
-    };
     let cipher_dir =
         match dyson_swarm_core::envelope::AgeCipherDirectory::new(cfg.resolved_keys_dir()) {
             Ok(d) => std::sync::Arc::new(d)
@@ -227,7 +271,19 @@ async fn run_dyson_skills(cfg: &config::Config, id: String) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    if let Err(err) = dyson_swarm_core::db::runtime_migrator(pool.clone())
+    let database =
+        match dyson_swarm_core::db::open_configured(cfg, cipher_dir.clone(), system_cipher.clone())
+            .await
+        {
+            Ok(db) => db,
+            Err(err) => {
+                eprintln!("db open: {err}");
+                return ExitCode::from(2);
+            }
+        };
+    if let Err(err) = database
+        .stores
+        .runtime_migrator
         .migrate(system_cipher.as_ref())
         .await
     {
@@ -235,7 +291,7 @@ async fn run_dyson_skills(cfg: &config::Config, id: String) -> ExitCode {
         return ExitCode::from(2);
     }
     let instances_store: std::sync::Arc<dyn dyson_swarm_core::traits::InstanceStore> =
-        dyson_swarm_core::db::instance_store(pool.clone(), system_cipher);
+        database.stores.instances.clone();
     let row = match instances_store.get(&id).await {
         Ok(Some(r)) => r,
         Ok(None) => {
@@ -255,7 +311,7 @@ async fn run_dyson_skills(cfg: &config::Config, id: String) -> ExitCode {
         }
     };
     let system_secrets_store: std::sync::Arc<dyn dyson_swarm_core::traits::SystemSecretStore> =
-        dyson_swarm_core::db::system_secret_store(pool);
+        database.stores.system_secrets.clone();
     let system_secrets = std::sync::Arc::new(dyson_swarm_core::secrets::SystemSecretsService::new(
         system_secrets_store,
         cipher_dir,
@@ -294,9 +350,6 @@ struct OpsServices {
 }
 
 async fn build_ops_services(cfg: &config::Config) -> Result<OpsServices, String> {
-    let pool = db::open_configured(cfg)
-        .await
-        .map_err(|e| format!("db open (backend {}): {e:#}", cfg.database_backend))?;
     let cube = Arc::new(
         cube_client::HttpCubeClient::new(&cfg.cube).map_err(|e| format!("cube client: {e:#}"))?,
     ) as Arc<dyn CubeClient>;
@@ -307,7 +360,12 @@ async fn build_ops_services(cfg: &config::Config) -> Result<OpsServices, String>
     let system_cipher = cipher_dir
         .system()
         .map_err(|e| format!("system envelope init: {e:#}"))?;
-    let report = db::runtime_migrator(pool.clone())
+    let database = db::open_configured(cfg, cipher_dir.clone(), system_cipher.clone())
+        .await
+        .map_err(|e| format!("db open (backend {}): {e:#}", cfg.database_backend))?;
+    let stores = database.stores.clone();
+    let report = stores
+        .runtime_migrator
         .migrate(system_cipher.as_ref())
         .await
         .map_err(|e| format!("runtime data migration: {e:#}"))?;
@@ -317,14 +375,14 @@ async fn build_ops_services(cfg: &config::Config) -> Result<OpsServices, String>
             report.proxy_tokens_sealed, report.instance_bearers_sealed
         );
     }
-    let instances: Arc<dyn InstanceStore> = db::instance_store(pool.clone(), system_cipher.clone());
-    let tokens: Arc<dyn TokenStore> = db::token_store(pool.clone(), system_cipher);
-    let snapshots_store: Arc<dyn SnapshotStore> = db::snapshot_store(pool.clone());
+    let instances: Arc<dyn InstanceStore> = stores.instances.clone();
+    let tokens: Arc<dyn TokenStore> = stores.tokens.clone();
+    let snapshots_store: Arc<dyn SnapshotStore> = stores.snapshots.clone();
 
     let system_secrets_store: Arc<dyn dyson_swarm_core::traits::SystemSecretStore> =
-        db::system_secret_store(pool.clone());
+        stores.system_secrets.clone();
     let user_secrets_store: Arc<dyn dyson_swarm_core::traits::UserSecretStore> =
-        db::user_secret_store(pool.clone());
+        stores.user_secrets.clone();
     let system_secrets_svc = Arc::new(dyson_swarm_core::secrets::SystemSecretsService::new(
         system_secrets_store,
         cipher_dir.clone(),
@@ -334,7 +392,7 @@ async fn build_ops_services(cfg: &config::Config) -> Result<OpsServices, String>
         cipher_dir.clone(),
     ));
     let state_files = Arc::new(dyson_swarm_core::state_files::StateFileService::new(
-        dyson_swarm_core::db::state_file_store(pool.clone()),
+        stores.state_files.clone(),
         cipher_dir,
     ));
 
@@ -1158,17 +1216,10 @@ async fn run_secrets(
     run_system_secret(cfg, action).await
 }
 
-/// System-secret CLI handler.  Opens the sqlite DB + envelope key dir
+/// System-secret CLI handler.  Opens the DB + envelope key dir
 /// directly and pipes through [`SystemSecretsService`].  No HTTP, no
 /// admin bearer.
 async fn run_system_secret(cfg: &config::Config, action: SecretsAction) -> ExitCode {
-    let pool = match db::open_configured(cfg).await {
-        Ok(p) => p,
-        Err(err) => {
-            eprintln!("error: db open failed: {err:#}");
-            return ExitCode::FAILURE;
-        }
-    };
     let cipher_dir: Arc<dyn dyson_swarm_core::envelope::CipherDirectory> =
         match dyson_swarm_core::envelope::AgeCipherDirectory::new(cfg.resolved_keys_dir()) {
             Ok(d) => Arc::new(d),
@@ -1177,8 +1228,22 @@ async fn run_system_secret(cfg: &config::Config, action: SecretsAction) -> ExitC
                 return ExitCode::FAILURE;
             }
         };
+    let system_cipher = match cipher_dir.system() {
+        Ok(c) => c,
+        Err(err) => {
+            eprintln!("error: system envelope init failed: {err:#}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let database = match db::open_configured(cfg, cipher_dir.clone(), system_cipher).await {
+        Ok(db) => db,
+        Err(err) => {
+            eprintln!("error: db open failed: {err:#}");
+            return ExitCode::FAILURE;
+        }
+    };
     let store: Arc<dyn dyson_swarm_core::traits::SystemSecretStore> =
-        db::system_secret_store(pool.clone());
+        database.stores.system_secrets.clone();
     let svc = dyson_swarm_core::secrets::SystemSecretsService::new(store, cipher_dir);
 
     match action {

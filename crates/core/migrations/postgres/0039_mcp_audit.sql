@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS mcp_audit (
   status        BIGINT NOT NULL,
   duration_ms   BIGINT NOT NULL,
   ts            BIGINT NOT NULL,
-  completed     BOOLEAN NOT NULL DEFAULT FALSE
+  completed     BIGINT NOT NULL DEFAULT 0
 );
 
 CREATE INDEX idx_mcp_audit_owner_server_ts

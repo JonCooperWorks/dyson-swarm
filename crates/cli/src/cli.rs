@@ -1,7 +1,7 @@
 use std::io::Read;
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -57,6 +57,12 @@ pub enum Command {
     Secrets {
         #[command(subcommand)]
         action: SecretsAction,
+    },
+
+    /// Explicit database maintenance commands.
+    Db {
+        #[command(subcommand)]
+        action: DbAction,
     },
 
     /// Create a new instance from a template.
@@ -152,6 +158,38 @@ pub enum Command {
         /// Skip the post-recreate /api/conversations readability check.
         #[arg(long, default_value_t = false)]
         no_verify_conversations: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum DbBackendArg {
+    Sqlite,
+    Postgres,
+}
+
+impl From<DbBackendArg> for dyson_swarm_core::config::DatabaseBackend {
+    fn from(value: DbBackendArg) -> Self {
+        match value {
+            DbBackendArg::Sqlite => Self::Sqlite,
+            DbBackendArg::Postgres => Self::Postgres,
+        }
+    }
+}
+
+#[derive(Debug, Subcommand)]
+pub enum DbAction {
+    /// Destructively transfer all rows between two empty/migrated backends.
+    Transfer {
+        #[arg(long)]
+        from: DbBackendArg,
+        #[arg(long)]
+        to: DbBackendArg,
+        #[arg(long)]
+        source_url: String,
+        #[arg(long)]
+        target_url: String,
+        #[arg(long, default_value_t = false)]
+        confirm: bool,
     },
 }
 

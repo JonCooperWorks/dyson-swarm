@@ -1,0 +1,121 @@
+# Migrations listed here intentionally differ between SQLite and Postgres
+# because of dialect syntax, integer/boolean/blob types, or ALTER TABLE support.
+# The build script still requires both backends to carry the same logical
+# migration names in the same order. For dialect-different pairs, the current
+# normalized SQL hashes are pinned here so later edits fail at compile time
+# until someone reviews the logical schema parity and updates the fingerprints.
+
+[equivalence.admin_audit]
+sqlite = "6eff4508f1b9ae6d7cec4868a82bb9e0431e4f69fbe4c396bc14143d47b85cfd"
+postgres = "8b12c46d731b15abb25ef45a978c504c63d86cb7ee04315d58617de5c0eb52c2"
+reason = "dialect syntax differs; logical schema matches sqlite"
+
+[equivalence.apikey_envelope]
+sqlite = "2def1811ac0e7275677b0b82eea3fc787eda881356b5c1d12c34dd45b343c229"
+postgres = "7d8e05f99f2f816a68e3a3cf2559627b9d0c317a90e83ee029c7e093e52ab85e"
+reason = "dialect syntax differs; logical schema matches sqlite"
+
+[equivalence.artefact_cache]
+sqlite = "95a8a85b7d5bd8c83c97d9b9703d20cb4efdd9d16eb7d3d1c5bbc0f0653fdf2a"
+postgres = "41c4a289d08e203cc1c2925121408800435f659876d4b49505a4c91800aa6d6e"
+reason = "dialect syntax differs; logical schema matches sqlite"
+
+[equivalence.artefact_cache_bodies]
+sqlite = "0ad407319965b70fc506b7fcb3f00f956c3b8b882821c8c5c338758cd01e00e4"
+postgres = "f91544d72b278b68b7d73cfac7f17ff3f2e15e4e624e64e7b10fa1ea07df590e"
+reason = "dialect syntax differs; logical schema matches sqlite"
+
+[equivalence.artefact_shares]
+sqlite = "5f464007c7ba22c2481d762fc58f6ef328d16935b41c4f02d2f3bcd5a8ae9a37"
+postgres = "239ee68e365e22844f6d2edda5f50583a2ec27faa44681ae41da1c0c761bdb5a"
+reason = "dialect syntax differs; logical schema matches sqlite"
+
+[equivalence.audit_completion]
+sqlite = "4203a5a74560fbad12c4d539803585b8af1d854dc5eca1cecd3a7648ff762438"
+postgres = "ffda521371024b1e426a66d04def89192fecd82cdbeb7712712edaa2eaf1364a"
+reason = "dialect syntax differs; logical schema matches sqlite"
+
+[equivalence.envelope_secrets]
+sqlite = "49b6ff31786d3f62b0ea560554a3f66b6c103a89ff5f9a6f2666ec1d246157dd"
+postgres = "1757b0479bf504a3b0ffeb17129e56c0226cfd71c936c25997bf9c0f2a760b1d"
+reason = "dialect syntax differs; logical schema matches sqlite"
+
+[equivalence.init]
+sqlite = "381baa828bfbcbcf59fd81f8d29dc130b8a05173529866286eb402a3c98d8722"
+postgres = "f2d3650554eb42af5e0525f5eb029050c29acc4795d9339bb8fbfe05b4060338"
+reason = "dialect syntax differs; logical schema matches sqlite"
+
+[equivalence.instance_state_file_bodies]
+sqlite = "b08a1c85ee6e90f52f675107a55c1ff3a1f3248566a040d85ae2e38932b7120a"
+postgres = "106c56ced56408b718f53643d6de0b15069680eb47d8e3615d4da8609f8ac130"
+reason = "dialect syntax differs; logical schema matches sqlite"
+
+[equivalence.instance_state_files]
+sqlite = "b3b6fa44f79b0f74556deebd707d7449daccbb7f8471461f29fdb2e965b31335"
+postgres = "5aa608e39250afb8aba75c7a23983860727bd274edae721e6d2b38b88227da6f"
+reason = "dialect syntax differs; logical schema matches sqlite"
+
+[equivalence.instance_webhooks]
+sqlite = "0d963825ad8b9e1b31a3805fe89ec215e9c040347b5346da87f2293059249dc7"
+postgres = "0527915b30438dd537165f825d2b90e1449d904e92ee077687edb976b641afa3"
+reason = "dialect syntax differs; logical schema matches sqlite"
+
+[equivalence.mcp_audit]
+sqlite = "315d80f989b048bd8c39a3e4afdebdcee55e9306aed87a1e6e21e2277d811f63"
+postgres = "d5e389486ca0a9a579ba6cbd69824fba39a11d73149ebdbfd4b0e0504dcc7de9"
+reason = "dialect syntax differs; logical schema matches sqlite"
+
+[equivalence.mcp_docker_catalog]
+sqlite = "257e463bc916538bc1e7389e11a40d6c804a962001f3c53c167b54e9b184df9f"
+postgres = "50ceeb736cd1d1c37afd035ee515466c8c0344890e4dfcb8ea2c650e6a7f2512"
+reason = "dialect syntax differs; logical schema matches sqlite"
+
+[equivalence.mcp_docker_catalog_status]
+sqlite = "7039c44cd5032b8d4aeb1f349b88989c886e8fdad42e49cc01a3a325659dfe95"
+postgres = "6e3d72ef020a70ad98bee0cd59a9233a44c9d5adaabd8e14dfd5ac4fc8d85651"
+reason = "dialect syntax differs; logical schema matches sqlite"
+
+[equivalence.multitenant]
+sqlite = "b37522d530b69730d9d023235446434ed1ecf6265e9d3b0c85468027314c8419"
+postgres = "31b3350436599915d8d08bfb019063a7bb46aa4313e8d2d7400dc2dbcad22a6b"
+reason = "dialect syntax differs; logical schema matches sqlite"
+
+[equivalence.persistent_webhook_deliveries]
+sqlite = "37e47e68b09cd6e17e14cb9d43964e2cb80b98dfcf49e2af49b9ba070e0724a9"
+postgres = "6a428892d1c5c50b72fe2a22ae722eaf2024e72672f7ebdb33b3213895d0e9e8"
+reason = "dialect syntax differs; logical schema matches sqlite"
+
+[equivalence.policy_check_constraints]
+sqlite = "a38b7eb2a9c612340455948cae1766885d699344f849a09a80672f6ac82cb06b"
+postgres = "4f6ad5d6aeda5672cf9331eab5f8ed37edb46f7d129a956f70f7b477e9460ebe"
+reason = "dialect syntax differs; logical schema matches sqlite"
+
+[equivalence.sessions]
+sqlite = "efd6e64479a779fc9a0c8086ad928e4593636533e37fa3fcdb2ad93671b6c85f"
+postgres = "8d7967d08036a3f9022571222605b8d947ae46b5eb2da24966ffe0f3b1bfc872"
+reason = "dialect syntax differs; logical schema matches sqlite"
+
+[equivalence.skill_marketplace_remove_file]
+sqlite = "0201a13972a6ba86fd892a3514d523023d3508421596fd226ddd4fe652266bc9"
+postgres = "969b0b61be1b9d9c28e9ecbc8a34f7cfdb47fec0cd40f1a549262d81c6be98e8"
+reason = "dialect syntax differs; logical schema matches sqlite"
+
+[equivalence.skill_marketplace_sources]
+sqlite = "4f8eac88dba1277158f75e373f01fb9bbe2f7bfd77e2589e83dcc35599a6c142"
+postgres = "b20cb1a07681d484cad213a44d924a0a753e79c324cd952c51073d5723ac9707"
+reason = "dialect syntax differs; logical schema matches sqlite"
+
+[equivalence.user_openrouter]
+sqlite = "a4197991f1a371745da8ad6e352d72ff2ad08b64c5280a31b483a4eaa731ef7f"
+postgres = "9029b3ceb50f6814c0c0203d7341ce1c3687d19a5344dd611cb8e787c016fe23"
+reason = "dialect syntax differs; logical schema matches sqlite"
+
+[equivalence.webhook_delivery_body]
+sqlite = "201523748ece1e5c001561258b992b8b38549aa2f298dfc6d2c85e14b8f76a32"
+postgres = "cd133bfa64659baebbd5e2b8561d5b14b2ed41edbdd796389d88aa60d933124f"
+reason = "dialect syntax differs; logical schema matches sqlite"
+
+[equivalence.webhook_secrets_user_scope]
+sqlite = "0e6bd8740345c53592a3cb9281498872d48f1948aec8dfa3374a0074780b87fa"
+postgres = "621257e70d029194ff66f6025ce216b8de5e394353d497175651341458935071"
+reason = "dialect syntax differs; logical schema matches sqlite"

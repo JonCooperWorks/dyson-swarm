@@ -4,7 +4,8 @@
 -- Differences from the sqlite version:
 --  * BIGINT for unix-epoch timestamps and integer status/latency
 --    where Postgres needs the right type from the start.
---  * BOOLEAN in place of INTEGER for `enabled` / `signature_ok`.
+--  * BIGINT for 0/1 `enabled` / `signature_ok` so the wire transfer path can
+--    preserve SQLite values directly.
 --
 -- KEEP THIS SCHEMA IN LOCKSTEP WITH migrations/sqlite/0018_instance_webhooks.sql.
 
@@ -14,7 +15,7 @@ CREATE TABLE instance_webhooks (
   description TEXT NOT NULL DEFAULT '',
   auth_scheme TEXT NOT NULL,
   secret_name TEXT,
-  enabled     BOOLEAN NOT NULL DEFAULT TRUE,
+  enabled     BIGINT NOT NULL DEFAULT 1,
   created_at  BIGINT NOT NULL,
   updated_at  BIGINT NOT NULL,
   PRIMARY KEY (instance_id, name)
@@ -28,10 +29,10 @@ CREATE TABLE webhook_deliveries (
   instance_id   TEXT NOT NULL,
   webhook_name  TEXT NOT NULL,
   fired_at      BIGINT NOT NULL,
-  status_code   INTEGER NOT NULL,
-  latency_ms    INTEGER NOT NULL,
+  status_code   BIGINT NOT NULL,
+  latency_ms    BIGINT NOT NULL,
   request_id    TEXT,
-  signature_ok  BOOLEAN NOT NULL,
+  signature_ok  BIGINT NOT NULL,
   error         TEXT,
   FOREIGN KEY (instance_id, webhook_name)
     REFERENCES instance_webhooks(instance_id, name) ON DELETE CASCADE

@@ -19,7 +19,7 @@
 use async_trait::async_trait;
 use sqlx::{Row, SqlitePool};
 
-use crate::db::map_sqlx;
+use crate::db::sqlite::map_sqlx;
 use crate::error::StoreError;
 use crate::traits::{
     AdminAuditEntry, AdminAuditStore, AuditEntry, AuditStore, McpAuditEntry, McpAuditStore,
@@ -218,7 +218,7 @@ impl AdminAuditStore for SqliteAdminAuditStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::open_in_memory;
+    use crate::db::sqlite::open_in_memory;
 
     fn r(owner: &str, instance: &str, when: i64, prompt: i64, output: i64) -> AuditEntry {
         AuditEntry {

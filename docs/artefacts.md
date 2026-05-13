@@ -6,7 +6,7 @@ outputs survive sandbox churn and stay browseable from one UI surface.
 Relevant code:
 
 - [artefacts.rs](../crates/core/src/artefacts.rs)
-- [db/artefacts.rs](../crates/core/src/db/artefacts.rs)
+- [db/sqlite/artefacts.rs](../crates/core/src/db/sqlite/artefacts.rs)
 - [instance_artefacts.rs](../crates/swarm/src/http/instance_artefacts.rs)
 - [internal_ingest.rs](../crates/swarm/src/http/internal_ingest.rs)
 - [artefacts.jsx](../crates/swarm/src/http/web/src/components/artefacts.jsx)

@@ -6,7 +6,7 @@
 use async_trait::async_trait;
 use sqlx::{Row, SqlitePool};
 
-use crate::db::map_sqlx;
+use crate::db::sqlite::map_sqlx;
 use crate::error::StoreError;
 use crate::now_secs;
 use crate::skill_marketplace::{SkillMarketplaceSourceConfig, validate_marketplace_source_config};
@@ -189,7 +189,7 @@ fn source_from_parts(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::open_in_memory;
+    use crate::db::sqlite::open_in_memory;
 
     fn inline_source(id: &str, index_json: &str) -> SkillMarketplaceSourceConfig {
         SkillMarketplaceSourceConfig::Inline {

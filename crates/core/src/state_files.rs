@@ -365,7 +365,7 @@ pub type StateFiles = Arc<StateFileService>;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::open_in_memory;
+    use crate::db::sqlite::open_in_memory;
 
     const ALICE: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -375,7 +375,7 @@ mod tests {
         let ciphers: Arc<dyn CipherDirectory> =
             Arc::new(crate::envelope::AgeCipherDirectory::new(keys.path()).unwrap());
         (
-            StateFileService::new(crate::db::state_file_store(pool), ciphers),
+            StateFileService::new(crate::db::sqlite::state_file_store(pool), ciphers),
             keys,
         )
     }

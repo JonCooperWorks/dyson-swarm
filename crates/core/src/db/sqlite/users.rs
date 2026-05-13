@@ -55,7 +55,7 @@ use rand::RngCore;
 use sqlx::{Row, SqlitePool};
 use uuid::Uuid;
 
-use crate::db::map_sqlx;
+use crate::db::sqlite::map_sqlx;
 use crate::envelope::{AgeCipher, CipherDirectory, EnvelopeCipher};
 use crate::error::StoreError;
 use crate::now_secs;
@@ -541,7 +541,7 @@ impl UserStore for SqlxUserStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::open_in_memory;
+    use crate::db::sqlite::open_in_memory;
     use crate::envelope::AgeCipherDirectory;
 
     /// User-id shape accepted by [`AgeCipherDirectory::validate_user_id`]:

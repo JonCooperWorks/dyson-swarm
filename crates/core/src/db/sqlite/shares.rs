@@ -9,7 +9,7 @@
 use async_trait::async_trait;
 use sqlx::{Row, SqlitePool};
 
-use crate::db::map_sqlx;
+use crate::db::sqlite::map_sqlx;
 use crate::error::StoreError;
 use crate::now_secs;
 use crate::traits::ShareStore;
@@ -260,7 +260,7 @@ fn row_to_share(r: sqlx::sqlite::SqliteRow) -> Result<ShareRow, StoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::open_in_memory;
+    use crate::db::sqlite::open_in_memory;
 
     /// Seed both a `users` row and the dependent `instances` row.
     /// FK constraints are enforced (open_in_memory turns the pragma
@@ -433,9 +433,9 @@ mod tests {
     async fn list_for_instance_includes_cached_artefact_title() {
         let pool = open_in_memory().await.unwrap();
         seed_instance(&pool, "inst-a", "alice").await;
-        crate::db::artefacts::upsert_meta(
+        crate::db::sqlite::artefacts::upsert_meta(
             &pool,
-            crate::db::artefacts::UpsertSpec {
+            crate::db::sqlite::artefacts::UpsertSpec {
                 instance_id: "inst-a",
                 owner_id: "alice",
                 chat_id: "c",

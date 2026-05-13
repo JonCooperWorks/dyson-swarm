@@ -208,8 +208,8 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU32, Ordering};
 
-    use crate::db::instances::SqlxInstanceStore;
-    use crate::db::open_in_memory;
+    use crate::db::sqlite::instances::SqlxInstanceStore;
+    use crate::db::sqlite::open_in_memory;
     use crate::traits::{InstanceRow, InstanceStatus, InstanceStore};
 
     /// Mock prober whose responses are dictated by a queue. Counts how many
@@ -312,7 +312,7 @@ mod tests {
     #[tokio::test]
     async fn run_once_persists_results_and_skips_destroyed() {
         let pool = open_in_memory().await.unwrap();
-        let cipher = crate::db::test_system_cipher();
+        let cipher = crate::db::sqlite::test_system_cipher();
         seed_live(&pool, cipher.clone(), "i1").await;
 
         // A destroyed instance: should NOT be probed.
@@ -361,7 +361,7 @@ mod tests {
     #[tokio::test]
     async fn run_once_three_unreachables_warn_once() {
         let pool = open_in_memory().await.unwrap();
-        let cipher = crate::db::test_system_cipher();
+        let cipher = crate::db::sqlite::test_system_cipher();
         seed_live(&pool, cipher.clone(), "i1").await;
         let store_dyn: Arc<dyn InstanceStore> =
             Arc::new(SqlxInstanceStore::new(pool.clone(), cipher));

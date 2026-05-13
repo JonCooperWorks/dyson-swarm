@@ -18,7 +18,7 @@
 use async_trait::async_trait;
 use sqlx::{Row, SqlitePool};
 
-use crate::db::map_sqlx;
+use crate::db::sqlite::map_sqlx;
 use crate::error::StoreError;
 use crate::traits::{SnapshotKind, SnapshotRow, SnapshotStore};
 
@@ -176,12 +176,12 @@ impl SnapshotStore for SqliteSnapshotStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::instances::SqlxInstanceStore;
-    use crate::db::open_in_memory;
+    use crate::db::sqlite::instances::SqlxInstanceStore;
+    use crate::db::sqlite::open_in_memory;
     use crate::traits::{InstanceRow, InstanceStatus, InstanceStore};
 
     async fn seed(pool: &SqlitePool, id: &str) {
-        let store = SqlxInstanceStore::new(pool.clone(), crate::db::test_system_cipher());
+        let store = SqlxInstanceStore::new(pool.clone(), crate::db::sqlite::test_system_cipher());
         store
             .create(InstanceRow {
                 id: id.into(),

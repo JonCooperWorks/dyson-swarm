@@ -22,10 +22,16 @@ every persistence trait. Server and CLI code consume that struct instead of a
 concrete pool, so a new store method or store trait must compile for both
 backends.
 
+The trait surface stays in `crates/core/src/traits.rs`. Concrete SQLite code is
+kept in the `db::sqlite` package so SQLite-specific pools, migrators, and test
+helpers do not sit in the backend-neutral db root.
+
 ## File Map
 
 ```text
-crates/core/src/db/*.rs        SQLite stores
+crates/core/src/traits.rs      persistence traits
+crates/core/src/db/mod.rs      backend-neutral wiring and shared token helpers
+crates/core/src/db/sqlite/*.rs SQLite stores and SQLite-only helpers
 crates/core/src/db/pg/*.rs     Postgres stores
 crates/core/migrations/sqlite  SQLite migrations
 crates/core/migrations/postgres Postgres migrations

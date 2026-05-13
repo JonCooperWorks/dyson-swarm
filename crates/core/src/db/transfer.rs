@@ -13,7 +13,7 @@ use sqlx::postgres::{PgArguments, PgPoolOptions};
 use sqlx::{PgPool, Postgres};
 
 use crate::config::DatabaseBackend;
-use crate::db::{MIGRATOR, map_sqlx};
+use crate::db::sqlite::{MIGRATOR, map_sqlx};
 use crate::error::StoreError;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

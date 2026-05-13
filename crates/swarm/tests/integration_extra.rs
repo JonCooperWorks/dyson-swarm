@@ -41,7 +41,7 @@ use dyson_swarm::{
     config::{ProviderConfig, Providers},
     cube_client::HttpCubeClient,
     db,
-    db::{instances::SqlxInstanceStore, tokens::SqlxTokenStore},
+    db::sqlite::{instances::SqlxInstanceStore, tokens::SqlxTokenStore},
     envelope::{AgeCipherDirectory, CipherDirectory},
     http,
     instance::{
@@ -253,7 +253,7 @@ async fn build_stack(subject_for_no_bearer: &str) -> Stack {
     let llm_state = LlmState::default();
     let llm_url = spawn(llm_router(llm_state.clone())).await;
 
-    let pool = db::open_in_memory().await.unwrap();
+    let pool = db::sqlite::open_in_memory().await.unwrap();
     let cube_cfg = dyson_swarm::config::CubeConfig {
         url: cube_url,
         api_key: "k".into(),
@@ -269,11 +269,10 @@ async fn build_stack(subject_for_no_bearer: &str) -> Stack {
     let tokens_store: Arc<dyn TokenStore> =
         Arc::new(SqlxTokenStore::new(pool.clone(), system_cipher));
     let user_secrets_store: Arc<dyn UserSecretStore> = Arc::new(
-        dyson_swarm::db::secrets::SqlxUserSecretStore::new(pool.clone()),
+        dyson_swarm::db::sqlite::secrets::SqlxUserSecretStore::new(pool.clone()),
     );
-    let system_secrets_store: Arc<dyn SystemSecretStore> = Arc::new(
-        dyson_swarm::db::secrets::SqlxSystemSecretStore::new(pool.clone()),
-    );
+    let system_secrets_store: Arc<dyn SystemSecretStore> =
+        Arc::new(dyson_swarm::db::sqlite::secrets::SqlxSystemSecretStore::new(pool.clone()));
     let user_secrets_svc = Arc::new(UserSecretsService::new(
         user_secrets_store,
         cipher_dir.clone(),
@@ -293,9 +292,10 @@ async fn build_stack(subject_for_no_bearer: &str) -> Stack {
         .with_reconfigurer(reconfigurer.clone()),
     );
     let backup: Arc<dyn BackupSink> = Arc::new(LocalDiskBackupSink::new(cube.clone()));
-    let snapshots_store: Arc<dyn SnapshotStore> = dyson_swarm::db::snapshot_store(pool.clone());
-    let policies_store: Arc<dyn PolicyStore> = dyson_swarm::db::policy_store(pool.clone());
-    let audit_store: Arc<dyn AuditStore> = dyson_swarm::db::audit_store(pool.clone());
+    let snapshots_store: Arc<dyn SnapshotStore> =
+        dyson_swarm::db::sqlite::snapshot_store(pool.clone());
+    let policies_store: Arc<dyn PolicyStore> = dyson_swarm::db::sqlite::policy_store(pool.clone());
+    let audit_store: Arc<dyn AuditStore> = dyson_swarm::db::sqlite::audit_store(pool.clone());
     let snapshot_svc = Arc::new(SnapshotService::new(
         cube.clone(),
         instances_store.clone(),
@@ -334,10 +334,9 @@ async fn build_stack(subject_for_no_bearer: &str) -> Stack {
         },
     );
 
-    let users_store: Arc<dyn UserStore> = Arc::new(dyson_swarm::db::users::SqlxUserStore::new(
-        pool.clone(),
-        cipher_dir.clone(),
-    ));
+    let users_store: Arc<dyn UserStore> = Arc::new(
+        dyson_swarm::db::sqlite::users::SqlxUserStore::new(pool.clone(), cipher_dir.clone()),
+    );
 
     let or_prov = Arc::new(RecordingProvisioning::default());
     let user_or_keys = Arc::new(UserOrKeyResolver::new(
@@ -382,10 +381,10 @@ async fn build_stack(subject_for_no_bearer: &str) -> Stack {
     let user_auth = UserAuthState::new(chain, users_store.clone());
 
     let webhook_store: Arc<dyn dyson_swarm::traits::WebhookStore> = Arc::new(
-        dyson_swarm::db::webhooks::SqlxWebhookStore::new(pool.clone()),
+        dyson_swarm::db::sqlite::webhooks::SqlxWebhookStore::new(pool.clone()),
     );
     let delivery_store: Arc<dyn dyson_swarm::traits::DeliveryStore> = Arc::new(
-        dyson_swarm::db::webhooks::SqlxDeliveryStore::new(pool.clone()),
+        dyson_swarm::db::sqlite::webhooks::SqlxDeliveryStore::new(pool.clone()),
     );
     let webhooks_svc = Arc::new(dyson_swarm::webhooks::WebhookService::new(
         webhook_store,
@@ -396,11 +395,11 @@ async fn build_stack(subject_for_no_bearer: &str) -> Stack {
         cipher_dir.clone(),
     ));
     let artefact_cache = Arc::new(dyson_swarm::artefacts::ArtefactCacheService::new(
-        dyson_swarm::db::artefact_cache_store(pool.clone()),
+        dyson_swarm::db::sqlite::artefact_cache_store(pool.clone()),
         cipher_dir.clone(),
     ));
     let shares_svc = Arc::new(dyson_swarm::shares::ShareService::new(
-        dyson_swarm::db::share_store(pool.clone()),
+        dyson_swarm::db::sqlite::share_store(pool.clone()),
         user_secrets_svc.clone(),
         instance_svc.clone(),
         artefact_cache.clone(),
@@ -408,11 +407,13 @@ async fn build_stack(subject_for_no_bearer: &str) -> Stack {
         None,
     ));
     let state_files = Arc::new(dyson_swarm::state_files::StateFileService::new(
-        dyson_swarm::db::state_file_store(pool.clone()),
+        dyson_swarm::db::sqlite::state_file_store(pool.clone()),
         cipher_dir.clone(),
     ));
     let skill_marketplace_store = Arc::new(
-        dyson_swarm::db::skill_marketplace::SqlxSkillMarketplaceSourceStore::new(pool.clone()),
+        dyson_swarm::db::sqlite::skill_marketplace::SqlxSkillMarketplaceSourceStore::new(
+            pool.clone(),
+        ),
     );
     let skill_marketplace = Arc::new(SkillMarketplaceService::new(skill_marketplace_store));
     let app_state = http::AppState {
@@ -424,8 +425,8 @@ async fn build_stack(subject_for_no_bearer: &str) -> Stack {
         prober,
         tokens: tokens_store.clone(),
         users: users_store.clone(),
-        sessions: dyson_swarm::db::session_store(pool.clone()),
-        admin_audit: dyson_swarm::db::admin_audit_store(pool.clone()),
+        sessions: dyson_swarm::db::sqlite::session_store(pool.clone()),
+        admin_audit: dyson_swarm::db::sqlite::admin_audit_store(pool.clone()),
         sandbox_domain: "cube.test".into(),
         hostname: None,
         auth_config: std::sync::Arc::new(http::auth_config::AuthConfig::none()),

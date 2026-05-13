@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use sqlx::{Executor, Row, Sqlite, SqlitePool};
 use std::sync::Arc;
 
-use crate::db::map_sqlx;
+use crate::db::sqlite::map_sqlx;
 use crate::envelope::EnvelopeCipher;
 use crate::error::StoreError;
 use crate::network_policy::NetworkPolicy;
@@ -563,7 +563,7 @@ impl InstanceStore for SqlxInstanceStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::open_in_memory;
+    use crate::db::sqlite::open_in_memory;
     use crate::envelope::EnvelopeError;
 
     #[derive(Debug)]

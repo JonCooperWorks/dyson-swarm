@@ -9,7 +9,7 @@
 use async_trait::async_trait;
 use sqlx::{Row, SqlitePool};
 
-use crate::db::map_sqlx;
+use crate::db::sqlite::map_sqlx;
 use crate::error::StoreError;
 use crate::traits::{PolicyRecord, PolicyStore};
 
@@ -96,7 +96,7 @@ impl PolicyStore for SqlitePolicyStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::open_in_memory;
+    use crate::db::sqlite::open_in_memory;
 
     /// The migration seeds a `legacy` user; tests key policies on that
     /// existing FK target.

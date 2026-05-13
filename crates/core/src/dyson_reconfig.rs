@@ -629,8 +629,8 @@ mod tests {
 
     use std::sync::Arc;
 
-    use crate::db::open_in_memory;
-    use crate::db::secrets::SqlxSystemSecretStore;
+    use crate::db::sqlite::open_in_memory;
+    use crate::db::sqlite::secrets::SqlxSystemSecretStore;
     use crate::envelope::AgeCipherDirectory;
     use crate::traits::SystemSecretStore;
 

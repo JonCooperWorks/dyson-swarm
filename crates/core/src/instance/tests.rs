@@ -3,9 +3,9 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 
-use crate::db::instances::SqlxInstanceStore;
-use crate::db::open_in_memory;
-use crate::db::tokens::SqlxTokenStore;
+use crate::db::sqlite::instances::SqlxInstanceStore;
+use crate::db::sqlite::open_in_memory;
+use crate::db::sqlite::tokens::SqlxTokenStore;
 use crate::error::CubeError;
 use crate::traits::{CubeClient, SandboxInfo, SnapshotInfo};
 
@@ -188,11 +188,11 @@ async fn build() -> (
     let cube = MockCube::new();
     let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(
         pool.clone(),
-        crate::db::test_system_cipher(),
+        crate::db::sqlite::test_system_cipher(),
     ));
     let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(
         pool,
-        crate::db::test_system_cipher(),
+        crate::db::sqlite::test_system_cipher(),
     ));
     let svc = InstanceService::new(
         cube.clone(),
@@ -422,7 +422,7 @@ async fn create_returns_url_and_injects_managed_env() {
     );
     let ingest_resolved = tokens.resolve(ingest_token).await.unwrap().unwrap();
     assert_eq!(ingest_resolved.instance_id, created.id);
-    assert_eq!(ingest_resolved.provider, crate::db::tokens::INGEST_PROVIDER);
+    assert_eq!(ingest_resolved.provider, crate::db::INGEST_PROVIDER);
     let state_sync_token = &captured.env[ENV_STATE_SYNC_TOKEN];
     assert!(
         state_sync_token.starts_with("st_"),
@@ -438,7 +438,7 @@ async fn create_returns_url_and_injects_managed_env() {
     let row = instances.get(&created.id).await.unwrap().unwrap();
     assert_eq!(
         state_resolved.provider,
-        crate::db::tokens::state_sync_provider(&row.state_generation)
+        crate::db::state_sync_provider(&row.state_generation)
     );
 
     assert_eq!(row.status, InstanceStatus::Live);
@@ -689,7 +689,7 @@ async fn destroy_revokes_proxy_tokens_and_marks_destroyed() {
     // (we don't expose it on CreatedInstance) so we can assert
     // destroy revokes it alongside the chat token.
     let ingest_token = tokens
-        .lookup_by_instance_for_provider(&created.id, crate::db::tokens::INGEST_PROVIDER)
+        .lookup_by_instance_for_provider(&created.id, crate::db::INGEST_PROVIDER)
         .await
         .unwrap()
         .expect("create must mint an ingest token");
@@ -988,11 +988,11 @@ async fn create_pushes_proxy_base_without_trailing_v1() {
     let cube = MockCube::new();
     let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(
         pool.clone(),
-        crate::db::test_system_cipher(),
+        crate::db::sqlite::test_system_cipher(),
     ));
     let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(
         pool,
-        crate::db::test_system_cipher(),
+        crate::db::sqlite::test_system_cipher(),
     ));
     let svc = InstanceService::new(
         cube.clone(),
@@ -1039,10 +1039,12 @@ async fn reconfigure_payload_sends_legacy_identity_task_as_identity_doc() {
     let cube = MockCube::new();
     let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(
         pool.clone(),
-        crate::db::test_system_cipher(),
+        crate::db::sqlite::test_system_cipher(),
     ));
-    let tokens: Arc<dyn TokenStore> =
-        Arc::new(SqlxTokenStore::new(pool, crate::db::test_system_cipher()));
+    let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(
+        pool,
+        crate::db::sqlite::test_system_cipher(),
+    ));
     let svc = InstanceService::new(cube, instances, tokens, "https://dyson.example.com/llm");
     let identity_doc = "# Identity\nlegacy agent identity";
     let row = InstanceRow {
@@ -1100,11 +1102,11 @@ async fn build_with_recorder() -> (
     let cube = MockCube::new();
     let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(
         pool.clone(),
-        crate::db::test_system_cipher(),
+        crate::db::sqlite::test_system_cipher(),
     ));
     let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(
         pool,
-        crate::db::test_system_cipher(),
+        crate::db::sqlite::test_system_cipher(),
     ));
     let recorder = Arc::new(RecordingReconfigurer::default());
     let svc = InstanceService::new(
@@ -1314,22 +1316,23 @@ async fn create_persists_mcp_specs_and_pushes_proxied_entries() {
     //       upstream URL or its credentials),
     //   (3) ride the configure push as `mcp_servers` so the running
     //       dyson reloads with MCP wired up on the next turn.
-    let pool = crate::db::open_in_memory().await.unwrap();
+    let pool = crate::db::sqlite::open_in_memory().await.unwrap();
     let cube = MockCube::new();
     let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(
         pool.clone(),
-        crate::db::test_system_cipher(),
+        crate::db::sqlite::test_system_cipher(),
     ));
     let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(
         pool.clone(),
-        crate::db::test_system_cipher(),
+        crate::db::sqlite::test_system_cipher(),
     ));
     let recorder = Arc::new(RecordingReconfigurer::default());
     let tmp = tempfile::tempdir().unwrap();
     let dir: Arc<dyn crate::envelope::CipherDirectory> =
         Arc::new(crate::envelope::AgeCipherDirectory::new(tmp.path()).unwrap());
-    let user_store: Arc<dyn crate::traits::UserSecretStore> =
-        Arc::new(crate::db::secrets::SqlxUserSecretStore::new(pool.clone()));
+    let user_store: Arc<dyn crate::traits::UserSecretStore> = Arc::new(
+        crate::db::sqlite::secrets::SqlxUserSecretStore::new(pool.clone()),
+    );
     let user_secrets = Arc::new(UserSecretsService::new(user_store, dir));
     let svc = Arc::new(
         InstanceService::new(cube, instances, tokens, "https://dyson.example.com/llm")
@@ -1979,7 +1982,7 @@ async fn build_with_mcp_secrets() -> (
     Arc<UserSecretsService>,
     String,
 ) {
-    let pool = crate::db::open_in_memory().await.unwrap();
+    let pool = crate::db::sqlite::open_in_memory().await.unwrap();
     let owner = "deadbeef".repeat(4);
     sqlx::query("INSERT INTO users (id, subject, status, created_at) VALUES (?, ?, 'active', ?)")
         .bind(&owner)
@@ -1991,18 +1994,19 @@ async fn build_with_mcp_secrets() -> (
     let cube = MockCube::new();
     let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(
         pool.clone(),
-        crate::db::test_system_cipher(),
+        crate::db::sqlite::test_system_cipher(),
     ));
     let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(
         pool.clone(),
-        crate::db::test_system_cipher(),
+        crate::db::sqlite::test_system_cipher(),
     ));
     let recorder = Arc::new(RecordingReconfigurer::default());
     let tmp = Box::leak(Box::new(tempfile::tempdir().unwrap()));
     let dir: Arc<dyn crate::envelope::CipherDirectory> =
         Arc::new(crate::envelope::AgeCipherDirectory::new(tmp.path()).unwrap());
-    let user_store: Arc<dyn crate::traits::UserSecretStore> =
-        Arc::new(crate::db::secrets::SqlxUserSecretStore::new(pool.clone()));
+    let user_store: Arc<dyn crate::traits::UserSecretStore> = Arc::new(
+        crate::db::sqlite::secrets::SqlxUserSecretStore::new(pool.clone()),
+    );
     let user_secrets = Arc::new(UserSecretsService::new(user_store, dir));
     let svc = Arc::new(
         InstanceService::new(
@@ -2252,18 +2256,18 @@ async fn runtime_config_sync_replays_mirrored_chats_for_configuring_rows() {
     let cube = MockCube::new();
     let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(
         pool.clone(),
-        crate::db::test_system_cipher(),
+        crate::db::sqlite::test_system_cipher(),
     ));
     let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(
         pool.clone(),
-        crate::db::test_system_cipher(),
+        crate::db::sqlite::test_system_cipher(),
     ));
     let recorder = Arc::new(RecordingReconfigurer::default());
     let keys = Box::leak(Box::new(tempfile::tempdir().unwrap()));
     let ciphers: Arc<dyn crate::envelope::CipherDirectory> =
         Arc::new(crate::envelope::AgeCipherDirectory::new(keys.path()).unwrap());
     let state_files = Arc::new(crate::state_files::StateFileService::new(
-        crate::db::state_file_store(pool.clone()),
+        crate::db::sqlite::state_file_store(pool.clone()),
         ciphers,
     ));
     let svc = Arc::new(
@@ -2615,7 +2619,7 @@ async fn recreate_in_place_reprojects_mcp_from_canonical_runtime_config() {
 // rotation tests don't exercise any S3 path.
 
 use crate::backup::local::LocalDiskBackupSink;
-use crate::db::snapshots::SqliteSnapshotStore;
+use crate::db::sqlite::snapshots::SqliteSnapshotStore;
 use crate::snapshot::SnapshotService;
 use crate::traits::{BackupSink, SnapshotStore, UserRow, UserStatus, UserStore};
 
@@ -2637,11 +2641,11 @@ async fn build_with_snapshot() -> (
     let cube = MockCube::new();
     let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(
         pool.clone(),
-        crate::db::test_system_cipher(),
+        crate::db::sqlite::test_system_cipher(),
     ));
     let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(
         pool.clone(),
-        crate::db::test_system_cipher(),
+        crate::db::sqlite::test_system_cipher(),
     ));
     let snaps: Arc<dyn SnapshotStore> = Arc::new(SqliteSnapshotStore::new(pool.clone()));
     let recorder = Arc::new(RecordingReconfigurer::default());
@@ -2652,7 +2656,7 @@ async fn build_with_snapshot() -> (
     // CipherDirectory's filesystem reads happen lazily as users
     // are minted, so dropping the dir mid-test would fail those).
     std::mem::forget(keys_tmp);
-    let users: Arc<dyn UserStore> = Arc::new(crate::db::users::SqlxUserStore::new(
+    let users: Arc<dyn UserStore> = Arc::new(crate::db::sqlite::users::SqlxUserStore::new(
         pool.clone(),
         cipher_dir,
     ));
@@ -2735,11 +2739,11 @@ async fn build_with_snapshot_and_policy(
     let cube = MockCube::new();
     let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(
         pool.clone(),
-        crate::db::test_system_cipher(),
+        crate::db::sqlite::test_system_cipher(),
     ));
     let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(
         pool.clone(),
-        crate::db::test_system_cipher(),
+        crate::db::sqlite::test_system_cipher(),
     ));
     let snaps: Arc<dyn SnapshotStore> = Arc::new(SqliteSnapshotStore::new(pool.clone()));
     let recorder = Arc::new(RecordingReconfigurer::default());
@@ -2747,7 +2751,7 @@ async fn build_with_snapshot_and_policy(
     let cipher_dir: Arc<dyn crate::envelope::CipherDirectory> =
         Arc::new(crate::envelope::AgeCipherDirectory::new(keys_tmp.path()).unwrap());
     std::mem::forget(keys_tmp);
-    let users: Arc<dyn UserStore> = Arc::new(crate::db::users::SqlxUserStore::new(
+    let users: Arc<dyn UserStore> = Arc::new(crate::db::sqlite::users::SqlxUserStore::new(
         pool.clone(),
         cipher_dir,
     ));
@@ -3772,22 +3776,23 @@ async fn restore_snapshot_in_place_uses_snapshot_base_and_replays_mirror_when_st
     let cube = MockCube::new();
     let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(
         pool.clone(),
-        crate::db::test_system_cipher(),
+        crate::db::sqlite::test_system_cipher(),
     ));
     let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(
         pool.clone(),
-        crate::db::test_system_cipher(),
+        crate::db::sqlite::test_system_cipher(),
     ));
     let recorder = Arc::new(RecordingReconfigurer::default());
     let keys = Box::leak(Box::new(tempfile::tempdir().unwrap()));
     let ciphers: Arc<dyn crate::envelope::CipherDirectory> =
         Arc::new(crate::envelope::AgeCipherDirectory::new(keys.path()).unwrap());
     let state_files = Arc::new(crate::state_files::StateFileService::new(
-        crate::db::state_file_store(pool.clone()),
+        crate::db::sqlite::state_file_store(pool.clone()),
         ciphers.clone(),
     ));
-    let user_secrets_store: Arc<dyn crate::traits::UserSecretStore> =
-        Arc::new(crate::db::secrets::SqlxUserSecretStore::new(pool.clone()));
+    let user_secrets_store: Arc<dyn crate::traits::UserSecretStore> = Arc::new(
+        crate::db::sqlite::secrets::SqlxUserSecretStore::new(pool.clone()),
+    );
     let user_secrets = Arc::new(UserSecretsService::new(user_secrets_store, ciphers));
     let isvc = Arc::new(
         InstanceService::new(
@@ -3947,18 +3952,18 @@ async fn restore_snapshot_in_place_uses_snapshot_when_mirror_has_no_replayable_b
     let cube = MockCube::new();
     let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(
         pool.clone(),
-        crate::db::test_system_cipher(),
+        crate::db::sqlite::test_system_cipher(),
     ));
     let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(
         pool.clone(),
-        crate::db::test_system_cipher(),
+        crate::db::sqlite::test_system_cipher(),
     ));
     let recorder = Arc::new(RecordingReconfigurer::default());
     let keys = Box::leak(Box::new(tempfile::tempdir().unwrap()));
     let ciphers: Arc<dyn crate::envelope::CipherDirectory> =
         Arc::new(crate::envelope::AgeCipherDirectory::new(keys.path()).unwrap());
     let state_files = Arc::new(crate::state_files::StateFileService::new(
-        crate::db::state_file_store(pool.clone()),
+        crate::db::sqlite::state_file_store(pool.clone()),
         ciphers,
     ));
     let isvc = Arc::new(
@@ -4133,19 +4138,20 @@ async fn build_with_snapshot_and_mcp() -> (
     let cube = MockCube::new();
     let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(
         pool.clone(),
-        crate::db::test_system_cipher(),
+        crate::db::sqlite::test_system_cipher(),
     ));
     let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(
         pool.clone(),
-        crate::db::test_system_cipher(),
+        crate::db::sqlite::test_system_cipher(),
     ));
     let snaps: Arc<dyn SnapshotStore> = Arc::new(SqliteSnapshotStore::new(pool.clone()));
     let recorder = Arc::new(RecordingReconfigurer::default());
     let tmp = Box::leak(Box::new(tempfile::tempdir().unwrap()));
     let cipher_dir: Arc<dyn crate::envelope::CipherDirectory> =
         Arc::new(crate::envelope::AgeCipherDirectory::new(tmp.path()).unwrap());
-    let user_secrets_store: Arc<dyn crate::traits::UserSecretStore> =
-        Arc::new(crate::db::secrets::SqlxUserSecretStore::new(pool.clone()));
+    let user_secrets_store: Arc<dyn crate::traits::UserSecretStore> = Arc::new(
+        crate::db::sqlite::secrets::SqlxUserSecretStore::new(pool.clone()),
+    );
     let user_secrets = Arc::new(UserSecretsService::new(user_secrets_store, cipher_dir));
     let isvc = Arc::new(
         InstanceService::new(
@@ -4503,21 +4509,22 @@ async fn reset_replays_sealed_state_before_enabling_sync() {
     let cube = MockCube::new();
     let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(
         pool.clone(),
-        crate::db::test_system_cipher(),
+        crate::db::sqlite::test_system_cipher(),
     ));
     let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(
         pool.clone(),
-        crate::db::test_system_cipher(),
+        crate::db::sqlite::test_system_cipher(),
     ));
     let recorder = Arc::new(RecordingReconfigurer::default());
     let keys = Box::leak(Box::new(tempfile::tempdir().unwrap()));
     let ciphers: Arc<dyn crate::envelope::CipherDirectory> =
         Arc::new(crate::envelope::AgeCipherDirectory::new(keys.path()).unwrap());
-    let user_secrets_store: Arc<dyn crate::traits::UserSecretStore> =
-        Arc::new(crate::db::secrets::SqlxUserSecretStore::new(pool.clone()));
+    let user_secrets_store: Arc<dyn crate::traits::UserSecretStore> = Arc::new(
+        crate::db::sqlite::secrets::SqlxUserSecretStore::new(pool.clone()),
+    );
     let user_secrets = Arc::new(UserSecretsService::new(user_secrets_store, ciphers.clone()));
     let state_files = crate::state_files::StateFileService::new(
-        crate::db::state_file_store(pool.clone()),
+        crate::db::sqlite::state_file_store(pool.clone()),
         ciphers,
     );
     let isvc = Arc::new(
@@ -4621,9 +4628,9 @@ async fn reset_replays_sealed_state_before_enabling_sync() {
         )
         .await
         .unwrap();
-    crate::db::state_files::upsert(
+    crate::db::sqlite::state_files::upsert(
         &pool,
-        crate::db::state_files::UpsertSpec {
+        crate::db::sqlite::state_files::UpsertSpec {
             instance_id: &src.id,
             owner_id: &owner,
             namespace: "chats",
@@ -4737,11 +4744,11 @@ async fn runtime_config_sync_does_not_replay_state_into_live_sandbox() {
     let cube = MockCube::new();
     let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(
         pool.clone(),
-        crate::db::test_system_cipher(),
+        crate::db::sqlite::test_system_cipher(),
     ));
     let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(
         pool.clone(),
-        crate::db::test_system_cipher(),
+        crate::db::sqlite::test_system_cipher(),
     ));
     let recorder = Arc::new(RecordingReconfigurer::default());
     let keys = Box::leak(Box::new(tempfile::tempdir().unwrap()));
@@ -4749,11 +4756,12 @@ async fn runtime_config_sync_does_not_replay_state_into_live_sandbox() {
         Arc::new(crate::envelope::AgeCipherDirectory::new(keys.path()).unwrap());
     let ciphers_for_zero = ciphers.clone();
     let state_files = Arc::new(crate::state_files::StateFileService::new(
-        crate::db::state_file_store(pool.clone()),
+        crate::db::sqlite::state_file_store(pool.clone()),
         ciphers.clone(),
     ));
-    let user_secrets_store: Arc<dyn crate::traits::UserSecretStore> =
-        Arc::new(crate::db::secrets::SqlxUserSecretStore::new(pool.clone()));
+    let user_secrets_store: Arc<dyn crate::traits::UserSecretStore> = Arc::new(
+        crate::db::sqlite::secrets::SqlxUserSecretStore::new(pool.clone()),
+    );
     let user_secrets = Arc::new(UserSecretsService::new(user_secrets_store, ciphers));
     let isvc = Arc::new(
         InstanceService::new(
@@ -4820,9 +4828,9 @@ async fn runtime_config_sync_does_not_replay_state_into_live_sandbox() {
         .unwrap()
         .seal(b"")
         .unwrap();
-    crate::db::state_files::upsert(
+    crate::db::sqlite::state_files::upsert(
         &pool,
-        crate::db::state_files::UpsertSpec {
+        crate::db::sqlite::state_files::UpsertSpec {
             instance_id: &src.id,
             owner_id: &owner,
             namespace: "chats",
@@ -4842,9 +4850,9 @@ async fn runtime_config_sync_does_not_replay_state_into_live_sandbox() {
         .unwrap()
         .seal(br#"{"agent":{"model":"stale-vm-cache"}}"#)
         .unwrap();
-    crate::db::state_files::upsert(
+    crate::db::sqlite::state_files::upsert(
         &pool,
-        crate::db::state_files::UpsertSpec {
+        crate::db::sqlite::state_files::UpsertSpec {
             instance_id: &src.id,
             owner_id: &owner,
             namespace: "workspace",
@@ -4903,18 +4911,18 @@ async fn runtime_config_sync_keeps_row_identity_when_mirrored_identity_has_no_bo
     let cube = MockCube::new();
     let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(
         pool.clone(),
-        crate::db::test_system_cipher(),
+        crate::db::sqlite::test_system_cipher(),
     ));
     let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(
         pool.clone(),
-        crate::db::test_system_cipher(),
+        crate::db::sqlite::test_system_cipher(),
     ));
     let recorder = Arc::new(RecordingReconfigurer::default());
     let keys = Box::leak(Box::new(tempfile::tempdir().unwrap()));
     let ciphers: Arc<dyn crate::envelope::CipherDirectory> =
         Arc::new(crate::envelope::AgeCipherDirectory::new(keys.path()).unwrap());
     let state_files = Arc::new(crate::state_files::StateFileService::new(
-        crate::db::state_file_store(pool.clone()),
+        crate::db::sqlite::state_file_store(pool.clone()),
         ciphers,
     ));
     let isvc = Arc::new(
@@ -4977,11 +4985,11 @@ async fn binary_rotation_replays_sealed_chats_before_enabling_sync() {
     let cube = MockCube::new();
     let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(
         pool.clone(),
-        crate::db::test_system_cipher(),
+        crate::db::sqlite::test_system_cipher(),
     ));
     let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(
         pool.clone(),
-        crate::db::test_system_cipher(),
+        crate::db::sqlite::test_system_cipher(),
     ));
     let snaps: Arc<dyn SnapshotStore> = Arc::new(SqliteSnapshotStore::new(pool.clone()));
     let recorder = Arc::new(RecordingReconfigurer::default());
@@ -4989,11 +4997,12 @@ async fn binary_rotation_replays_sealed_chats_before_enabling_sync() {
     let ciphers: Arc<dyn crate::envelope::CipherDirectory> =
         Arc::new(crate::envelope::AgeCipherDirectory::new(keys.path()).unwrap());
     let state_files = Arc::new(crate::state_files::StateFileService::new(
-        crate::db::state_file_store(pool.clone()),
+        crate::db::sqlite::state_file_store(pool.clone()),
         ciphers.clone(),
     ));
-    let user_secrets_store: Arc<dyn crate::traits::UserSecretStore> =
-        Arc::new(crate::db::secrets::SqlxUserSecretStore::new(pool.clone()));
+    let user_secrets_store: Arc<dyn crate::traits::UserSecretStore> = Arc::new(
+        crate::db::sqlite::secrets::SqlxUserSecretStore::new(pool.clone()),
+    );
     let user_secrets = Arc::new(UserSecretsService::new(user_secrets_store, ciphers));
     let isvc = Arc::new(
         InstanceService::new(
@@ -5213,11 +5222,11 @@ async fn binary_rotation_uses_snapshot_base_when_mirror_rows_exist() {
     let cube = MockCube::new();
     let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(
         pool.clone(),
-        crate::db::test_system_cipher(),
+        crate::db::sqlite::test_system_cipher(),
     ));
     let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(
         pool.clone(),
-        crate::db::test_system_cipher(),
+        crate::db::sqlite::test_system_cipher(),
     ));
     let snaps: Arc<dyn SnapshotStore> = Arc::new(SqliteSnapshotStore::new(pool.clone()));
     let recorder = Arc::new(RecordingReconfigurer::default());
@@ -5225,7 +5234,7 @@ async fn binary_rotation_uses_snapshot_base_when_mirror_rows_exist() {
     let ciphers: Arc<dyn crate::envelope::CipherDirectory> =
         Arc::new(crate::envelope::AgeCipherDirectory::new(keys.path()).unwrap());
     let state_files = Arc::new(crate::state_files::StateFileService::new(
-        crate::db::state_file_store(pool.clone()),
+        crate::db::sqlite::state_file_store(pool.clone()),
         ciphers,
     ));
     let isvc = Arc::new(
@@ -5280,9 +5289,9 @@ async fn binary_rotation_uses_snapshot_base_when_mirror_rows_exist() {
         )
         .await
         .unwrap();
-    crate::db::state_files::upsert(
+    crate::db::sqlite::state_files::upsert(
         &pool,
-        crate::db::state_files::UpsertSpec {
+        crate::db::sqlite::state_files::UpsertSpec {
             instance_id: &src.id,
             owner_id: &owner,
             namespace: "chats",

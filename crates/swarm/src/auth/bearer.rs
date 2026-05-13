@@ -85,8 +85,8 @@ mod tests {
     use super::*;
     use axum::http::HeaderValue;
 
-    use crate::db::open_in_memory;
-    use crate::db::users::SqlxUserStore;
+    use crate::db::sqlite::open_in_memory;
+    use crate::db::sqlite::users::SqlxUserStore;
     use crate::envelope::{AgeCipherDirectory, CipherDirectory};
     use crate::traits::{UserRow, UserStatus};
 

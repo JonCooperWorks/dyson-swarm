@@ -8,8 +8,8 @@
 use async_trait::async_trait;
 use sqlx::{Row, SqlitePool};
 
-use crate::db::map_sqlx;
-use crate::db::tokens::token_lookup_key;
+use crate::db::sqlite::map_sqlx;
+use crate::db::token_lookup_key;
 use crate::db::{RuntimeMigrationReport as MigrationReport, RuntimeMigrator};
 use crate::envelope::EnvelopeCipher;
 use crate::error::StoreError;
@@ -292,9 +292,9 @@ fn open_text(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::instances::SqlxInstanceStore;
-    use crate::db::open_in_memory;
-    use crate::db::tokens::SqlxTokenStore;
+    use crate::db::sqlite::instances::SqlxInstanceStore;
+    use crate::db::sqlite::open_in_memory;
+    use crate::db::sqlite::tokens::SqlxTokenStore;
     use crate::envelope::{AgeCipherDirectory, CipherDirectory};
     use crate::traits::{InstanceRow, InstanceStatus, InstanceStore, TokenStore};
     use std::sync::Arc;

@@ -34,7 +34,7 @@ use dyson_swarm::{
     config::{ProviderConfig, Providers},
     cube_client::HttpCubeClient,
     db,
-    db::{instances::SqlxInstanceStore, tokens::SqlxTokenStore},
+    db::sqlite::{instances::SqlxInstanceStore, tokens::SqlxTokenStore},
     envelope::{AgeCipherDirectory, CipherDirectory},
     http,
     instance::InstanceService,
@@ -177,7 +177,7 @@ async fn full_walkthrough() {
 
     // 2. Swarm assembly. In-memory DB, real HttpCubeClient pointing at the
     // mock Cube, local backup sink (sufficient for the e2e — no S3 leg).
-    let pool = db::open_in_memory().await.unwrap();
+    let pool = db::sqlite::open_in_memory().await.unwrap();
     let cube_cfg = dyson_swarm::config::CubeConfig {
         url: cube_url.clone(),
         api_key: "k".into(),
@@ -193,11 +193,10 @@ async fn full_walkthrough() {
     let tokens_store: Arc<dyn TokenStore> =
         Arc::new(SqlxTokenStore::new(pool.clone(), system_cipher));
     let user_secrets_store: Arc<dyn UserSecretStore> = Arc::new(
-        dyson_swarm::db::secrets::SqlxUserSecretStore::new(pool.clone()),
+        dyson_swarm::db::sqlite::secrets::SqlxUserSecretStore::new(pool.clone()),
     );
-    let system_secrets_store: Arc<dyn SystemSecretStore> = Arc::new(
-        dyson_swarm::db::secrets::SqlxSystemSecretStore::new(pool.clone()),
-    );
+    let system_secrets_store: Arc<dyn SystemSecretStore> =
+        Arc::new(dyson_swarm::db::sqlite::secrets::SqlxSystemSecretStore::new(pool.clone()));
     let user_secrets_svc = Arc::new(UserSecretsService::new(
         user_secrets_store,
         cipher_dir.clone(),
@@ -213,9 +212,10 @@ async fn full_walkthrough() {
         "http://swarm.test/llm",
     ));
     let backup: Arc<dyn BackupSink> = Arc::new(LocalDiskBackupSink::new(cube.clone()));
-    let snapshots_store: Arc<dyn SnapshotStore> = dyson_swarm::db::snapshot_store(pool.clone());
-    let policies_store: Arc<dyn PolicyStore> = dyson_swarm::db::policy_store(pool.clone());
-    let audit_store: Arc<dyn AuditStore> = dyson_swarm::db::audit_store(pool.clone());
+    let snapshots_store: Arc<dyn SnapshotStore> =
+        dyson_swarm::db::sqlite::snapshot_store(pool.clone());
+    let policies_store: Arc<dyn PolicyStore> = dyson_swarm::db::sqlite::policy_store(pool.clone());
+    let audit_store: Arc<dyn AuditStore> = dyson_swarm::db::sqlite::audit_store(pool.clone());
     let snapshot_svc = Arc::new(SnapshotService::new(
         cube.clone(),
         instances_store.clone(),
@@ -258,7 +258,7 @@ async fn full_walkthrough() {
 
     let prober: Arc<dyn HealthProber> = Arc::new(StubProber);
     let users_store: Arc<dyn dyson_swarm::traits::UserStore> = Arc::new(
-        dyson_swarm::db::users::SqlxUserStore::new(pool.clone(), cipher_dir.clone()),
+        dyson_swarm::db::sqlite::users::SqlxUserStore::new(pool.clone(), cipher_dir.clone()),
     );
     let (user_auth, user_id) =
         dyson_swarm::auth::user::fixed_user_auth(users_store.clone(), "alice").await;
@@ -271,10 +271,10 @@ async fn full_walkthrough() {
         .await
         .expect("seed byok_openai for e2e");
     let webhook_store: Arc<dyn dyson_swarm::traits::WebhookStore> = Arc::new(
-        dyson_swarm::db::webhooks::SqlxWebhookStore::new(pool.clone()),
+        dyson_swarm::db::sqlite::webhooks::SqlxWebhookStore::new(pool.clone()),
     );
     let delivery_store: Arc<dyn dyson_swarm::traits::DeliveryStore> = Arc::new(
-        dyson_swarm::db::webhooks::SqlxDeliveryStore::new(pool.clone()),
+        dyson_swarm::db::sqlite::webhooks::SqlxDeliveryStore::new(pool.clone()),
     );
     let webhooks_svc = Arc::new(dyson_swarm::webhooks::WebhookService::new(
         webhook_store,
@@ -285,11 +285,11 @@ async fn full_walkthrough() {
         cipher_dir.clone(),
     ));
     let artefact_cache = Arc::new(dyson_swarm::artefacts::ArtefactCacheService::new(
-        dyson_swarm::db::artefact_cache_store(pool.clone()),
+        dyson_swarm::db::sqlite::artefact_cache_store(pool.clone()),
         cipher_dir.clone(),
     ));
     let shares_svc = Arc::new(dyson_swarm::shares::ShareService::new(
-        dyson_swarm::db::share_store(pool.clone()),
+        dyson_swarm::db::sqlite::share_store(pool.clone()),
         user_secrets_svc.clone(),
         instance_svc.clone(),
         artefact_cache.clone(),
@@ -297,7 +297,7 @@ async fn full_walkthrough() {
         None,
     ));
     let state_files = Arc::new(dyson_swarm::state_files::StateFileService::new(
-        dyson_swarm::db::state_file_store(pool.clone()),
+        dyson_swarm::db::sqlite::state_file_store(pool.clone()),
         cipher_dir.clone(),
     ));
     let app_state = http::AppState {
@@ -309,8 +309,8 @@ async fn full_walkthrough() {
         prober,
         tokens: tokens_store.clone(),
         users: users_store,
-        sessions: dyson_swarm::db::session_store(pool.clone()),
-        admin_audit: dyson_swarm::db::admin_audit_store(pool.clone()),
+        sessions: dyson_swarm::db::sqlite::session_store(pool.clone()),
+        admin_audit: dyson_swarm::db::sqlite::admin_audit_store(pool.clone()),
         sandbox_domain: "cube.test".into(),
         hostname: None,
         auth_config: std::sync::Arc::new(http::auth_config::AuthConfig::none()),

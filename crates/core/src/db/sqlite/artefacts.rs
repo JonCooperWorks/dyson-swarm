@@ -10,7 +10,7 @@
 use async_trait::async_trait;
 use sqlx::{Row, SqlitePool};
 
-use crate::db::map_sqlx;
+use crate::db::sqlite::map_sqlx;
 use crate::error::StoreError;
 use crate::now_secs;
 use crate::traits::ArtefactCacheStore;
@@ -314,7 +314,7 @@ fn row_to_cached(r: sqlx::sqlite::SqliteRow) -> Result<CachedArtefact, StoreErro
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::open_in_memory;
+    use crate::db::sqlite::open_in_memory;
 
     fn spec<'a>(instance: &'a str, owner: &'a str, chat: &'a str, art: &'a str) -> UpsertSpec<'a> {
         UpsertSpec {

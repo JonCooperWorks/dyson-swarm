@@ -1032,7 +1032,7 @@ mod tests {
 
     #[tokio::test]
     async fn put_stores_verifier_key_in_user_secrets() {
-        let pool = crate::db::open_in_memory().await.unwrap();
+        let pool = crate::db::sqlite::open_in_memory().await.unwrap();
         let owner = "00000000000000a100000000000000a1";
         sqlx::query(
             "INSERT INTO users (id, subject, email, display_name, status, created_at, activated_at) \
@@ -1047,13 +1047,14 @@ mod tests {
         let cipher_dir: Arc<dyn crate::envelope::CipherDirectory> =
             Arc::new(crate::envelope::AgeCipherDirectory::new(keys_tmp.path()).unwrap());
         let system_cipher = cipher_dir.system().unwrap();
-        let instances_store: Arc<dyn InstanceStore> = Arc::new(
-            crate::db::instances::SqlxInstanceStore::new(pool.clone(), system_cipher.clone()),
+        let instances_store: Arc<dyn InstanceStore> =
+            Arc::new(crate::db::sqlite::instances::SqlxInstanceStore::new(
+                pool.clone(),
+                system_cipher.clone(),
+            ));
+        let token_store: Arc<dyn TokenStore> = Arc::new(
+            crate::db::sqlite::tokens::SqlxTokenStore::new(pool.clone(), system_cipher),
         );
-        let token_store: Arc<dyn TokenStore> = Arc::new(crate::db::tokens::SqlxTokenStore::new(
-            pool.clone(),
-            system_cipher,
-        ));
         instances_store
             .create(InstanceRow {
                 id: "i1".into(),
@@ -1087,12 +1088,18 @@ mod tests {
             "http://swarm.test/llm",
         ));
         let user_secrets = Arc::new(UserSecretsService::new(
-            Arc::new(crate::db::secrets::SqlxUserSecretStore::new(pool.clone())),
+            Arc::new(crate::db::sqlite::secrets::SqlxUserSecretStore::new(
+                pool.clone(),
+            )),
             cipher_dir.clone(),
         ));
         let svc = WebhookService::new(
-            Arc::new(crate::db::webhooks::SqlxWebhookStore::new(pool.clone())),
-            Arc::new(crate::db::webhooks::SqlxDeliveryStore::new(pool.clone())),
+            Arc::new(crate::db::sqlite::webhooks::SqlxWebhookStore::new(
+                pool.clone(),
+            )),
+            Arc::new(crate::db::sqlite::webhooks::SqlxDeliveryStore::new(
+                pool.clone(),
+            )),
             user_secrets.clone(),
             instance_svc,
             Arc::new(NullWebhookDispatcher),
@@ -1126,7 +1133,7 @@ mod tests {
 
     #[tokio::test]
     async fn hmac_verify_uses_configured_signature_header() {
-        let pool = crate::db::open_in_memory().await.unwrap();
+        let pool = crate::db::sqlite::open_in_memory().await.unwrap();
         let owner = "00000000000000a100000000000000a1";
         sqlx::query(
             "INSERT INTO users (id, subject, email, display_name, status, created_at, activated_at) \
@@ -1141,13 +1148,14 @@ mod tests {
         let cipher_dir: Arc<dyn crate::envelope::CipherDirectory> =
             Arc::new(crate::envelope::AgeCipherDirectory::new(keys_tmp.path()).unwrap());
         let system_cipher = cipher_dir.system().unwrap();
-        let instances_store: Arc<dyn InstanceStore> = Arc::new(
-            crate::db::instances::SqlxInstanceStore::new(pool.clone(), system_cipher.clone()),
+        let instances_store: Arc<dyn InstanceStore> =
+            Arc::new(crate::db::sqlite::instances::SqlxInstanceStore::new(
+                pool.clone(),
+                system_cipher.clone(),
+            ));
+        let token_store: Arc<dyn TokenStore> = Arc::new(
+            crate::db::sqlite::tokens::SqlxTokenStore::new(pool.clone(), system_cipher),
         );
-        let token_store: Arc<dyn TokenStore> = Arc::new(crate::db::tokens::SqlxTokenStore::new(
-            pool.clone(),
-            system_cipher,
-        ));
         instances_store
             .create(InstanceRow {
                 id: "i1".into(),
@@ -1181,12 +1189,18 @@ mod tests {
             "http://swarm.test/llm",
         ));
         let user_secrets = Arc::new(UserSecretsService::new(
-            Arc::new(crate::db::secrets::SqlxUserSecretStore::new(pool.clone())),
+            Arc::new(crate::db::sqlite::secrets::SqlxUserSecretStore::new(
+                pool.clone(),
+            )),
             cipher_dir.clone(),
         ));
         let svc = WebhookService::new(
-            Arc::new(crate::db::webhooks::SqlxWebhookStore::new(pool.clone())),
-            Arc::new(crate::db::webhooks::SqlxDeliveryStore::new(pool.clone())),
+            Arc::new(crate::db::sqlite::webhooks::SqlxWebhookStore::new(
+                pool.clone(),
+            )),
+            Arc::new(crate::db::sqlite::webhooks::SqlxDeliveryStore::new(
+                pool.clone(),
+            )),
             user_secrets,
             instance_svc,
             Arc::new(NullWebhookDispatcher),

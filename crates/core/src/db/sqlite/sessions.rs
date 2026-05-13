@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use sqlx::{Row, SqlitePool};
 
-use crate::db::map_sqlx;
+use crate::db::sqlite::map_sqlx;
 use crate::error::StoreError;
 use crate::traits::{SessionRow, SessionStore};
 
@@ -82,7 +82,7 @@ impl SessionStore for SqliteSessionStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::open_in_memory;
+    use crate::db::sqlite::open_in_memory;
 
     #[tokio::test]
     async fn revoked_session_is_not_active() {

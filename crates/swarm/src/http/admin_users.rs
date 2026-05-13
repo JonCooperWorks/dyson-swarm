@@ -433,9 +433,9 @@ mod tests {
     use std::sync::Arc;
 
     use crate::backup::local::LocalDiskBackupSink;
-    use crate::db::instances::SqlxInstanceStore;
-    use crate::db::open_in_memory;
-    use crate::db::tokens::SqlxTokenStore;
+    use crate::db::sqlite::instances::SqlxInstanceStore;
+    use crate::db::sqlite::open_in_memory;
+    use crate::db::sqlite::tokens::SqlxTokenStore;
     use crate::openrouter::{MintedKey, OpenRouterError, Provisioning, UserOrKeyResolver};
     use crate::traits::{
         BackupSink, CreateSandboxArgs, CubeClient, HealthProber, InstanceRow, InstanceStore,
@@ -538,10 +538,12 @@ mod tests {
         let system_cipher = cipher_dir.system().unwrap();
         let instances_store: Arc<dyn InstanceStore> =
             Arc::new(SqlxInstanceStore::new(pool.clone(), system_cipher.clone()));
-        let user_secrets_store: Arc<dyn crate::traits::UserSecretStore> =
-            Arc::new(crate::db::secrets::SqlxUserSecretStore::new(pool.clone()));
-        let system_secrets_store: Arc<dyn crate::traits::SystemSecretStore> =
-            Arc::new(crate::db::secrets::SqlxSystemSecretStore::new(pool.clone()));
+        let user_secrets_store: Arc<dyn crate::traits::UserSecretStore> = Arc::new(
+            crate::db::sqlite::secrets::SqlxUserSecretStore::new(pool.clone()),
+        );
+        let system_secrets_store: Arc<dyn crate::traits::SystemSecretStore> = Arc::new(
+            crate::db::sqlite::secrets::SqlxSystemSecretStore::new(pool.clone()),
+        );
         let user_secrets = Arc::new(crate::secrets::UserSecretsService::new(
             user_secrets_store,
             cipher_dir.clone(),
@@ -553,10 +555,9 @@ mod tests {
         let cube: Arc<dyn CubeClient> = Arc::new(StubCube);
         let tokens_store: Arc<dyn TokenStore> =
             Arc::new(SqlxTokenStore::new(pool.clone(), system_cipher));
-        let users_store: Arc<dyn UserStore> = Arc::new(crate::db::users::SqlxUserStore::new(
-            pool.clone(),
-            cipher_dir.clone(),
-        ));
+        let users_store: Arc<dyn UserStore> = Arc::new(
+            crate::db::sqlite::users::SqlxUserStore::new(pool.clone(), cipher_dir.clone()),
+        );
         let instance_svc = Arc::new(crate::instance::InstanceService::new(
             cube.clone(),
             instances_store.clone(),
@@ -564,7 +565,8 @@ mod tests {
             "http://test/llm",
         ));
         let backup: Arc<dyn BackupSink> = Arc::new(LocalDiskBackupSink::new(cube.clone()));
-        let snapshots_store: Arc<dyn SnapshotStore> = crate::db::snapshot_store(pool.clone());
+        let snapshots_store: Arc<dyn SnapshotStore> =
+            crate::db::sqlite::snapshot_store(pool.clone());
         let snapshot_svc = Arc::new(crate::snapshot::SnapshotService::new(
             cube,
             instances_store,
@@ -572,10 +574,12 @@ mod tests {
             backup,
             instance_svc.clone(),
         ));
-        let webhook_store: Arc<dyn crate::traits::WebhookStore> =
-            Arc::new(crate::db::webhooks::SqlxWebhookStore::new(pool.clone()));
-        let delivery_store: Arc<dyn crate::traits::DeliveryStore> =
-            Arc::new(crate::db::webhooks::SqlxDeliveryStore::new(pool.clone()));
+        let webhook_store: Arc<dyn crate::traits::WebhookStore> = Arc::new(
+            crate::db::sqlite::webhooks::SqlxWebhookStore::new(pool.clone()),
+        );
+        let delivery_store: Arc<dyn crate::traits::DeliveryStore> = Arc::new(
+            crate::db::sqlite::webhooks::SqlxDeliveryStore::new(pool.clone()),
+        );
         let webhooks_svc = Arc::new(crate::webhooks::WebhookService::new(
             webhook_store,
             delivery_store,
@@ -585,11 +589,11 @@ mod tests {
             cipher_dir.clone(),
         ));
         let artefact_cache = Arc::new(crate::artefacts::ArtefactCacheService::new(
-            crate::db::artefact_cache_store(pool.clone()),
+            crate::db::sqlite::artefact_cache_store(pool.clone()),
             cipher_dir.clone(),
         ));
         let shares_svc = Arc::new(crate::shares::ShareService::new(
-            crate::db::share_store(pool.clone()),
+            crate::db::sqlite::share_store(pool.clone()),
             user_secrets.clone(),
             instance_svc.clone(),
             artefact_cache.clone(),
@@ -597,7 +601,7 @@ mod tests {
             None,
         ));
         let state_files = Arc::new(crate::state_files::StateFileService::new(
-            crate::db::state_file_store(pool.clone()),
+            crate::db::sqlite::state_file_store(pool.clone()),
             cipher_dir.clone(),
         ));
         let provisioning: Arc<dyn Provisioning> = Arc::new(StubProvisioning);
@@ -615,8 +619,8 @@ mod tests {
             prober: Arc::new(StubProber),
             tokens: tokens_store,
             users: users_store.clone(),
-            sessions: crate::db::session_store(pool.clone()),
-            admin_audit: crate::db::admin_audit_store(pool.clone()),
+            sessions: crate::db::sqlite::session_store(pool.clone()),
+            admin_audit: crate::db::sqlite::admin_audit_store(pool.clone()),
             sandbox_domain: "cube.test".into(),
             hostname: None,
             auth_config: Arc::new(crate::http::auth_config::AuthConfig::none()),

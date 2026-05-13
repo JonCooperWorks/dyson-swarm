@@ -1,11 +1,11 @@
 use async_trait::async_trait;
-use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row};
 use std::sync::Arc;
 use subtle::ConstantTimeEq;
 use uuid::Uuid;
 
 use crate::db::pg::map_sqlx;
+use crate::db::{INGEST_PROVIDER, state_sync_provider, token_lookup_key};
 use crate::envelope::EnvelopeCipher;
 use crate::error::StoreError;
 use crate::now_secs;
@@ -39,35 +39,6 @@ impl PgTokenStore {
         String::from_utf8(plain)
             .map_err(|_| StoreError::Malformed("proxy token plaintext was not utf-8".into()))
     }
-}
-
-pub(crate) fn token_lookup_key(token: &str) -> String {
-    hex::encode(Sha256::digest(token.as_bytes()))
-}
-
-/// Provider string stamped on rows minted via `TokenStore::mint_ingest`.
-/// The internal-ingest route filters resolved tokens by prefix (`it_`),
-/// so the provider field is largely a documentation-and-grep handle for
-/// operators inspecting the table directly.
-pub const INGEST_PROVIDER: &str = "ingest";
-
-/// Base provider namespace for state-sync tokens. Concrete tokens are
-/// always scoped as `state_sync:<generation>` so only the current
-/// sandbox generation can write durable swarm state.
-pub const STATE_SYNC_PROVIDER: &str = "state_sync";
-
-pub fn state_sync_provider(generation: &str) -> String {
-    let generation = generation.trim();
-    debug_assert!(!generation.is_empty(), "state generation is required");
-    format!("{STATE_SYNC_PROVIDER}:{generation}")
-}
-
-pub fn state_sync_provider_matches(provider: &str, generation: &str) -> bool {
-    let generation = generation.trim();
-    if generation.is_empty() {
-        return false;
-    }
-    provider == state_sync_provider(generation)
 }
 
 impl PgTokenStore {

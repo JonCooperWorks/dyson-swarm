@@ -68,9 +68,9 @@ mod tests {
 
     use async_trait::async_trait;
 
-    use crate::db::instances::SqlxInstanceStore;
-    use crate::db::open_in_memory;
-    use crate::db::tokens::SqlxTokenStore;
+    use crate::db::sqlite::instances::SqlxInstanceStore;
+    use crate::db::sqlite::open_in_memory;
+    use crate::db::sqlite::tokens::SqlxTokenStore;
     use crate::error::CubeError;
     use crate::instance::{CreateRequest, ENV_MODEL};
     use crate::traits::{
@@ -120,11 +120,11 @@ mod tests {
         let cube = Arc::new(MockCube::default());
         let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(
             pool.clone(),
-            crate::db::test_system_cipher(),
+            crate::db::sqlite::test_system_cipher(),
         ));
         let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(
             pool.clone(),
-            crate::db::test_system_cipher(),
+            crate::db::sqlite::test_system_cipher(),
         ));
         let svc = Arc::new(InstanceService::new(
             cube.clone(),

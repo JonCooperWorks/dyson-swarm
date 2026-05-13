@@ -1,8 +1,8 @@
 use super::*;
-use crate::db::instances::SqlxInstanceStore;
-use crate::db::open_in_memory;
-use crate::db::secrets::SqlxUserSecretStore;
-use crate::db::tokens::SqlxTokenStore;
+use crate::db::sqlite::instances::SqlxInstanceStore;
+use crate::db::sqlite::open_in_memory;
+use crate::db::sqlite::secrets::SqlxUserSecretStore;
+use crate::db::sqlite::tokens::SqlxTokenStore;
 use crate::envelope::AgeCipherDirectory;
 use crate::envelope::{EnvelopeCipher, EnvelopeError};
 use crate::traits::{InstanceRow, InstanceStatus, InstanceStore, TokenStore};
@@ -462,9 +462,9 @@ async fn build_mcp_proxy_fixture_for_entry(
     let svc = McpService::new(tokens, instances, user_secrets, None)
         .unwrap()
         .with_runtime_socket(runtime_socket_path)
-        .with_mcp_audit(Arc::new(crate::db::audit::SqliteMcpAuditStore::new(
-            pool.clone(),
-        )))
+        .with_mcp_audit(Arc::new(
+            crate::db::sqlite::audit::SqliteMcpAuditStore::new(pool.clone()),
+        ))
         .with_mcp_upstream_policy(crate::upstream_policy::OutboundUrlPolicy {
             enabled: true,
             allow_localhost: true,

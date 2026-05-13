@@ -34,7 +34,7 @@ These keys:
 
 Relevant code:
 
-- [users.rs](../crates/core/src/db/users.rs)
+- [users.rs](../crates/core/src/db/sqlite/users.rs)
 - [admin_users.rs](../crates/swarm/src/http/admin_users.rs)
 
 ## Break-Glass Host Mint
@@ -70,7 +70,7 @@ environment and authenticate sandbox-to-swarm calls.
 
 Relevant code:
 
-- [tokens.rs](../crates/core/src/db/tokens.rs)
+- [tokens.rs](../crates/core/src/db/sqlite/tokens.rs)
 - [instance.rs](../crates/core/src/instance.rs)
 
 ## OpenRouter Minted Keys

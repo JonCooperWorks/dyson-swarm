@@ -280,7 +280,7 @@ pub type ArtefactCache = Arc<ArtefactCacheService>;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::open_in_memory;
+    use crate::db::sqlite::open_in_memory;
 
     /// Build a service backed by an in-memory pool and an
     /// `AgeCipherDirectory` rooted in a tempdir.
@@ -289,7 +289,7 @@ mod tests {
         let keys = tempfile::tempdir().unwrap();
         let ciphers: Arc<dyn CipherDirectory> =
             Arc::new(crate::envelope::AgeCipherDirectory::new(keys.path()).unwrap());
-        let svc = ArtefactCacheService::new(crate::db::artefact_cache_store(pool), ciphers);
+        let svc = ArtefactCacheService::new(crate::db::sqlite::artefact_cache_store(pool), ciphers);
         (svc, keys)
     }
 

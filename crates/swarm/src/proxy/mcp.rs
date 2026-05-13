@@ -127,7 +127,7 @@ impl McpService {
             allow_user_docker_json: false,
             docker_catalog_store: None,
             mcp_upstream_policy: OutboundUrlPolicy::default(),
-            mcp_audit: Arc::new(crate::db::audit::NoopMcpAuditStore),
+            mcp_audit: Arc::new(crate::db::sqlite::audit::NoopMcpAuditStore),
             rate: Arc::new(McpRateWindow::default()),
         })
     }

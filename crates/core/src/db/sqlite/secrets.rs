@@ -13,7 +13,7 @@
 use async_trait::async_trait;
 use sqlx::{Row, SqlitePool};
 
-use crate::db::map_sqlx;
+use crate::db::sqlite::map_sqlx;
 use crate::error::StoreError;
 use crate::now_secs;
 use crate::traits::{SystemSecretStore, UserSecretStore};

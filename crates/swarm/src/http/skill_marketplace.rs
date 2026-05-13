@@ -197,10 +197,7 @@ async fn authorize_state_token_owner(
             return Err(super::instances::swarm_err_to_status(e));
         }
     };
-    if !crate::db::tokens::state_sync_provider_matches(
-        &token_record.provider,
-        &instance.state_generation,
-    ) {
+    if !crate::db::state_sync_provider_matches(&token_record.provider, &instance.state_generation) {
         return Err(StatusCode::UNAUTHORIZED);
     }
     Ok(instance.owner_id)

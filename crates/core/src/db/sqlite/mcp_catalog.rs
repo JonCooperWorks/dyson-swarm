@@ -7,7 +7,7 @@
 use async_trait::async_trait;
 use sqlx::{Row, SqlitePool};
 
-use crate::db::map_sqlx;
+use crate::db::sqlite::map_sqlx;
 use crate::error::StoreError;
 use crate::mcp_servers::{
     McpDockerCatalogServer, McpDockerCatalogStatus, McpDockerPlaceholderSpec,
@@ -265,7 +265,7 @@ fn row_to_catalog(row: sqlx::sqlite::SqliteRow) -> Result<McpDockerCatalogRow, S
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::open_in_memory;
+    use crate::db::sqlite::open_in_memory;
 
     fn catalog(id: &str, image: &str, placeholder_id: Option<&str>) -> McpDockerCatalogServer {
         let mut server = serde_json::json!({

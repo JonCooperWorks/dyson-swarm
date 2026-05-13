@@ -539,10 +539,10 @@ mod tests {
     use async_trait::async_trait;
 
     use crate::backup::local::LocalDiskBackupSink;
-    use crate::db::instances::SqlxInstanceStore;
-    use crate::db::open_in_memory;
-    use crate::db::snapshots::SqliteSnapshotStore;
-    use crate::db::tokens::SqlxTokenStore;
+    use crate::db::sqlite::instances::SqlxInstanceStore;
+    use crate::db::sqlite::open_in_memory;
+    use crate::db::sqlite::snapshots::SqliteSnapshotStore;
+    use crate::db::sqlite::tokens::SqlxTokenStore;
     use crate::error::CubeError;
     use crate::instance::{CreateRequest, ENV_MODEL};
     use crate::traits::{CreateSandboxArgs, InstanceStore, SandboxInfo, SnapshotInfo, TokenStore};
@@ -610,11 +610,11 @@ mod tests {
         let cube = MockCube::new();
         let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(
             pool.clone(),
-            crate::db::test_system_cipher(),
+            crate::db::sqlite::test_system_cipher(),
         ));
         let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(
             pool.clone(),
-            crate::db::test_system_cipher(),
+            crate::db::sqlite::test_system_cipher(),
         ));
         let snaps: Arc<dyn SnapshotStore> = Arc::new(SqliteSnapshotStore::new(pool.clone()));
         let isvc = Arc::new(InstanceService::new(
@@ -706,7 +706,7 @@ mod tests {
         let cipher_dir: Arc<dyn crate::envelope::CipherDirectory> =
             Arc::new(crate::envelope::AgeCipherDirectory::new(keys_tmp.path()).unwrap());
         let users: Arc<dyn crate::traits::UserStore> = Arc::new(
-            crate::db::users::SqlxUserStore::new(pool.clone(), cipher_dir),
+            crate::db::sqlite::users::SqlxUserStore::new(pool.clone(), cipher_dir),
         );
         for sub in ["alice", "bob"] {
             users
@@ -729,11 +729,11 @@ mod tests {
         let cube = MockCube::new();
         let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(
             pool.clone(),
-            crate::db::test_system_cipher(),
+            crate::db::sqlite::test_system_cipher(),
         ));
         let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(
             pool.clone(),
-            crate::db::test_system_cipher(),
+            crate::db::sqlite::test_system_cipher(),
         ));
         let snaps_store: Arc<dyn SnapshotStore> = Arc::new(SqliteSnapshotStore::new(pool.clone()));
         let isvc = Arc::new(InstanceService::new(
@@ -992,7 +992,7 @@ mod tests {
         let cipher_dir: Arc<dyn crate::envelope::CipherDirectory> =
             Arc::new(crate::envelope::AgeCipherDirectory::new(keys_tmp.path()).unwrap());
         let users: Arc<dyn crate::traits::UserStore> = Arc::new(
-            crate::db::users::SqlxUserStore::new(pool.clone(), cipher_dir),
+            crate::db::sqlite::users::SqlxUserStore::new(pool.clone(), cipher_dir),
         );
         for sub in ["alice", "bob"] {
             users
@@ -1014,11 +1014,11 @@ mod tests {
         let cube = MockCube::new();
         let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(
             pool.clone(),
-            crate::db::test_system_cipher(),
+            crate::db::sqlite::test_system_cipher(),
         ));
         let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(
             pool.clone(),
-            crate::db::test_system_cipher(),
+            crate::db::sqlite::test_system_cipher(),
         ));
         let snaps_store: Arc<dyn SnapshotStore> = Arc::new(SqliteSnapshotStore::new(pool.clone()));
         let isvc = Arc::new(InstanceService::new(
@@ -1094,7 +1094,7 @@ mod tests {
         let cipher_dir: Arc<dyn crate::envelope::CipherDirectory> =
             Arc::new(crate::envelope::AgeCipherDirectory::new(keys_tmp.path()).unwrap());
         let users: Arc<dyn crate::traits::UserStore> = Arc::new(
-            crate::db::users::SqlxUserStore::new(pool.clone(), cipher_dir),
+            crate::db::sqlite::users::SqlxUserStore::new(pool.clone(), cipher_dir),
         );
         users
             .create(UserRow {
@@ -1115,11 +1115,11 @@ mod tests {
         let cube = MockCube::new();
         let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(
             pool.clone(),
-            crate::db::test_system_cipher(),
+            crate::db::sqlite::test_system_cipher(),
         ));
         let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(
             pool.clone(),
-            crate::db::test_system_cipher(),
+            crate::db::sqlite::test_system_cipher(),
         ));
         let snaps: Arc<dyn SnapshotStore> = Arc::new(SqliteSnapshotStore::new(pool.clone()));
         let isvc = Arc::new(InstanceService::new(

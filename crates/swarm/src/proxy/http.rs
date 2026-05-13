@@ -594,9 +594,9 @@ mod tests {
     use sqlx::SqlitePool;
 
     use crate::config::{ProviderConfig, Providers};
-    use crate::db::instances::SqlxInstanceStore;
-    use crate::db::open_in_memory;
-    use crate::db::tokens::SqlxTokenStore;
+    use crate::db::sqlite::instances::SqlxInstanceStore;
+    use crate::db::sqlite::open_in_memory;
+    use crate::db::sqlite::tokens::SqlxTokenStore;
     use crate::envelope::{EnvelopeCipher, EnvelopeError};
     use crate::proxy::adapters;
     use crate::proxy::policy_check::InstancePolicy;
@@ -791,12 +791,13 @@ mod tests {
         let tokens: Arc<dyn TokenStore> =
             Arc::new(SqlxTokenStore::new(pool.clone(), system_cipher()));
         let instances: Arc<dyn InstanceStore> = Arc::new(
-            crate::db::instances::SqlxInstanceStore::new(pool.clone(), system_cipher()),
+            crate::db::sqlite::instances::SqlxInstanceStore::new(pool.clone(), system_cipher()),
         );
-        let policies: Arc<dyn crate::traits::PolicyStore> =
-            Arc::new(crate::db::policies::SqlitePolicyStore::new(pool.clone()));
+        let policies: Arc<dyn crate::traits::PolicyStore> = Arc::new(
+            crate::db::sqlite::policies::SqlitePolicyStore::new(pool.clone()),
+        );
         let audit: Arc<dyn crate::traits::AuditStore> =
-            Arc::new(crate::db::audit::SqliteAuditStore::new(pool));
+            Arc::new(crate::db::sqlite::audit::SqliteAuditStore::new(pool));
         Arc::new(
             ProxyService::new(tokens, instances, policies, audit, providers, policy)
                 .expect("build proxy"),
@@ -855,19 +856,22 @@ mod tests {
         let tokens: Arc<dyn TokenStore> =
             Arc::new(SqlxTokenStore::new(pool.clone(), system_cipher()));
         let instances: Arc<dyn InstanceStore> = Arc::new(
-            crate::db::instances::SqlxInstanceStore::new(pool.clone(), system_cipher()),
+            crate::db::sqlite::instances::SqlxInstanceStore::new(pool.clone(), system_cipher()),
         );
-        let policies: Arc<dyn crate::traits::PolicyStore> =
-            Arc::new(crate::db::policies::SqlitePolicyStore::new(pool.clone()));
-        let audit: Arc<dyn crate::traits::AuditStore> =
-            Arc::new(crate::db::audit::SqliteAuditStore::new(pool.clone()));
+        let policies: Arc<dyn crate::traits::PolicyStore> = Arc::new(
+            crate::db::sqlite::policies::SqlitePolicyStore::new(pool.clone()),
+        );
+        let audit: Arc<dyn crate::traits::AuditStore> = Arc::new(
+            crate::db::sqlite::audit::SqliteAuditStore::new(pool.clone()),
+        );
 
         // Per-test keys directory so encrypted user_secrets work.
         let keys_tmp = tempfile::tempdir().unwrap();
         let cipher_dir: Arc<dyn crate::envelope::CipherDirectory> =
             Arc::new(crate::envelope::AgeCipherDirectory::new(keys_tmp.path()).unwrap());
-        let user_secret_store: Arc<dyn crate::traits::UserSecretStore> =
-            Arc::new(crate::db::secrets::SqlxUserSecretStore::new(pool.clone()));
+        let user_secret_store: Arc<dyn crate::traits::UserSecretStore> = Arc::new(
+            crate::db::sqlite::secrets::SqlxUserSecretStore::new(pool.clone()),
+        );
         let user_secrets = Arc::new(crate::secrets::UserSecretsService::new(
             user_secret_store,
             cipher_dir,

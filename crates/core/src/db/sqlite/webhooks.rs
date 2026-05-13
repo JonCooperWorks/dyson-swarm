@@ -9,7 +9,7 @@
 use async_trait::async_trait;
 use sqlx::{Row, SqlitePool};
 
-use crate::db::map_sqlx;
+use crate::db::sqlite::map_sqlx;
 use crate::error::StoreError;
 use crate::traits::{DeliveryRow, DeliveryStore, WebhookAuthScheme, WebhookRow, WebhookStore};
 
@@ -356,36 +356,39 @@ fn metadata_row(r: sqlx::sqlite::SqliteRow) -> Result<DeliveryRow, StoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::open_in_memory;
+    use crate::db::sqlite::open_in_memory;
     use crate::traits::{InstanceRow, InstanceStatus, InstanceStore};
 
     async fn seed_instance(pool: sqlx::SqlitePool, id: &str) {
-        crate::db::instances::SqlxInstanceStore::new(pool, crate::db::test_system_cipher())
-            .create(InstanceRow {
-                id: id.into(),
-                owner_id: "legacy".into(),
-                name: String::new(),
-                task: String::new(),
-                cube_sandbox_id: None,
-                state_generation: String::new(),
-                template_id: "t".into(),
-                status: InstanceStatus::Live,
-                bearer_token: "b".into(),
-                pinned: false,
-                expires_at: None,
-                last_active_at: 0,
-                last_probe_at: None,
-                last_probe_status: None,
-                created_at: 0,
-                destroyed_at: None,
-                rotated_to: None,
-                network_policy: crate::network_policy::NetworkPolicy::Open,
-                network_policy_cidrs: Vec::new(),
-                models: Vec::new(),
-                tools: Vec::new(),
-            })
-            .await
-            .unwrap();
+        crate::db::sqlite::instances::SqlxInstanceStore::new(
+            pool,
+            crate::db::sqlite::test_system_cipher(),
+        )
+        .create(InstanceRow {
+            id: id.into(),
+            owner_id: "legacy".into(),
+            name: String::new(),
+            task: String::new(),
+            cube_sandbox_id: None,
+            state_generation: String::new(),
+            template_id: "t".into(),
+            status: InstanceStatus::Live,
+            bearer_token: "b".into(),
+            pinned: false,
+            expires_at: None,
+            last_active_at: 0,
+            last_probe_at: None,
+            last_probe_status: None,
+            created_at: 0,
+            destroyed_at: None,
+            rotated_to: None,
+            network_policy: crate::network_policy::NetworkPolicy::Open,
+            network_policy_cidrs: Vec::new(),
+            models: Vec::new(),
+            tools: Vec::new(),
+        })
+        .await
+        .unwrap();
     }
 
     fn row(instance: &str, name: &str) -> WebhookRow {
@@ -776,7 +779,8 @@ mod tests {
         .unwrap();
 
         for statement in
-            include_str!("../../migrations/sqlite/0025_webhook_secrets_user_scope.sql").split(';')
+            include_str!("../../../migrations/sqlite/0025_webhook_secrets_user_scope.sql")
+                .split(';')
         {
             let statement = statement.trim();
             if !statement.is_empty() {

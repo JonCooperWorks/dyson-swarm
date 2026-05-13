@@ -397,9 +397,9 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
 
-    use crate::db::open_in_memory;
-    use crate::db::secrets::SqlxUserSecretStore;
-    use crate::db::users::SqlxUserStore;
+    use crate::db::sqlite::open_in_memory;
+    use crate::db::sqlite::secrets::SqlxUserSecretStore;
+    use crate::db::sqlite::users::SqlxUserStore;
     use crate::envelope::AgeCipherDirectory;
     use crate::secrets::UserSecretsService;
     use crate::traits::{UserRow, UserSecretStore, UserStatus, UserStore};

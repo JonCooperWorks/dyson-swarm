@@ -752,7 +752,7 @@ pub fn skill_body_preview(body: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::open_in_memory;
+    use crate::db::sqlite::open_in_memory;
 
     fn index_json(skill_md: &str, sha256: Option<&str>) -> String {
         let mut value = serde_json::json!({
@@ -783,7 +783,7 @@ mod tests {
         let skill = "---\ndescription: Review code.\n---\n\nRead the diff.";
         let hash = sha256_hex(skill.as_bytes());
         let pool = open_in_memory().await.unwrap();
-        let store = crate::db::skill_marketplace_source_store(pool);
+        let store = crate::db::sqlite::skill_marketplace_source_store(pool);
         store
             .upsert(
                 &SkillMarketplaceSourceConfig::Inline {
@@ -808,7 +808,7 @@ mod tests {
     #[tokio::test]
     async fn disabled_db_sources_do_not_feed_the_catalog() {
         let pool = open_in_memory().await.unwrap();
-        let store = crate::db::skill_marketplace_source_store(pool);
+        let store = crate::db::sqlite::skill_marketplace_source_store(pool);
         store
             .upsert(
                 &SkillMarketplaceSourceConfig::Inline {

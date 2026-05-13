@@ -72,10 +72,7 @@ async fn ingest_file(State(state): State<AppState>, req: Request<Body>) -> Statu
             return StatusCode::INTERNAL_SERVER_ERROR;
         }
     };
-    if !crate::db::tokens::state_sync_provider_matches(
-        &token_record.provider,
-        &instance.state_generation,
-    ) {
+    if !crate::db::state_sync_provider_matches(&token_record.provider, &instance.state_generation) {
         tracing::warn!(
             instance = %instance_id,
             token_provider = %token_record.provider,

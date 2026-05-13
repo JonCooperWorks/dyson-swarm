@@ -30,7 +30,7 @@ use dyson_swarm::{
     backup::local::LocalDiskBackupSink,
     config::Providers,
     db,
-    db::{instances::SqlxInstanceStore, tokens::SqlxTokenStore},
+    db::sqlite::{instances::SqlxInstanceStore, tokens::SqlxTokenStore},
     envelope::{AgeCipherDirectory, CipherDirectory},
     http,
     instance::InstanceService,
@@ -150,7 +150,7 @@ async fn build() -> Fixture {
         std::env::set_var("SWARM_CUBE_INTERNAL_PORT", dyson_addr.port().to_string());
     }
 
-    let pool = db::open_in_memory().await.unwrap();
+    let pool = db::sqlite::open_in_memory().await.unwrap();
     let cube: Arc<dyn CubeClient> = Arc::new(StubCube);
     let keys_tmp = tempfile::tempdir().unwrap();
     let cipher_dir: Arc<dyn CipherDirectory> =
@@ -161,11 +161,10 @@ async fn build() -> Fixture {
     let tokens_store: Arc<dyn TokenStore> =
         Arc::new(SqlxTokenStore::new(pool.clone(), system_cipher));
     let user_secrets_store: Arc<dyn UserSecretStore> = Arc::new(
-        dyson_swarm::db::secrets::SqlxUserSecretStore::new(pool.clone()),
+        dyson_swarm::db::sqlite::secrets::SqlxUserSecretStore::new(pool.clone()),
     );
-    let system_secrets_store: Arc<dyn SystemSecretStore> = Arc::new(
-        dyson_swarm::db::secrets::SqlxSystemSecretStore::new(pool.clone()),
-    );
+    let system_secrets_store: Arc<dyn SystemSecretStore> =
+        Arc::new(dyson_swarm::db::sqlite::secrets::SqlxSystemSecretStore::new(pool.clone()));
     let user_secrets_svc = Arc::new(UserSecretsService::new(
         user_secrets_store,
         cipher_dir.clone(),
@@ -175,11 +174,11 @@ async fn build() -> Fixture {
         cipher_dir.clone(),
     ));
     let backup: Arc<dyn BackupSink> = Arc::new(LocalDiskBackupSink::new(cube.clone()));
-    let snapshots_store: Arc<dyn SnapshotStore> = dyson_swarm::db::snapshot_store(pool.clone());
-    let users_store: Arc<dyn UserStore> = Arc::new(dyson_swarm::db::users::SqlxUserStore::new(
-        pool.clone(),
-        cipher_dir.clone(),
-    ));
+    let snapshots_store: Arc<dyn SnapshotStore> =
+        dyson_swarm::db::sqlite::snapshot_store(pool.clone());
+    let users_store: Arc<dyn UserStore> = Arc::new(
+        dyson_swarm::db::sqlite::users::SqlxUserStore::new(pool.clone(), cipher_dir.clone()),
+    );
     let instance_svc = Arc::new(InstanceService::new(
         cube.clone(),
         instances_store.clone(),
@@ -227,10 +226,10 @@ async fn build() -> Fixture {
         .unwrap();
 
     let webhook_store: Arc<dyn dyson_swarm::traits::WebhookStore> = Arc::new(
-        dyson_swarm::db::webhooks::SqlxWebhookStore::new(pool.clone()),
+        dyson_swarm::db::sqlite::webhooks::SqlxWebhookStore::new(pool.clone()),
     );
     let delivery_store: Arc<dyn dyson_swarm::traits::DeliveryStore> = Arc::new(
-        dyson_swarm::db::webhooks::SqlxDeliveryStore::new(pool.clone()),
+        dyson_swarm::db::sqlite::webhooks::SqlxDeliveryStore::new(pool.clone()),
     );
     let webhooks_svc = Arc::new(dyson_swarm::webhooks::WebhookService::new(
         webhook_store,
@@ -242,7 +241,7 @@ async fn build() -> Fixture {
     ));
     let apex = "swarm.test".to_string();
     let artefact_cache = Arc::new(dyson_swarm::artefacts::ArtefactCacheService::new(
-        dyson_swarm::db::artefact_cache_store(pool.clone()),
+        dyson_swarm::db::sqlite::artefact_cache_store(pool.clone()),
         cipher_dir.clone(),
     ));
     artefact_cache
@@ -263,7 +262,7 @@ async fn build() -> Fixture {
         .await
         .unwrap();
     let shares_svc = Arc::new(dyson_swarm::shares::ShareService::new(
-        dyson_swarm::db::share_store(pool.clone()),
+        dyson_swarm::db::sqlite::share_store(pool.clone()),
         user_secrets_svc.clone(),
         instance_svc.clone(),
         artefact_cache.clone(),
@@ -271,7 +270,7 @@ async fn build() -> Fixture {
         Some(apex.clone()),
     ));
     let state_files = Arc::new(dyson_swarm::state_files::StateFileService::new(
-        dyson_swarm::db::state_file_store(pool.clone()),
+        dyson_swarm::db::sqlite::state_file_store(pool.clone()),
         cipher_dir.clone(),
     ));
 
@@ -284,8 +283,8 @@ async fn build() -> Fixture {
         prober: Arc::new(StubProber),
         tokens: tokens_store.clone(),
         users: users_store,
-        sessions: dyson_swarm::db::session_store(pool.clone()),
-        admin_audit: dyson_swarm::db::admin_audit_store(pool.clone()),
+        sessions: dyson_swarm::db::sqlite::session_store(pool.clone()),
+        admin_audit: dyson_swarm::db::sqlite::admin_audit_store(pool.clone()),
         sandbox_domain: "127.0.0.1".to_string(),
         hostname: Some(apex.clone()),
         auth_config: Arc::new(http::auth_config::AuthConfig::none()),

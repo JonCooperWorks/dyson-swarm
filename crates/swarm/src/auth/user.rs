@@ -355,8 +355,8 @@ mod tests {
     use axum::{Router, middleware};
 
     use crate::auth::AuthSource;
-    use crate::db::open_in_memory;
-    use crate::db::users::SqlxUserStore;
+    use crate::db::sqlite::open_in_memory;
+    use crate::db::sqlite::users::SqlxUserStore;
     use crate::envelope::{AgeCipherDirectory, CipherDirectory};
 
     /// Build a test SqlxUserStore backed by a throwaway cipher dir.

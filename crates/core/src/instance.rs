@@ -456,13 +456,13 @@ impl InstanceService {
         };
         let ingest = match self
             .tokens
-            .lookup_by_instance_for_provider(instance_id, crate::db::tokens::INGEST_PROVIDER)
+            .lookup_by_instance_for_provider(instance_id, crate::db::INGEST_PROVIDER)
             .await?
         {
             Some(t) => t,
             None => self.tokens.mint_ingest(instance_id).await?,
         };
-        let state_provider = crate::db::tokens::state_sync_provider(state_generation);
+        let state_provider = crate::db::state_sync_provider(state_generation);
         let state_sync = match self
             .tokens
             .lookup_by_instance_for_provider(instance_id, &state_provider)

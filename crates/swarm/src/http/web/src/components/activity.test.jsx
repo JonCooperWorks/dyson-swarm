@@ -1,11 +1,11 @@
-import { afterEach, describe, expect, test, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import React from 'react';
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 
 import { ApiProvider } from '../hooks/useApi.jsx';
 import { ActivityPage } from './activity.jsx';
-import { listToolCallFacets, listToolCalls, streamToolCalls } from '../api/audit.js';
+import { exportToolCallsNdjson, listToolCallFacets, listToolCalls, streamToolCalls } from '../api/audit.js';
 
 vi.mock('../api/audit.js', () => ({
   listToolCalls: vi.fn(),
@@ -18,6 +18,13 @@ afterEach(() => {
   cleanup();
   vi.clearAllMocks();
   vi.useRealTimers();
+  window.localStorage.clear();
+  delete navigator.clipboard;
+});
+
+beforeEach(() => {
+  listToolCallFacets.mockResolvedValue({ tools: ['bash', 'mcp__github__create_issue'], servers: ['github', 'linear'] });
+  streamToolCalls.mockImplementation(() => () => {});
 });
 
 function renderActivity(client = {}) {
@@ -45,34 +52,44 @@ const rows = [{
   mcp_duration_ms: null,
 }];
 
+const mcpRow = {
+  ...rows[0],
+  id: 2,
+  tool_use_id: 'call-2',
+  tool_name: 'mcp__github__create_issue',
+  mcp_server: 'github',
+  input: { title: 'ship it' },
+  result: { ok: true },
+  called_at: 1760000010,
+  resulted_at: 1760000011,
+  mcp_audit_id: 99,
+  mcp_status: 200,
+  mcp_duration_ms: 42,
+};
+
 describe('ActivityPage', () => {
   test('renders the empty state without filters', async () => {
     listToolCalls.mockResolvedValue({ items: [], next_cursor: null });
-    listToolCallFacets.mockResolvedValue({ tools: [], servers: [] });
+    listToolCallFacets.mockResolvedValueOnce({ tools: [], servers: [] });
     renderActivity();
 
     expect(await screen.findByText(/no tool calls yet/i)).toBeInTheDocument();
-    expect(screen.queryByLabelText('tool filter')).toBeNull();
+    expect(screen.queryByRole('button', { name: /^tool:/i })).toBeNull();
     expect(streamToolCalls).toHaveBeenCalled();
   });
 
   test('renders rows, opens the drawer, and applies filters', async () => {
     listToolCalls.mockResolvedValue({ items: rows, next_cursor: 1 });
-    listToolCallFacets.mockResolvedValue({
-      tools: ['bash', 'mcp__github__create_issue'],
-      servers: ['github'],
-    });
     renderActivity();
 
     expect((await screen.findAllByText('bash')).length).toBeGreaterThan(0);
-    await waitFor(() => expect(datalistValues('tool filter')).toContain('mcp__github__create_issue'));
-    expect(screen.getByPlaceholderText('any mcp server')).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole('button', { name: /server: all/i })).toBeInTheDocument());
     fireEvent.click(screen.getByRole('listitem'));
     expect(screen.getByRole('dialog', { name: /tool call detail/i })).toBeInTheDocument();
     expect(screen.getByText('call-1')).toBeInTheDocument();
     expect(screen.getByText(/workspace/)).toBeInTheDocument();
 
-    fireEvent.change(screen.getByLabelText('status filter'), { target: { value: 'ok' } });
+    chooseFilter('status', 'ok');
     await waitFor(() => expect(listToolCalls).toHaveBeenLastCalledWith(
       expect.anything(),
       'inst-a',
@@ -80,21 +97,52 @@ describe('ActivityPage', () => {
     ));
   });
 
-  test('populates searchable tool and server filters from instance-wide facets', async () => {
-    listToolCalls.mockResolvedValue({ items: rows, next_cursor: 1 });
-    listToolCallFacets.mockResolvedValue({
-      tools: ['bash', 'mcp__github__create_issue'],
-      servers: ['github'],
-    });
+  test('reopening a selected tool dropdown still shows the other options', async () => {
+    listToolCalls.mockResolvedValue({ items: [rows[0], mcpRow], next_cursor: 2 });
+    renderActivity();
+
+    await screen.findAllByRole('listitem');
+    chooseFilter('tool', 'bash');
+
+    fireEvent.click(screen.getByRole('button', { name: /tool: bash/i }));
+
+    const listbox = screen.getByRole('listbox', { name: /tool options/i });
+    expect(within(listbox).getByRole('option', { name: 'bash' })).toBeInTheDocument();
+    expect(within(listbox).getByRole('option', { name: 'mcp__github__create_issue' })).toBeInTheDocument();
+  });
+
+  test('chip clear resets an active filter and updates the row list', async () => {
+    listToolCalls.mockImplementation((client, instanceId, filters) => Promise.resolve({
+      items: filters.tool === 'bash' ? [rows[0]] : [rows[0], mcpRow],
+      next_cursor: null,
+    }));
+    renderActivity();
+
+    expect(await screen.findAllByRole('listitem')).toHaveLength(2);
+    chooseFilter('tool', 'bash');
+    await waitFor(() => expect(screen.getAllByRole('listitem')).toHaveLength(1));
+
+    fireEvent.click(screen.getByRole('button', { name: /clear tool filter/i }));
+
+    await waitFor(() => expect(screen.getAllByRole('listitem')).toHaveLength(2));
+    expect(screen.getByRole('button', { name: /tool: all/i })).toBeInTheDocument();
+  });
+
+  test('empty state with filters offers a clear button for all chips', async () => {
+    listToolCalls.mockImplementation((client, instanceId, filters) => Promise.resolve({
+      items: filters.status === 'err' ? [] : rows,
+      next_cursor: null,
+    }));
     renderActivity();
 
     await screen.findByRole('listitem');
-    expect(screen.getByPlaceholderText('any tool')).toBeInTheDocument();
-    expect(screen.getByPlaceholderText('any mcp server')).toBeInTheDocument();
-    await waitFor(() => {
-      expect(datalistValues('tool filter')).toEqual(['bash', 'mcp__github__create_issue']);
-      expect(datalistValues('mcp server filter')).toEqual(['github']);
-    });
+    chooseFilter('status', 'err');
+
+    expect(await screen.findByText(/no calls match these filters/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /clear filters/i }));
+
+    await waitFor(() => expect(screen.getByRole('button', { name: /status: all/i })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole('listitem')).toBeInTheDocument());
   });
 
   test('updates an open drawer when a result attaches to an existing row', async () => {
@@ -127,88 +175,124 @@ describe('ActivityPage', () => {
     expect(await screen.findByText(/audit-smoke/)).toBeInTheDocument();
   });
 
-  test('keeps searchable filters visible when status err has no matches', async () => {
-    listToolCalls
-      .mockResolvedValueOnce({ items: rows, next_cursor: 1 })
-      .mockResolvedValue({ items: [], next_cursor: null });
-    listToolCallFacets.mockResolvedValue({ tools: ['bash'], servers: ['github'] });
+  test('in-flight rows show pulsing and stale amber duration dots', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-05-14T12:00:40Z'));
+    listToolCalls.mockResolvedValue({
+      items: [
+        { ...rows[0], id: 3, tool_use_id: 'fresh', result: null, is_error: null, called_at: 1778760030, resulted_at: null },
+        { ...rows[0], id: 4, tool_use_id: 'stale', result: null, is_error: null, called_at: 1778760000, resulted_at: null },
+      ],
+      next_cursor: null,
+    });
     renderActivity();
 
-    await screen.findByRole('listitem');
-    fireEvent.change(screen.getByLabelText('status filter'), { target: { value: 'err' } });
-
-    expect(await screen.findByText('no tool calls match these filters.')).toBeInTheDocument();
-    expect(screen.getByLabelText('tool filter')).toBeInTheDocument();
-    expect(screen.getByLabelText('status filter')).toHaveValue('err');
-    expect(screen.getByPlaceholderText('any tool')).toBeInTheDocument();
-    expect(screen.getByPlaceholderText('any status')).toBeInTheDocument();
-    expect(screen.getByPlaceholderText('any mcp server')).toBeInTheDocument();
+    expect(await screen.findByLabelText(/fresh is waiting for a tool result/i)).toHaveClass('activity-duration-pending');
+    expect(screen.getByLabelText(/stale has no result yet/i)).toHaveClass('activity-duration-stale');
   });
 
-  test('keeps searchable filters visible when status ok has no matches', async () => {
-    const pending = { ...rows[0], result: null, is_error: null, resulted_at: null };
-    listToolCalls
-      .mockResolvedValueOnce({ items: [pending], next_cursor: pending.id })
-      .mockResolvedValue({ items: [], next_cursor: null });
-    listToolCallFacets.mockResolvedValue({ tools: ['bash'], servers: ['github'] });
+  test('live tail shows a new-row pill instead of jumping when scrolled away', async () => {
+    let pushToolCall;
+    streamToolCalls.mockImplementationOnce((client, instanceId, filters, onEvent) => {
+      pushToolCall = onEvent;
+      return () => {};
+    });
+    listToolCalls.mockResolvedValue({ items: rows, next_cursor: 1 });
     renderActivity();
 
     await screen.findByRole('listitem');
-    fireEvent.change(screen.getByLabelText('status filter'), { target: { value: 'ok' } });
+    const list = screen.getByRole('list');
+    list.scrollTop = 120;
+    fireEvent.scroll(list);
 
-    expect(await screen.findByText('no tool calls match these filters.')).toBeInTheDocument();
-    expect(screen.getByLabelText('tool filter')).toBeInTheDocument();
-    expect(screen.getByLabelText('status filter')).toHaveValue('ok');
-    expect(screen.getByPlaceholderText('any tool')).toBeInTheDocument();
-    expect(screen.getByPlaceholderText('any status')).toBeInTheDocument();
-    expect(screen.getByPlaceholderText('any mcp server')).toBeInTheDocument();
+    act(() => pushToolCall({ ...mcpRow, id: 5, tool_use_id: 'call-5' }));
+
+    expect(await screen.findByRole('button', { name: /↑ 1 new/i })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /↑ 1 new/i }));
+
+    expect(screen.queryByRole('button', { name: /↑ 1 new/i })).toBeNull();
+    expect(list.scrollTop).toBe(0);
   });
 
-  test('keeps searchable filters visible when payload search has no matches', async () => {
-    listToolCalls
-      .mockResolvedValueOnce({ items: rows, next_cursor: 1 })
-      .mockResolvedValue({ items: [], next_cursor: null });
-    listToolCallFacets.mockResolvedValue({ tools: ['bash'], servers: ['github'] });
+  test('pause buffers live rows and resume drains them to the top', async () => {
+    let pushToolCall;
+    streamToolCalls.mockImplementationOnce((client, instanceId, filters, onEvent) => {
+      pushToolCall = onEvent;
+      return () => {};
+    });
+    listToolCalls.mockResolvedValue({ items: rows, next_cursor: 1 });
     renderActivity();
 
     await screen.findByRole('listitem');
-    fireEvent.change(screen.getByLabelText('search tool payloads'), { target: { value: 'not-here' } });
+    fireEvent.click(screen.getByRole('button', { name: /^live/i }));
 
-    expect(await screen.findByText('no tool calls match these filters.')).toBeInTheDocument();
-    expect(screen.getByLabelText('tool filter')).toBeInTheDocument();
-    expect(screen.getByLabelText('search tool payloads')).toHaveValue('not-here');
-    expect(screen.getByPlaceholderText('any tool')).toBeInTheDocument();
-    expect(screen.getByPlaceholderText('any status')).toBeInTheDocument();
-    expect(screen.getByPlaceholderText('any mcp server')).toBeInTheDocument();
+    act(() => pushToolCall({ ...mcpRow, id: 6, tool_use_id: 'call-6' }));
+
+    expect(screen.getByRole('button', { name: /paused · 1 new/i })).toBeInTheDocument();
+    expect(screen.queryByText('mcp__github__create_issue')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: /paused · 1 new/i }));
+
+    expect(await screen.findByText('mcp__github__create_issue')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^live/i })).toBeInTheDocument();
   });
 
-  test('keeps searchable filters visible when tool or server has no matches', async () => {
-    listToolCalls
-      .mockResolvedValueOnce({ items: rows, next_cursor: 1 })
-      .mockResolvedValue({ items: [], next_cursor: null });
-    listToolCallFacets.mockResolvedValue({ tools: ['bash'], servers: ['github'] });
+  test('drawer closes on Escape and copies the full unsealed row JSON', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    navigator.clipboard = { writeText };
+    listToolCalls.mockResolvedValue({ items: [mcpRow], next_cursor: 2 });
     renderActivity();
 
     await screen.findByRole('listitem');
-    fireEvent.change(screen.getByLabelText('tool filter'), { target: { value: 'mcp__missing__tool' } });
+    fireEvent.click(screen.getByRole('listitem'));
+    expect(screen.getByRole('dialog', { name: /tool call detail/i })).toBeInTheDocument();
 
-    expect(await screen.findByText('no tool calls match these filters.')).toBeInTheDocument();
-    expect(screen.getByLabelText('tool filter')).toHaveValue('mcp__missing__tool');
-    expect(screen.getByPlaceholderText('any tool')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /copy as JSON/i }));
+    expect(writeText).toHaveBeenCalledWith(expect.stringContaining('"tool_use_id": "call-2"'));
+    expect(writeText).toHaveBeenCalledWith(expect.stringContaining('"result": {'));
 
-    fireEvent.change(screen.getByLabelText('tool filter'), { target: { value: '' } });
-    fireEvent.change(screen.getByLabelText('mcp server filter'), { target: { value: 'linear' } });
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(screen.queryByRole('dialog', { name: /tool call detail/i })).toBeNull();
+  });
 
-    expect(await screen.findByText('no tool calls match these filters.')).toBeInTheDocument();
-    expect(screen.getByLabelText('mcp server filter')).toHaveValue('linear');
-    expect(screen.getByPlaceholderText('any tool')).toBeInTheDocument();
-    expect(screen.getByPlaceholderText('any status')).toBeInTheDocument();
-    expect(screen.getByPlaceholderText('any mcp server')).toBeInTheDocument();
+  test('keyboard navigation moves selection and opens/closes the drawer', async () => {
+    listToolCalls.mockResolvedValue({ items: [rows[0], mcpRow], next_cursor: 2 });
+    renderActivity();
+
+    const region = await screen.findByRole('region', { name: /tool-call activity/i });
+    region.focus();
+    fireEvent.keyDown(region, { key: 'j' });
+    fireEvent.keyDown(region, { key: 'j' });
+    fireEvent.keyDown(region, { key: 'Enter' });
+
+    expect(screen.getByRole('dialog', { name: /tool call detail/i })).toHaveTextContent('call-2');
+
+    fireEvent.keyDown(region, { key: 'Escape' });
+    expect(screen.queryByRole('dialog', { name: /tool call detail/i })).toBeNull();
+
+    fireEvent.keyDown(region, { key: 'k' });
+    fireEvent.keyDown(region, { key: 'Enter' });
+    expect(screen.getByRole('dialog', { name: /tool call detail/i })).toHaveTextContent('call-1');
+  });
+
+  test('density toggle persists across remounts', async () => {
+    listToolCalls.mockResolvedValue({ items: rows, next_cursor: 1 });
+    const view = renderActivity();
+
+    await screen.findByRole('listitem');
+    expect(screen.getByRole('button', { name: /density: comfortable/i })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /density: comfortable/i }));
+    expect(window.localStorage.getItem('dyson.activity.density')).toBe('compact');
+
+    view.unmount();
+    renderActivity();
+
+    expect(await screen.findByRole('button', { name: /density: compact/i })).toBeInTheDocument();
   });
 });
 
-function datalistValues(label) {
-  const input = screen.getByLabelText(label);
-  const list = document.getElementById(input.getAttribute('list'));
-  return [...(list?.querySelectorAll('option') || [])].map(option => option.value);
+function chooseFilter(kind, value) {
+  fireEvent.click(screen.getByRole('button', { name: new RegExp(`^${kind}:`, 'i') }));
+  fireEvent.click(screen.getByRole('option', { name: value }));
 }

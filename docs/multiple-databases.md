@@ -67,14 +67,14 @@ swarmctl db transfer \
   --to postgres \
   --source-url /var/lib/dyson-swarm/state.db \
   --target-url postgres://user:pass@host/db \
-  --confirm
+  --dangerous-confirm-overwrite
 ```
 
-The command refuses to run without `--confirm` and prints a destructive-action
-banner naming the target URL. The target must be empty across every app table;
-there is no `--force`. Both directions are supported, and the target write is
-transactional. If the command aborts mid-flight, fix the cause and rerun after
-confirming the target is still empty.
+The command refuses to run without `--dangerous-confirm-overwrite` and prints a
+destructive-action banner naming the target URL. The target must be empty
+across every app table; there is no `--force`. Both directions are supported,
+and the target write is transactional. If the command aborts mid-flight, fix
+the cause and rerun after confirming the target is still empty.
 
 The transfer copies raw table rows rather than using the store traits. That
 keeps sealed ciphertext, hashes, lookup prefixes, and audit columns byte-faithful.
@@ -84,7 +84,7 @@ keeps sealed ciphertext, hashes, lookup prefixes, and audit columns byte-faithfu
 1. Stop `dyson-swarm` and `dyson-egress-proxy`.
 2. Snapshot the SQLite file and keep the age key directory with it.
 3. Stand up an empty Postgres database.
-4. Run `swarmctl db transfer --from sqlite --to postgres ... --confirm`.
+4. Run `swarmctl db transfer --from sqlite --to postgres ... --dangerous-confirm-overwrite`.
 5. Flip `database_backend=postgres` and `database_url` in the deploy config.
 6. Redeploy from `deploy/scripts/bring-up.sh`.
 7. Run `deploy/scripts/bring-up.sh smoke`.

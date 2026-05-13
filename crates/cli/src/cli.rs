@@ -188,8 +188,8 @@ pub enum DbAction {
         source_url: String,
         #[arg(long)]
         target_url: String,
-        #[arg(long, default_value_t = false)]
-        confirm: bool,
+        #[arg(long = "dangerous-confirm-overwrite", default_value_t = false)]
+        dangerous_confirm_overwrite: bool,
     },
 }
 

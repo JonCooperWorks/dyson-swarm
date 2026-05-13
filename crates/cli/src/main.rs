@@ -159,16 +159,16 @@ async fn run_db(action: DbAction) -> ExitCode {
             to,
             source_url,
             target_url,
-            confirm,
+            dangerous_confirm_overwrite,
         } => {
             const RED: &str = "\x1b[31;1m";
             const RESET: &str = "\x1b[0m";
-            if !confirm {
+            if !dangerous_confirm_overwrite {
                 eprintln!(
                     "{RED}DESTRUCTIVE DATABASE TRANSFER REFUSED{RESET}\n\
                      target: {target_url}\n\
                      This command writes every migrated table into the target and requires an empty target.\n\
-                     Re-run with --confirm only after verifying the target URL."
+                     Re-run with --dangerous-confirm-overwrite only after verifying the target URL."
                 );
                 return ExitCode::from(2);
             }

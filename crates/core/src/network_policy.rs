@@ -40,6 +40,8 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub const INTERNAL_NETWORK_POLICY_DISABLED_MESSAGE: &str = "internal-network policies are disabled on this swarm — ask the operator to set network.allow_internal_network_policy = true";
+
 /// `0.0.0.0/0` keeps the cube's eBPF policy in blacklist mode (allow
 /// everything not in `denyOut`).  `192.168.0.1/32` punches through
 /// the always-denied `192.168.0.0/16` for the cube → host path —
@@ -132,6 +134,22 @@ impl NetworkPolicy {
             Self::NoLocalNet | Self::Open | Self::Airgap => &[],
             Self::Allowlist { entries } | Self::Denylist { entries } => entries,
         }
+    }
+
+    pub fn is_internal_network(&self) -> bool {
+        matches!(self, Self::Open)
+    }
+
+    pub fn assert_allowed_by_config(
+        &self,
+        cfg: &crate::config::NetworkConfig,
+    ) -> Result<(), crate::error::SwarmError> {
+        if self.is_internal_network() && !cfg.allow_internal_network_policy {
+            return Err(crate::error::SwarmError::BadRequest(
+                INTERNAL_NETWORK_POLICY_DISABLED_MESSAGE.to_owned(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -449,6 +467,50 @@ mod tests {
             }
             Self { map: Mutex::new(m) }
         }
+    }
+
+    #[test]
+    fn is_internal_network_only_true_for_open() {
+        assert!(!NetworkPolicy::NoLocalNet.is_internal_network());
+        assert!(NetworkPolicy::Open.is_internal_network());
+        assert!(!NetworkPolicy::Airgap.is_internal_network());
+        assert!(!NetworkPolicy::Allowlist { entries: vec![] }.is_internal_network());
+        assert!(!NetworkPolicy::Denylist { entries: vec![] }.is_internal_network());
+    }
+
+    #[test]
+    fn assert_allowed_by_config_rejects_open_when_disabled() {
+        let cfg = crate::config::NetworkConfig::default();
+        let err = NetworkPolicy::Open
+            .assert_allowed_by_config(&cfg)
+            .expect_err("Open is disabled by default");
+        assert!(
+            matches!(err, crate::error::SwarmError::BadRequest(msg) if msg == INTERNAL_NETWORK_POLICY_DISABLED_MESSAGE)
+        );
+    }
+
+    #[test]
+    fn assert_allowed_by_config_allows_open_when_enabled() {
+        let cfg = crate::config::NetworkConfig {
+            allow_internal_network_policy: true,
+        };
+        NetworkPolicy::Open
+            .assert_allowed_by_config(&cfg)
+            .expect("Open allowed when operator opts in");
+    }
+
+    #[test]
+    fn assert_allowed_by_config_allows_nolocalnet_regardless() {
+        let disabled = crate::config::NetworkConfig::default();
+        let enabled = crate::config::NetworkConfig {
+            allow_internal_network_policy: true,
+        };
+        NetworkPolicy::NoLocalNet
+            .assert_allowed_by_config(&disabled)
+            .expect("safe profile always allowed");
+        NetworkPolicy::NoLocalNet
+            .assert_allowed_by_config(&enabled)
+            .expect("safe profile always allowed");
     }
 
     #[async_trait]

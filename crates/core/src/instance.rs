@@ -227,6 +227,9 @@ pub struct InstanceService {
     /// best-effort: the systemd timer remains the safety net, but UI
     /// edits should take effect immediately on the happy path.
     egress_sync: Arc<dyn EgressPolicySync>,
+    /// Operator gate for network profiles that punch through the
+    /// default-deny LAN/link-local set.
+    network_config: crate::config::NetworkConfig,
 }
 
 fn mint_state_generation() -> String {
@@ -340,6 +343,7 @@ impl InstanceService {
             mcp_secrets: None,
             state_files: None,
             egress_sync: Arc::new(NoopEgressPolicySync::new()),
+            network_config: crate::config::NetworkConfig::default(),
         }
     }
 
@@ -404,6 +408,11 @@ impl InstanceService {
     /// Tests keep the default no-op counter.
     pub fn with_egress_policy_sync(mut self, sync: Arc<dyn EgressPolicySync>) -> Self {
         self.egress_sync = sync;
+        self
+    }
+
+    pub fn with_network_config(mut self, cfg: crate::config::NetworkConfig) -> Self {
+        self.network_config = cfg;
         self
     }
 
@@ -534,6 +543,9 @@ impl InstanceService {
             .filter(|s| !s.is_empty())
             .ok_or_else(|| SwarmError::BadRequest(missing_sandbox_error.into()))?
             .to_owned();
+        if let Some(policy) = new_network_policy.as_ref() {
+            policy.assert_allowed_by_config(&self.network_config)?;
+        }
         let target_policy = new_network_policy.unwrap_or_else(|| source.network_policy.clone());
         let resolved_policy =
             network_policy::resolve(&target_policy, self.llm_cidr.as_deref(), &*self.resolver)
@@ -1277,6 +1289,7 @@ impl InstanceService {
         snapshot_svc: &crate::snapshot::SnapshotService,
         new_policy: NetworkPolicy,
     ) -> Result<InstanceRow, SwarmError> {
+        new_policy.assert_allowed_by_config(&self.network_config)?;
         // Read the row up front so the no-op check is opaque to
         // callers — the same reason `rotate_in_place` enforces it.
         let source = self
@@ -2391,6 +2404,8 @@ impl InstanceService {
         owner_id: &str,
         req: CreateRequest,
     ) -> Result<CreatedInstance, SwarmError> {
+        req.network_policy
+            .assert_allowed_by_config(&self.network_config)?;
         // The agent boot config refuses to start without a model id, so
         // catch the missing-model case here with a clean error instead
         // of letting the cube start a doomed sandbox we then have to
@@ -2764,6 +2779,32 @@ impl InstanceService {
             bearer_token: bearer,
             proxy_token,
         })
+    }
+
+    pub async fn warn_live_internal_network_policies_if_disabled(&self) -> Result<(), SwarmError> {
+        if self.network_config.allow_internal_network_policy {
+            return Ok(());
+        }
+        let rows = self
+            .instances
+            .list(
+                SYSTEM_OWNER,
+                ListFilter {
+                    status: Some(InstanceStatus::Live),
+                    include_destroyed: false,
+                },
+            )
+            .await?;
+        for row in rows {
+            if row.network_policy.is_internal_network() {
+                tracing::warn!(
+                    instance = %row.id,
+                    "instance {} still on Open policy after gating; will not be re-selectable on edit.",
+                    row.id
+                );
+            }
+        }
+        Ok(())
     }
 
     /// Owner-scoped lookup: returns NotFound for rows the user doesn't own.
@@ -3784,6 +3825,8 @@ impl InstanceService {
         owner_id: &str,
         req: RestoreRequest,
     ) -> Result<CreatedInstance, SwarmError> {
+        req.network_policy
+            .assert_allowed_by_config(&self.network_config)?;
         let id = self.mint_unique_instance_id(owner_id).await?;
         let bearer = Uuid::new_v4().simple().to_string();
         let state_generation = mint_state_generation();

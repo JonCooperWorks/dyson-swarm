@@ -23,6 +23,7 @@
 //!   double-suffix bug.  Drives a turn-shaped LLM call through swarm's
 //!   proxy and confirms the URL the upstream sees has exactly one `/v1`.
 
+use std::io::{self, Write};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -238,6 +239,8 @@ struct Stack {
     llm: LlmState,
     or_prov: Arc<RecordingProvisioning>,
     users: Arc<dyn UserStore>,
+    instances: Arc<dyn InstanceStore>,
+    instance_svc: Arc<InstanceService>,
     skill_marketplace: Arc<SkillMarketplaceService>,
     state_files: Arc<dyson_swarm::state_files::StateFileService>,
     reconfigurer: Arc<RecordingReconfigurer>,
@@ -472,6 +475,8 @@ async fn build_stack(subject_for_no_bearer: &str) -> Stack {
         llm: llm_state,
         or_prov,
         users: users_store,
+        instances: instances_store,
+        instance_svc,
         skill_marketplace,
         state_files,
         reconfigurer,
@@ -481,6 +486,82 @@ async fn build_stack(subject_for_no_bearer: &str) -> Stack {
 // ---------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------
+
+#[derive(Clone, Default)]
+struct SharedLog(Arc<Mutex<Vec<u8>>>);
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SharedLog {
+    type Writer = SharedLog;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+impl Write for SharedLog {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn startup_warns_when_live_open_rows_exist_and_flag_disabled() {
+    let stack = build_stack("alice").await;
+    stack
+        .instances
+        .create(InstanceRow {
+            id: "open-live".into(),
+            owner_id: "legacy".into(),
+            name: "legacy open".into(),
+            task: "still running".into(),
+            cube_sandbox_id: Some("sb-open".into()),
+            state_generation: "gen-open".into(),
+            template_id: "tpl".into(),
+            status: dyson_swarm::traits::InstanceStatus::Live,
+            bearer_token: "bearer".into(),
+            pinned: false,
+            expires_at: None,
+            last_active_at: 0,
+            last_probe_at: None,
+            last_probe_status: None,
+            created_at: 0,
+            destroyed_at: None,
+            rotated_to: None,
+            network_policy: dyson_swarm::network_policy::NetworkPolicy::Open,
+            network_policy_cidrs: Vec::new(),
+            models: Vec::new(),
+            tools: Vec::new(),
+        })
+        .await
+        .unwrap();
+    let logs = SharedLog::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(logs.clone())
+        .with_max_level(tracing::Level::WARN)
+        .without_time()
+        .finish();
+
+    let dispatch = tracing::Dispatch::new(subscriber);
+    let _guard = tracing::dispatcher::set_default(&dispatch);
+    stack
+        .instance_svc
+        .warn_live_internal_network_policies_if_disabled()
+        .await
+        .unwrap();
+
+    let text = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+    assert!(
+        text.contains(
+            "instance open-live still on Open policy after gating; will not be re-selectable on edit."
+        ),
+        "startup warning missing from logs: {text}"
+    );
+}
 
 /// Tenancy isolation — alice's instance is invisible to bob via every
 /// owner-scoped surface (get, secrets, destroy).  All foreign-id reads

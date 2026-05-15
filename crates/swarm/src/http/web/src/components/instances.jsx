@@ -37,6 +37,10 @@ const TASK_MARKDOWN_COMPONENTS = {
   ),
 };
 
+function allowInternalNetworkPolicy(auth) {
+  return Boolean(auth?.config?.network?.allow_internal_network_policy);
+}
+
 export function InstancesView({ view }) {
   const selectedId = instanceIdFromView(view);
   React.useEffect(() => {
@@ -621,6 +625,7 @@ function ToolsPicker({ value, onChange, policyKind }) {
 
 export function NewInstanceForm() {
   const { client, auth } = useApi();
+  const allowInternalPolicy = allowInternalNetworkPolicy(auth);
   const [name, setName] = React.useState('');
   const [task, setTask] = React.useState('');
   // Model ids the agent can pick from.  One labelled suggestion
@@ -908,7 +913,11 @@ export function NewInstanceForm() {
         {wizardStep === 'network' ? (
           <section className="page-section wizard-step">
             <h2 className="section-title">network</h2>
-            <NetworkPolicyPicker value={networkPolicy} onChange={setNetworkPolicy}/>
+            <NetworkPolicyPicker
+              value={networkPolicy}
+              onChange={setNetworkPolicy}
+              allowInternalNetworkPolicy={allowInternalPolicy}
+            />
           </section>
         ) : null}
 
@@ -1324,7 +1333,11 @@ export const POLICY_OPTIONS = [
 /// uses this value.
 export const DEFAULT_POLICY_KIND = 'airgap';
 
-function NetworkPolicyPicker({ value, onChange }) {
+function NetworkPolicyPicker({ value, onChange, allowInternalNetworkPolicy = false }) {
+  const options = React.useMemo(
+    () => POLICY_OPTIONS.filter(opt => opt.kind !== 'open' || allowInternalNetworkPolicy),
+    [allowInternalNetworkPolicy],
+  );
   const setKind = (kind) => {
     if (kind === 'nolocalnet' || kind === 'open' || kind === 'airgap') {
       onChange({ kind, entries: [] });
@@ -1346,7 +1359,7 @@ function NetworkPolicyPicker({ value, onChange }) {
   return (
     <div className="net-policy-picker">
       <div className="net-policy-radios">
-        {POLICY_OPTIONS.map(opt => (
+        {options.map(opt => (
           <label key={opt.kind} className={`net-policy-radio ${value.kind === opt.kind ? 'selected' : ''}`}>
             <input
               type="radio"
@@ -4536,7 +4549,8 @@ function NetworkPolicyBadge({ instance }) {
 }
 
 function NetworkPolicyPanel({ instance, disabled }) {
-  const { client } = useApi();
+  const { client, auth } = useApi();
+  const allowInternalPolicy = allowInternalNetworkPolicy(auth);
   const [policy, setPolicy] = React.useState(() => normaliseInstancePolicy(instance.network_policy));
   const [submitting, setSubmitting] = React.useState(false);
   const [error, setError] = React.useState(null);
@@ -4584,7 +4598,11 @@ function NetworkPolicyPanel({ instance, disabled }) {
         briefly restarts the sandbox; workspace state, DNS, and
         webhook URLs all survive.
       </p>
-      <NetworkPolicyPicker value={policy} onChange={setPolicy}/>
+      <NetworkPolicyPicker
+        value={policy}
+        onChange={setPolicy}
+        allowInternalNetworkPolicy={allowInternalPolicy}
+      />
       {error ? <div className="error">{error}</div> : null}
       {dirty ? (
         <div className="modal-actions">

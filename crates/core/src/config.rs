@@ -51,6 +51,9 @@ pub struct Config {
     #[serde(default)]
     pub cube_facing_addr: Option<String>,
 
+    #[serde(default)]
+    pub network: NetworkConfig,
+
     #[serde(default = "default_probe_interval")]
     pub health_probe_interval_seconds: u64,
     #[serde(default = "default_probe_timeout")]
@@ -133,6 +136,12 @@ impl fmt::Display for DatabaseBackend {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct NetworkConfig {
+    #[serde(default)]
+    pub allow_internal_network_policy: bool,
 }
 
 fn default_db_path() -> PathBuf {
@@ -503,6 +512,9 @@ impl Config {
         if let Some(v) = env.get("SWARM_HOSTNAME") {
             self.hostname = if v.is_empty() { None } else { Some(v.clone()) };
         }
+        if let Some(v) = env.get("SWARM_NETWORK_ALLOW_INTERNAL_NETWORK_POLICY") {
+            self.network.allow_internal_network_policy = parse_boolish(v);
+        }
         if let Some(v) = env.get("SWARM_BYO_ENABLED") {
             self.byo.enabled = parse_boolish(v);
         }
@@ -692,6 +704,7 @@ local_cache_dir = "/tmp/cache"
         assert_eq!(cfg.cube.api_key, "k");
         assert_eq!(cfg.database_backend, DatabaseBackend::Sqlite);
         assert_eq!(cfg.database_url, None);
+        assert!(!cfg.network.allow_internal_network_policy);
         assert_eq!(cfg.health_probe_interval_seconds, 60);
         assert!(!cfg.rotate_binary_on_startup);
         assert_eq!(cfg.backup.sink, BackupSinkKind::Local);
@@ -711,8 +724,13 @@ local_cache_dir = "/tmp/cache"
             "SWARM_PROVIDERS_ANTHROPIC_API_KEY".into(),
             "from-env".into(),
         );
+        env.insert(
+            "SWARM_NETWORK_ALLOW_INTERNAL_NETWORK_POLICY".into(),
+            "true".into(),
+        );
         let cfg = Config::load(&path, &env, false).expect("loads");
         assert_eq!(cfg.cube.url, "https://override");
+        assert!(cfg.network.allow_internal_network_policy);
         assert_eq!(
             cfg.providers.get("anthropic").unwrap().api_key.as_deref(),
             Some("from-env")

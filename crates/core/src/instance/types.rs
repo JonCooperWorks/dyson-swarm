@@ -232,9 +232,9 @@ pub struct CreateRequest {
     pub env: BTreeMap<String, String>,
     #[serde(default)]
     pub ttl_seconds: Option<i64>,
-    /// Per-instance egress profile.  Default `Open` matches the
-    /// pre-feature wire shape — existing callers don't need to change.
-    /// See [`crate::network_policy`] for the four profiles.
+    /// Per-instance egress profile.  Default `NoLocalNet` allows
+    /// ordinary internet egress while blocking LAN/link-local ranges.
+    /// See [`crate::network_policy`] for the available profiles.
     #[serde(default)]
     pub network_policy: NetworkPolicy,
     /// Optional MCP servers attached to the dyson at hire time.

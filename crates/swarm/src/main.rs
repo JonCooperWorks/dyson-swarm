@@ -262,6 +262,7 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         proxy_base,
     )
     .with_llm_cidr(llm_cidr)
+    .with_network_config(cfg.network.clone())
     .with_mcp_upstream_policy(dyson_swarm::upstream_policy::OutboundUrlPolicy {
         enabled: cfg.byo.enabled,
         allow_localhost: cfg.byo.allow_localhost,
@@ -306,6 +307,15 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     instance_svc = instance_svc.with_mcp_secrets(user_secrets_svc.clone());
     instance_svc = instance_svc.with_state_files(state_files.clone());
     let instance_svc = Arc::new(instance_svc);
+    if let Err(err) = instance_svc
+        .warn_live_internal_network_policies_if_disabled()
+        .await
+    {
+        tracing::warn!(
+            error = %err,
+            "network-policy: startup Open policy warning scan failed"
+        );
+    }
 
     // Runtime config sync sweep. Every swarm restart re-pushes the
     // current desired config to every Live instance: models, tools,
@@ -720,6 +730,7 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
             cfg.default_template_id.clone(),
             cfg.default_models.clone(),
             cfg.cube_profiles.clone(),
+            cfg.network.clone(),
         )),
         dyson_http,
         models_upstream: cfg.providers.get("openrouter").map(|p| p.upstream.clone()),

@@ -2765,6 +2765,30 @@ async fn build_with_snapshot_and_policy_with_egress(
     Arc<dyn UserStore>,
     Arc<RecordingReconfigurer>,
 ) {
+    build_with_snapshot_and_policy_config(
+        llm_cidr,
+        resolver,
+        egress_sync,
+        crate::config::NetworkConfig {
+            allow_internal_network_policy: true,
+        },
+    )
+    .await
+}
+
+async fn build_with_snapshot_and_policy_config(
+    llm_cidr: Option<&str>,
+    resolver: Arc<dyn crate::network_policy::HostResolver>,
+    egress_sync: Arc<dyn EgressPolicySync>,
+    network_config: crate::config::NetworkConfig,
+) -> (
+    Arc<InstanceService>,
+    Arc<SnapshotService>,
+    Arc<MockCube>,
+    Arc<dyn InstanceStore>,
+    Arc<dyn UserStore>,
+    Arc<RecordingReconfigurer>,
+) {
     let pool = open_in_memory().await.unwrap();
     let cube = MockCube::new();
     let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(
@@ -2795,7 +2819,8 @@ async fn build_with_snapshot_and_policy_with_egress(
         .with_reconfigurer(recorder.clone())
         .with_llm_cidr(llm_cidr.map(str::to_owned))
         .with_resolver(resolver)
-        .with_egress_policy_sync(egress_sync),
+        .with_egress_policy_sync(egress_sync)
+        .with_network_config(network_config),
     );
     let backup: Arc<dyn BackupSink> = Arc::new(LocalDiskBackupSink::new(cube.clone()));
     let ssvc = Arc::new(SnapshotService::new(
@@ -3550,8 +3575,131 @@ async fn rotate_binary_preserves_network_policy() {
 }
 
 #[tokio::test]
+async fn change_network_policy_to_open_rejected_when_disabled() {
+    let (isvc, ssvc, cube, instances, _users, _recorder) = build_with_snapshot_and_policy_config(
+        Some("10.0.0.1/32"),
+        Arc::new(PolicyMockResolver::default()),
+        Arc::new(NoopEgressPolicySync::new()),
+        crate::config::NetworkConfig::default(),
+    )
+    .await;
+    let src = isvc
+        .create(
+            "legacy",
+            CreateRequest {
+                template_id: "tpl".into(),
+                name: None,
+                task: None,
+                env: env_with_model(),
+                ttl_seconds: None,
+                network_policy: NetworkPolicy::NoLocalNet,
+                mcp_servers: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+    let snapshots_before = cube.snapshotted.lock().unwrap().len();
+
+    let err = isvc
+        .change_network_policy("legacy", &src.id, &ssvc, NetworkPolicy::Open)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        SwarmError::BadRequest(msg)
+            if msg == crate::network_policy::INTERNAL_NETWORK_POLICY_DISABLED_MESSAGE
+    ));
+    assert_eq!(cube.snapshotted.lock().unwrap().len(), snapshots_before);
+    let row = instances.get(&src.id).await.unwrap().unwrap();
+    assert_eq!(row.network_policy, NetworkPolicy::NoLocalNet);
+    assert_eq!(row.status, InstanceStatus::Live);
+}
+
+#[tokio::test]
+async fn change_network_policy_to_open_allowed_when_enabled() {
+    let (isvc, ssvc, _cube, instances, _users, _recorder) = build_with_snapshot_and_policy(
+        Some("10.0.0.1/32"),
+        Arc::new(PolicyMockResolver::default()),
+    )
+    .await;
+    let src = isvc
+        .create(
+            "legacy",
+            CreateRequest {
+                template_id: "tpl".into(),
+                name: None,
+                task: None,
+                env: env_with_model(),
+                ttl_seconds: None,
+                network_policy: NetworkPolicy::NoLocalNet,
+                mcp_servers: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let row = isvc
+        .change_network_policy("legacy", &src.id, &ssvc, NetworkPolicy::Open)
+        .await
+        .unwrap();
+
+    assert_eq!(row.network_policy, NetworkPolicy::Open);
+    let stored = instances.get(&src.id).await.unwrap().unwrap();
+    assert_eq!(stored.network_policy, NetworkPolicy::Open);
+}
+
+#[tokio::test]
+async fn rotate_in_place_with_open_policy_rejected_when_disabled() {
+    let (isvc, ssvc, cube, instances, _users, _recorder) = build_with_snapshot_and_policy_config(
+        Some("10.0.0.1/32"),
+        Arc::new(PolicyMockResolver::default()),
+        Arc::new(NoopEgressPolicySync::new()),
+        crate::config::NetworkConfig::default(),
+    )
+    .await;
+    let src = isvc
+        .create(
+            "legacy",
+            CreateRequest {
+                template_id: "tpl-old".into(),
+                name: None,
+                task: None,
+                env: env_with_model(),
+                ttl_seconds: None,
+                network_policy: NetworkPolicy::NoLocalNet,
+                mcp_servers: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+    let snapshots_before = cube.snapshotted.lock().unwrap().len();
+
+    let err = isvc
+        .rotate_in_place(
+            "legacy",
+            &src.id,
+            &ssvc,
+            "tpl-new",
+            Some(NetworkPolicy::Open),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        SwarmError::BadRequest(msg)
+            if msg == crate::network_policy::INTERNAL_NETWORK_POLICY_DISABLED_MESSAGE
+    ));
+    assert_eq!(cube.snapshotted.lock().unwrap().len(), snapshots_before);
+    let row = instances.get(&src.id).await.unwrap().unwrap();
+    assert_eq!(row.template_id, "tpl-old");
+    assert_eq!(row.network_policy, NetworkPolicy::NoLocalNet);
+}
+
+#[tokio::test]
 async fn change_network_takes_snapshot_swaps_policy_in_place() {
-    // The full change-network pipeline.  Hire on Open, change to
+    // The full change-network pipeline.  Hire on NoLocalNet, change to
     // Airgap, verify in-place semantics:
     //   * cube.snapshotted records the source.
     //   * the row keeps its swarm id, name, owner, bearer.
@@ -3573,7 +3721,7 @@ async fn change_network_takes_snapshot_swaps_policy_in_place() {
                 task: None,
                 env: env_with_model(),
                 ttl_seconds: None,
-                network_policy: NetworkPolicy::Open,
+                network_policy: NetworkPolicy::NoLocalNet,
                 mcp_servers: Vec::new(),
             },
         )
@@ -3622,7 +3770,7 @@ async fn change_network_policy_triggers_egress_sync() {
                 task: None,
                 env: env_with_model(),
                 ttl_seconds: None,
-                network_policy: NetworkPolicy::Open,
+                network_policy: NetworkPolicy::NoLocalNet,
                 mcp_servers: Vec::new(),
             },
         )
@@ -3659,7 +3807,7 @@ async fn rotate_in_place_with_new_policy_triggers_egress_sync() {
                 task: None,
                 env: env_with_model(),
                 ttl_seconds: None,
-                network_policy: NetworkPolicy::Open,
+                network_policy: NetworkPolicy::NoLocalNet,
                 mcp_servers: Vec::new(),
             },
         )
@@ -3695,7 +3843,7 @@ async fn rotate_in_place_without_policy_change_still_triggers_egress_sync() {
                 task: None,
                 env: env_with_model(),
                 ttl_seconds: None,
-                network_policy: NetworkPolicy::Open,
+                network_policy: NetworkPolicy::NoLocalNet,
                 mcp_servers: Vec::new(),
             },
         )
@@ -3709,7 +3857,7 @@ async fn rotate_in_place_without_policy_change_still_triggers_egress_sync() {
 
     assert_eq!(sync.call_count(), 1);
     let row = instances.get(&src.id).await.unwrap().unwrap();
-    assert_eq!(row.network_policy, NetworkPolicy::Open);
+    assert_eq!(row.network_policy, NetworkPolicy::NoLocalNet);
     assert_eq!(row.template_id, "tpl-new");
 }
 
@@ -3731,7 +3879,7 @@ async fn egress_sync_failure_does_not_fail_the_policy_change() {
                 task: None,
                 env: env_with_model(),
                 ttl_seconds: None,
-                network_policy: NetworkPolicy::Open,
+                network_policy: NetworkPolicy::NoLocalNet,
                 mcp_servers: Vec::new(),
             },
         )
@@ -3765,7 +3913,7 @@ async fn change_network_falls_back_to_recreate_when_snapshot_endpoint_is_missing
                 task: None,
                 env: env_with_model(),
                 ttl_seconds: None,
-                network_policy: NetworkPolicy::Open,
+                network_policy: NetworkPolicy::NoLocalNet,
                 mcp_servers: Vec::new(),
             },
         )
@@ -4035,7 +4183,7 @@ async fn restore_snapshot_in_place_uses_snapshot_base_and_replays_mirror_when_st
                 task: Some("restore from swarm".into()),
                 env: env_with_model(),
                 ttl_seconds: None,
-                network_policy: NetworkPolicy::Open,
+                network_policy: NetworkPolicy::NoLocalNet,
                 mcp_servers: Vec::new(),
             },
         )
@@ -4206,7 +4354,7 @@ async fn restore_snapshot_in_place_uses_snapshot_when_mirror_has_no_replayable_b
                 task: Some("keep disk snapshot".into()),
                 env: env_with_model(),
                 ttl_seconds: None,
-                network_policy: NetworkPolicy::Open,
+                network_policy: NetworkPolicy::NoLocalNet,
                 mcp_servers: Vec::new(),
             },
         )
@@ -4416,7 +4564,7 @@ async fn clone_carries_config_files_and_mcp_onto_fresh_id() {
                     m
                 },
                 ttl_seconds: None,
-                network_policy: NetworkPolicy::Open,
+                network_policy: NetworkPolicy::NoLocalNet,
                 mcp_servers: vec![crate::mcp_servers::McpServerSpec {
                     name: "linear".into(),
                     url: "https://8.8.8.8/mcp".into(),
@@ -4475,7 +4623,7 @@ async fn clone_carries_config_files_and_mcp_onto_fresh_id() {
     assert_eq!(new_row.name, "axelrod");
     assert_eq!(new_row.task, "game-theory triage");
     assert_eq!(new_row.template_id, "tpl-v2");
-    assert_eq!(new_row.network_policy, NetworkPolicy::Open);
+    assert_eq!(new_row.network_policy, NetworkPolicy::NoLocalNet);
     assert_eq!(new_row.status, InstanceStatus::Live);
 
     // 3. MCP entry was re-keyed onto the new instance, with
@@ -4588,7 +4736,7 @@ async fn clone_empty_carries_config_and_mcp_no_snapshot() {
                 task: Some("game-theory triage".into()),
                 env: env_with_model(),
                 ttl_seconds: None,
-                network_policy: NetworkPolicy::Open,
+                network_policy: NetworkPolicy::NoLocalNet,
                 mcp_servers: vec![crate::mcp_servers::McpServerSpec {
                     name: "linear".into(),
                     url: "https://8.8.8.8/mcp".into(),
@@ -4648,7 +4796,7 @@ async fn clone_empty_carries_config_and_mcp_no_snapshot() {
     assert_eq!(new_row.name, "axelrod");
     assert_eq!(new_row.task, "game-theory triage");
     assert_eq!(new_row.template_id, "tpl-v2");
-    assert_eq!(new_row.network_policy, NetworkPolicy::Open);
+    assert_eq!(new_row.network_policy, NetworkPolicy::NoLocalNet);
 
     // 3. Cube was hired with the new template AND no from_snapshot.
     let captured = cube.last_create();
@@ -4767,7 +4915,7 @@ async fn reset_replays_sealed_state_before_enabling_sync() {
                 task: Some("keep context".into()),
                 env: env_with_model(),
                 ttl_seconds: None,
-                network_policy: NetworkPolicy::Open,
+                network_policy: NetworkPolicy::NoLocalNet,
                 mcp_servers: Vec::new(),
             },
         )
@@ -5004,7 +5152,7 @@ async fn runtime_config_sync_does_not_replay_state_into_live_sandbox() {
                 task: Some("keep chat history".into()),
                 env: env_with_model(),
                 ttl_seconds: None,
-                network_policy: NetworkPolicy::Open,
+                network_policy: NetworkPolicy::NoLocalNet,
                 mcp_servers: Vec::new(),
             },
         )
@@ -5160,7 +5308,7 @@ async fn runtime_config_sync_keeps_row_identity_when_mirrored_identity_has_no_bo
                 task: Some("keep this mission".into()),
                 env: env_with_model(),
                 ttl_seconds: None,
-                network_policy: NetworkPolicy::Open,
+                network_policy: NetworkPolicy::NoLocalNet,
                 mcp_servers: Vec::new(),
             },
         )
@@ -5253,7 +5401,7 @@ async fn binary_rotation_replays_sealed_chats_before_enabling_sync() {
                 task: Some("keep chats".into()),
                 env: env_with_model(),
                 ttl_seconds: None,
-                network_policy: NetworkPolicy::Open,
+                network_policy: NetworkPolicy::NoLocalNet,
                 mcp_servers: Vec::new(),
             },
         )
@@ -5485,7 +5633,7 @@ async fn binary_rotation_uses_snapshot_base_when_mirror_rows_exist() {
                 task: Some("keep sandbox state".into()),
                 env: env_with_model(),
                 ttl_seconds: None,
-                network_policy: NetworkPolicy::Open,
+                network_policy: NetworkPolicy::NoLocalNet,
                 mcp_servers: Vec::new(),
             },
         )

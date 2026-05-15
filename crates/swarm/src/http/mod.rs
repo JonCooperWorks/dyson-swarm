@@ -1203,6 +1203,86 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn hire_with_open_policy_rejected_when_disabled_returns_400() {
+        let (state, users) = build_state().await;
+        let (user_auth, _user_id) = token_bound_user_auth(users, "alice", "alice-token").await;
+        let base = spawn(state, AuthState::dangerous_no_auth(), user_auth).await;
+
+        let r = reqwest::Client::new()
+            .post(format!("{base}/v1/instances"))
+            .bearer_auth("alice-token")
+            .json(&serde_json::json!({
+                "template_id": "tpl",
+                "env": { "SWARM_MODEL": "openrouter/model" },
+                "network_policy": { "kind": "open" }
+            }))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            r.text().await.unwrap(),
+            crate::network_policy::INTERNAL_NETWORK_POLICY_DISABLED_MESSAGE
+        );
+    }
+
+    #[tokio::test]
+    async fn change_network_endpoint_rejects_open_when_disabled() {
+        let (state, users, instances) = build_state_with_instances().await;
+        let (user_auth, user_id) = token_bound_user_auth(users, "alice", "alice-token").await;
+        seed_owned_instance(&instances, &user_id, "inst-a").await;
+        let base = spawn(state, AuthState::dangerous_no_auth(), user_auth).await;
+
+        let r = reqwest::Client::new()
+            .post(format!("{base}/v1/instances/inst-a/change-network"))
+            .bearer_auth("alice-token")
+            .json(&serde_json::json!({ "network_policy": { "kind": "open" } }))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            r.text().await.unwrap(),
+            crate::network_policy::INTERNAL_NETWORK_POLICY_DISABLED_MESSAGE
+        );
+        let row = instances.get("inst-a").await.unwrap().unwrap();
+        assert_eq!(row.network_policy, NetworkPolicy::NoLocalNet);
+    }
+
+    #[tokio::test]
+    async fn whoami_or_public_config_exposes_allow_internal_network_policy_flag() {
+        let (mut state, users) = build_state().await;
+        state.auth_config = Arc::new(auth_config::AuthConfig::from_toml(
+            None,
+            None,
+            vec![],
+            vec![],
+            crate::config::NetworkConfig {
+                allow_internal_network_policy: true,
+            },
+        ));
+        let base = spawn(
+            state,
+            AuthState::enforced(crate::config::OidcRoles {
+                claim: "https://test/roles".into(),
+                admin: "rol_admin".into(),
+            }),
+            deny_user_auth(users),
+        )
+        .await;
+
+        let r = reqwest::get(format!("{base}/auth/config")).await.unwrap();
+        assert_eq!(r.status(), 200);
+        let body: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(
+            body["network"]["allow_internal_network_policy"],
+            serde_json::Value::Bool(true)
+        );
+    }
+
+    #[tokio::test]
     async fn tool_call_audit_list_filters_paginates_and_enforces_owner() {
         let (state, users, instances) = build_state_with_instances().await;
         let (alice_auth, alice_id) =

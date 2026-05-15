@@ -145,14 +145,14 @@ async fn change_network(
     Extension(caller): Extension<CallerIdentity>,
     Path(id): Path<String>,
     Json(body): Json<ChangeNetworkBody>,
-) -> Result<Json<InstanceView>, StatusCode> {
+) -> Result<Json<InstanceView>, (StatusCode, String)> {
     match state
         .instances
         .change_network_policy(&caller.user_id, &id, &state.snapshots, body.network_policy)
         .await
     {
         Ok(row) => Ok(Json(InstanceView::from_row(row, state.hostname.as_deref()))),
-        Err(e) => Err(swarm_err_to_status(e)),
+        Err(e) => Err(swarm_err_to_response(e)),
     }
 }
 
@@ -404,7 +404,7 @@ async fn create_instance(
     State(state): State<AppState>,
     Extension(caller): Extension<CallerIdentity>,
     Json(req): Json<CreateRequest>,
-) -> Result<(StatusCode, Json<CreatedInstance>), StatusCode> {
+) -> Result<(StatusCode, Json<CreatedInstance>), (StatusCode, String)> {
     match state.instances.create(&caller.user_id, req).await {
         Ok(mut c) => {
             // The cube client returns the raw `<sandbox>.cube.app` URL,
@@ -418,7 +418,7 @@ async fn create_instance(
             }
             Ok((StatusCode::CREATED, Json(c)))
         }
-        Err(e) => Err(swarm_err_to_status(e)),
+        Err(e) => Err(swarm_err_to_response(e)),
     }
 }
 
@@ -1093,7 +1093,7 @@ impl InstanceView {
     }
 }
 
-pub(crate) fn swarm_err_to_status(e: SwarmError) -> StatusCode {
+fn swarm_error_status(e: &SwarmError) -> StatusCode {
     match e {
         SwarmError::NotFound => StatusCode::NOT_FOUND,
         SwarmError::PolicyDenied(_) => StatusCode::FORBIDDEN,
@@ -1105,7 +1105,12 @@ pub(crate) fn swarm_err_to_status(e: SwarmError) -> StatusCode {
         SwarmError::Cube(_) | SwarmError::Internal(_) | SwarmError::SnapshotCorrupt(_) => {
             StatusCode::BAD_GATEWAY
         }
-        SwarmError::Store(s) => store_err_to_status(s),
+        SwarmError::Store(crate::error::StoreError::NotFound) => StatusCode::NOT_FOUND,
+        SwarmError::Store(crate::error::StoreError::Constraint(_)) => StatusCode::CONFLICT,
+        SwarmError::Store(crate::error::StoreError::Io(_))
+        | SwarmError::Store(crate::error::StoreError::Malformed(_)) => {
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
         SwarmError::Backup(_) | SwarmError::Config(_) => StatusCode::INTERNAL_SERVER_ERROR,
         // SnapshotQuotaExceeded: 507 Insufficient Storage — semantically
         // closer than 429/403 because the user CAN proceed by deleting
@@ -1114,4 +1119,29 @@ pub(crate) fn swarm_err_to_status(e: SwarmError) -> StatusCode {
         SwarmError::SnapshotQuotaExceeded { .. } => StatusCode::INSUFFICIENT_STORAGE,
         SwarmError::InstanceQuotaExceeded { .. } => StatusCode::TOO_MANY_REQUESTS,
     }
+}
+
+pub(crate) fn swarm_err_to_status(e: SwarmError) -> StatusCode {
+    swarm_error_status(&e)
+}
+
+pub(crate) fn swarm_err_to_response(e: SwarmError) -> (StatusCode, String) {
+    let status = swarm_error_status(&e);
+    let body = match e {
+        SwarmError::BadRequest(msg) | SwarmError::PolicyDenied(msg) => msg,
+        SwarmError::NotFound => "not found".to_owned(),
+        SwarmError::Cube(err) => err.to_string(),
+        SwarmError::Store(err) => err.to_string(),
+        SwarmError::Backup(err) => err.to_string(),
+        SwarmError::Config(err) => err.to_string(),
+        SwarmError::Internal(msg) => msg,
+        SwarmError::SnapshotCorrupt(msg) => msg,
+        SwarmError::SnapshotQuotaExceeded { limit } => {
+            format!("snapshot quota exceeded (limit {limit})")
+        }
+        SwarmError::InstanceQuotaExceeded { limit } => {
+            format!("instance quota exceeded (limit {limit})")
+        }
+    };
+    (status, body)
 }

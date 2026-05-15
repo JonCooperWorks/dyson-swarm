@@ -80,6 +80,9 @@ pub struct AuthConfig {
     /// form falls back to the legacy single-template input.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub cube_profiles: Vec<crate::config::CubeProfile>,
+    /// Non-sensitive network-policy gates the SPA uses to hide unsafe
+    /// choices from create/edit forms.
+    pub network: crate::config::NetworkConfig,
 }
 
 impl AuthConfig {
@@ -90,6 +93,7 @@ impl AuthConfig {
         default_template_id: Option<String>,
         default_models: Vec<String>,
         cube_profiles: Vec<crate::config::CubeProfile>,
+        network: crate::config::NetworkConfig,
     ) -> Self {
         let mode = match oidc {
             Some(o) => match &o.spa_client_id {
@@ -110,6 +114,7 @@ impl AuthConfig {
             default_template_id,
             default_models,
             cube_profiles,
+            network,
         }
     }
 
@@ -121,6 +126,7 @@ impl AuthConfig {
             default_template_id: None,
             default_models: vec![],
             cube_profiles: vec![],
+            network: crate::config::NetworkConfig::default(),
         }
     }
 }
@@ -142,7 +148,13 @@ mod tests {
 
     #[test]
     fn no_oidc_block_yields_none() {
-        let cfg = AuthConfig::from_toml(None, None, vec![], vec![]);
+        let cfg = AuthConfig::from_toml(
+            None,
+            None,
+            vec![],
+            vec![],
+            crate::config::NetworkConfig::default(),
+        );
         assert!(matches!(cfg.mode, AuthMode::None));
     }
 
@@ -157,7 +169,13 @@ mod tests {
             spa_scopes: vec![],
             roles: None,
         };
-        let cfg = AuthConfig::from_toml(Some(&oidc), None, vec![], vec![]);
+        let cfg = AuthConfig::from_toml(
+            Some(&oidc),
+            None,
+            vec![],
+            vec![],
+            crate::config::NetworkConfig::default(),
+        );
         assert!(matches!(cfg.mode, AuthMode::None));
     }
 
@@ -172,7 +190,13 @@ mod tests {
             spa_scopes: vec!["profile".into(), "email".into()],
             roles: None,
         };
-        let cfg = AuthConfig::from_toml(Some(&oidc), None, vec![], vec![]);
+        let cfg = AuthConfig::from_toml(
+            Some(&oidc),
+            None,
+            vec![],
+            vec![],
+            crate::config::NetworkConfig::default(),
+        );
         match cfg.mode {
             AuthMode::Oidc {
                 issuer,
@@ -210,7 +234,13 @@ mod tests {
                 admin: "admin".into(),
             }),
         };
-        let cfg = AuthConfig::from_toml(Some(&oidc), None, vec![], vec![]);
+        let cfg = AuthConfig::from_toml(
+            Some(&oidc),
+            None,
+            vec![],
+            vec![],
+            crate::config::NetworkConfig::default(),
+        );
         match cfg.mode {
             AuthMode::Oidc {
                 admin_claim,
@@ -235,7 +265,13 @@ mod tests {
             spa_scopes: vec![],
             roles: None,
         };
-        let cfg = AuthConfig::from_toml(Some(&oidc), None, vec![], vec![]);
+        let cfg = AuthConfig::from_toml(
+            Some(&oidc),
+            None,
+            vec![],
+            vec![],
+            crate::config::NetworkConfig::default(),
+        );
         assert!(matches!(cfg.mode, AuthMode::None));
     }
 
@@ -260,6 +296,7 @@ mod tests {
             default_template_id: Some("tpl-abc".into()),
             default_models: vec!["anthropic/claude-sonnet-4-5".into()],
             cube_profiles: vec![],
+            network: crate::config::NetworkConfig::default(),
         };
         let json = serde_json::to_value(cfg).unwrap();
         assert_eq!(json["mode"], "oidc");
@@ -310,6 +347,7 @@ mod tests {
                     description: None,
                 },
             ],
+            crate::config::NetworkConfig::default(),
         );
         let json = serde_json::to_value(cfg).unwrap();
         let arr = json["cube_profiles"]
@@ -328,5 +366,20 @@ mod tests {
             arr[1].get("description").is_none(),
             "absent description must be omitted, not rendered as null"
         );
+    }
+
+    #[test]
+    fn json_shape_surfaces_network_public_flags() {
+        let cfg = AuthConfig::from_toml(
+            None,
+            None,
+            vec![],
+            vec![],
+            crate::config::NetworkConfig {
+                allow_internal_network_policy: true,
+            },
+        );
+        let json = serde_json::to_value(cfg).unwrap();
+        assert_eq!(json["network"]["allow_internal_network_policy"], true);
     }
 }

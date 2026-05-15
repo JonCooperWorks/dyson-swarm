@@ -151,6 +151,41 @@ describe('instance section rail routing', () => {
     });
   });
 
+  async function renderNewFormNetworkStep(allowInternalNetworkPolicy) {
+    const client = {
+      listMcpDockerCatalog: vi.fn().mockResolvedValue({ allow_raw_json: false, servers: [] }),
+    };
+    render(
+      React.createElement(ApiProvider, {
+        client,
+        auth: {
+          config: {
+            cube_profiles: [],
+            default_models: ['openrouter/model'],
+            default_template_id: 'tpl',
+            network: { allow_internal_network_policy: allowInternalNetworkPolicy },
+          },
+        },
+      },
+        React.createElement(NewInstanceForm),
+      ),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'next' }));
+    fireEvent.click(screen.getByRole('button', { name: 'next' }));
+    await screen.findByRole('heading', { name: 'network' });
+  }
+
+  test('network policy dropdown hides Open when flag is false', async () => {
+    await renderNewFormNetworkStep(false);
+    expect(screen.queryByLabelText(/Open \+ internal LAN/i)).toBeNull();
+    expect(screen.getByLabelText(/Open \(full internet\)/i)).toBeInTheDocument();
+  });
+
+  test('network policy dropdown shows Open when flag is true', async () => {
+    await renderNewFormNetworkStep(true);
+    expect(screen.getByLabelText(/Open \+ internal LAN/i)).toBeInTheDocument();
+  });
+
   test('marks the active section in the section nav', () => {
     const row = {
       id: 'a',

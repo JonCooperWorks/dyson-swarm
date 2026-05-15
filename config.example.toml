@@ -17,6 +17,12 @@ hostname = "swarm.example.com"
 health_probe_interval_seconds = 60
 health_probe_timeout_seconds = 5
 
+[network]
+# DANGEROUS — only enable on a single-tenant host where the cube is
+# trusted to reach the LAN. Exposes 169.254.169.254 cloud-metadata if
+# cloud-metadata isn't blocked at the host firewall.
+allow_internal_network_policy = false
+
 [cube]
 url = "http://localhost:3000"
 api_key = "CHANGE_ME"

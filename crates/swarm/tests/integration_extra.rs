@@ -703,6 +703,54 @@ async fn post_verify_only_does_not_dispatch() {
 }
 
 #[tokio::test]
+async fn failed_hmac_v2_delivery_persists_structured_verify_error() {
+    let stack = build_stack("alice-webhook-verify-error-row").await;
+    let client = reqwest::Client::new();
+    let user_id = create_user(
+        &client,
+        &stack.base,
+        "alice-webhook-verify-error-row-user",
+        true,
+    )
+    .await;
+    let token = mint_api_key(&client, &stack.base, &user_id).await;
+    let instance_id = create_live_instance(&client, &stack.base, &token).await;
+    create_standard_webhook(&client, &stack.base, &token, &instance_id, "standard").await;
+
+    let r = client
+        .post(format!("{}/webhooks/{}/standard", stack.base, instance_id))
+        .header("webhook-id", "msg_bad")
+        .header("webhook-timestamp", "1700000000")
+        .header(
+            "webhook-signature",
+            "v1,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        )
+        .body(
+            include_bytes!("../../core/tests/fixtures/webhooks/standard/request.txt")
+                .as_slice()
+                .to_vec(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 401);
+
+    let rows: serde_json::Value = client
+        .get(format!(
+            "{}/v1/instances/{}/webhooks/standard/deliveries",
+            stack.base, instance_id
+        ))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(rows[0]["verify_error"], "AllSignaturesMismatched");
+}
+
+#[tokio::test]
 async fn post_replay_redispatches_without_reverifying() {
     let stack = build_stack("alice-webhook-replay").await;
     let client = reqwest::Client::new();

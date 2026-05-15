@@ -277,6 +277,22 @@ pub enum VerifyError {
     ReplayDeduped { key: String },
 }
 
+impl VerifyError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::MissingHeader { .. } => "MissingHeader",
+            Self::MissingTimestamp => "MissingTimestamp",
+            Self::TimestampOutOfSkew { .. } => "TimestampOutOfSkew",
+            Self::MissingSignature => "MissingSignature",
+            Self::MalformedSignature { .. } => "MalformedSignature",
+            Self::UnknownVersion { .. } => "UnknownVersion",
+            Self::AllSignaturesMismatched => "AllSignaturesMismatched",
+            Self::UnknownPlaceholder { .. } => "UnknownPlaceholder",
+            Self::ReplayDeduped { .. } => "ReplayDeduped",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct WebhookVerifierPreset {
     pub name: String,
@@ -1044,7 +1060,7 @@ impl WebhookService {
                 signature_ok,
                 error: error_text,
                 verify_error: match &res {
-                    Err(WebhookError::Verify(e)) => Some(e.to_string()),
+                    Err(WebhookError::Verify(e)) => Some(e.code().to_owned()),
                     _ => None,
                 },
                 request_headers: serde_json::to_string(&forward_headers).ok(),

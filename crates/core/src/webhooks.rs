@@ -24,9 +24,12 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as B64;
 use hmac::{Hmac, Mac};
 use http::header::HeaderName;
-use sha2::Sha256;
+use sha1::Sha1;
+use sha2::{Sha256, Sha512};
 use subtle::ConstantTimeEq;
 use uuid::Uuid;
 
@@ -73,6 +76,7 @@ pub struct DispatchCtx<'a> {
     pub name: &'a str,
     pub signature_headers: &'a [(String, String)],
     pub bearer_header: Option<&'a str>,
+    pub bearer_path_token: Option<&'a str>,
     pub request_id: Option<&'a str>,
     pub forward_headers: Vec<(String, String)>,
     pub content_type: Option<String>,
@@ -86,6 +90,10 @@ pub const WEBHOOK_SECRET_PREFIX: &str = "webhook:";
 
 pub fn webhook_secret_name(instance_id: &str, webhook_name: &str) -> String {
     format!("{WEBHOOK_SECRET_PREFIX}{instance_id}:{webhook_name}")
+}
+
+pub fn webhook_row_key(instance_id: &str, webhook_name: &str) -> String {
+    format!("{instance_id}:{webhook_name}")
 }
 
 pub fn webhook_chat_id(webhook_name: &str) -> String {
@@ -130,10 +138,174 @@ pub enum WebhookError {
     NotFound,
     #[error("signature mismatch")]
     SignatureMismatch,
+    #[error(transparent)]
+    Verify(#[from] VerifyError),
+    #[error("replay deduped: {0}")]
+    ReplayDeduped(String),
     #[error("instance not yet ready (warming up)")]
     NotReady,
     #[error("dispatch failed: {0}")]
     Dispatch(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebhookVerifierMode {
+    LegacyHmac,
+    LegacyBearer,
+    None,
+    HmacV2,
+    BearerV2,
+}
+
+impl WebhookVerifierMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LegacyHmac => "legacy_hmac",
+            Self::LegacyBearer => "legacy_bearer",
+            Self::None => "none",
+            Self::HmacV2 => "hmac_v2",
+            Self::BearerV2 => "bearer_v2",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "legacy_hmac" => Some(Self::LegacyHmac),
+            "legacy_bearer" => Some(Self::LegacyBearer),
+            "none" => Some(Self::None),
+            "hmac_v2" => Some(Self::HmacV2),
+            "bearer_v2" => Some(Self::BearerV2),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SignatureAlgorithm {
+    Sha256,
+    Sha1,
+    Sha512,
+}
+
+impl SignatureAlgorithm {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Sha256 => "sha256",
+            Self::Sha1 => "sha1",
+            Self::Sha512 => "sha512",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "sha256" => Some(Self::Sha256),
+            "sha1" => Some(Self::Sha1),
+            "sha512" => Some(Self::Sha512),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SignatureEncoding {
+    Hex,
+    Base64,
+}
+
+impl SignatureEncoding {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Hex => "hex",
+            Self::Base64 => "base64",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "hex" => Some(Self::Hex),
+            "base64" => Some(Self::Base64),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WebhookVerifierConfig {
+    pub mode: WebhookVerifierMode,
+    pub signature_header: String,
+    pub signature_algo: Option<SignatureAlgorithm>,
+    pub signature_encoding: Option<SignatureEncoding>,
+    pub signature_prefix: Option<String>,
+    pub signature_separator: Option<String>,
+    pub signature_value_split: Option<String>,
+    pub timestamp_header: Option<String>,
+    pub timestamp_skew_secs: Option<u64>,
+    pub payload_template: Option<String>,
+    pub idempotency_header: Option<String>,
+    pub bearer_path_token: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct VerifyOutcome {
+    pub rendered_payload: Option<Vec<u8>>,
+    pub matched_version: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum VerifyError {
+    #[error("missing header {name}")]
+    MissingHeader { name: String },
+    #[error("missing timestamp")]
+    MissingTimestamp,
+    #[error("timestamp outside skew: now={now} ts={ts} skew_secs={skew_secs}")]
+    TimestampOutOfSkew { now: i64, ts: i64, skew_secs: u64 },
+    #[error("missing signature")]
+    MissingSignature,
+    #[error("malformed signature: {reason}")]
+    MalformedSignature { reason: String },
+    #[error("unknown signature version {version}")]
+    UnknownVersion { version: String, known: Vec<String> },
+    #[error("all signatures mismatched")]
+    AllSignaturesMismatched,
+    #[error("unknown template placeholder {name}")]
+    UnknownPlaceholder { name: String },
+    #[error("replay deduped: {key}")]
+    ReplayDeduped { key: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WebhookVerifierPreset {
+    pub name: String,
+    pub verifier: WebhookVerifierConfig,
+}
+
+pub fn agentmail_preset() -> WebhookVerifierPreset {
+    // AgentMail documents Svix verification headers at
+    // https://docs.agentmail.to/webhook-verification. Svix documents
+    // the signed content as "<id>.<timestamp>.<raw body>" and the
+    // space-delimited "v1,<base64>" signature format at
+    // https://www.svix.com/guides/receiving/receive-webhooks-with-svix-cli/.
+    WebhookVerifierPreset {
+        name: "AgentMail".to_owned(),
+        verifier: WebhookVerifierConfig {
+            mode: WebhookVerifierMode::HmacV2,
+            signature_header: "svix-signature".to_owned(),
+            signature_algo: Some(SignatureAlgorithm::Sha256),
+            signature_encoding: Some(SignatureEncoding::Base64),
+            signature_prefix: Some("v1,".to_owned()),
+            signature_separator: Some(" ".to_owned()),
+            signature_value_split: Some(",".to_owned()),
+            timestamp_header: Some("svix-timestamp".to_owned()),
+            timestamp_skew_secs: Some(300),
+            payload_template: Some("{{id}}.{{timestamp}}.{{body}}".to_owned()),
+            idempotency_header: Some("svix-id".to_owned()),
+            bearer_path_token: None,
+        },
+    }
 }
 
 /// One ready-to-write spec.  `secret` is plaintext on the way in; the
@@ -146,6 +318,7 @@ pub struct WebhookSpec {
     pub name: String,
     pub description: String,
     pub auth_scheme: WebhookAuthScheme,
+    pub verifier: Option<WebhookVerifierConfig>,
     /// Header to read for HMAC signatures. `None` keeps the existing
     /// value on update, or defaults to `x-swarm-signature` on create.
     pub signature_header: Option<String>,
@@ -486,12 +659,23 @@ impl WebhookService {
                 .map(|r| r.signature_header.clone())
                 .unwrap_or_else(|| DEFAULT_SIGNATURE_HEADER.to_owned()),
         };
+        let verifier = match spec.verifier.clone() {
+            Some(verifier) => verifier,
+            None => existing
+                .as_ref()
+                .map(row_verifier_config)
+                .transpose()?
+                .unwrap_or_else(|| {
+                    legacy_verifier_config(spec.auth_scheme, signature_header.clone())
+                }),
+        };
+        validate_verifier_config(&verifier).map_err(|e| WebhookError::BadRequest(e.to_string()))?;
 
         // Resolve the secret pointer.  When the scheme needs a key,
         // we either (a) reuse the existing secret_name when no new
         // plaintext is provided AND the row already had one, or
         // (b) seal the new plaintext under the convention name.
-        let secret_name = if spec.auth_scheme.needs_secret() {
+        let secret_name = if verifier_needs_user_secret(&verifier) {
             match (
                 &spec.secret_plaintext,
                 existing.as_ref().and_then(|r| r.secret_name.as_ref()),
@@ -524,7 +708,20 @@ impl WebhookService {
             name: spec.name,
             description: spec.description,
             auth_scheme: spec.auth_scheme,
-            signature_header,
+            signature_header: verifier.signature_header.clone(),
+            verifier_mode: verifier.mode.as_str().to_owned(),
+            signature_algo: verifier.signature_algo.map(|v| v.as_str().to_owned()),
+            signature_encoding: verifier.signature_encoding.map(|v| v.as_str().to_owned()),
+            signature_prefix: verifier.signature_prefix.clone(),
+            signature_separator: verifier.signature_separator.clone(),
+            signature_value_split: verifier.signature_value_split.clone(),
+            timestamp_header: verifier.timestamp_header.clone(),
+            timestamp_skew_secs: verifier.timestamp_skew_secs.map(|v| v as i64),
+            payload_template: verifier.payload_template.clone(),
+            idempotency_header: verifier.idempotency_header.clone(),
+            bearer_path_token: verifier.bearer_path_token.clone().or_else(|| {
+                (verifier.mode == WebhookVerifierMode::BearerV2).then(random_path_token)
+            }),
             secret_name,
             enabled: spec.enabled,
             created_at: existing.as_ref().map(|r| r.created_at).unwrap_or(now),
@@ -643,6 +840,97 @@ impl WebhookService {
         Ok(row)
     }
 
+    pub async fn verify_only(
+        &self,
+        owner_id: &str,
+        instance_id: &str,
+        name: &str,
+        headers: &[(String, String)],
+        bearer_header: Option<&str>,
+        bearer_path_token: Option<&str>,
+        body: &[u8],
+    ) -> Result<VerifyOutcome, WebhookError> {
+        self.ensure_owner(owner_id, instance_id).await?;
+        let row = self
+            .webhooks
+            .get(instance_id, name)
+            .await?
+            .ok_or(WebhookError::NotFound)?;
+        let verifier = row_verifier_config(&row)?;
+        let secret = if verifier_needs_user_secret(&verifier) {
+            Some(self.load_secret(owner_id, &row).await?)
+        } else {
+            None
+        };
+        verify_inbound_request(
+            &verifier,
+            secret.as_deref(),
+            headers,
+            bearer_header,
+            bearer_path_token,
+            body,
+            crate::now_secs(),
+        )
+        .map_err(WebhookError::Verify)
+    }
+
+    pub async fn replay_delivery(
+        &self,
+        owner_id: &str,
+        instance_id: &str,
+        delivery_id: &str,
+        replayed_by_user_id: &str,
+    ) -> Result<u16, WebhookError> {
+        let row = self
+            .get_delivery(owner_id, instance_id, delivery_id)
+            .await?;
+        let body = row.body.unwrap_or_default();
+        let instance = self
+            .instances
+            .get(owner_id, instance_id)
+            .await
+            .map_err(|_| WebhookError::NotFound)?;
+        if instance.cube_sandbox_id.as_deref().unwrap_or("").is_empty() {
+            return Err(WebhookError::NotReady);
+        }
+        let webhook = self
+            .webhooks
+            .get(instance_id, &row.webhook_name)
+            .await?
+            .ok_or(WebhookError::NotFound)?;
+        let started = Instant::now();
+        let status = self
+            .dispatcher
+            .dispatch(&instance, &webhook.name, &webhook.description, &[], &body)
+            .await
+            .map_err(WebhookError::Dispatch)?;
+        let elapsed_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
+        let sealed_body = self
+            .seal_body_for_audit(instance_id, &body)
+            .await
+            .unwrap_or(None);
+        let replay_row = DeliveryRow {
+            id: Uuid::new_v4().simple().to_string(),
+            instance_id: instance_id.to_owned(),
+            webhook_name: row.webhook_name,
+            fired_at: crate::now_secs(),
+            status_code: i32::from(status),
+            latency_ms: elapsed_ms,
+            request_id: Some(format!("replay:{delivery_id}:{replayed_by_user_id}")),
+            signature_ok: true,
+            error: None,
+            verify_error: None,
+            request_headers: row.request_headers,
+            replayed_from_delivery_id: Some(delivery_id.to_owned()),
+            replayed_by_user_id: Some(replayed_by_user_id.to_owned()),
+            body: sealed_body,
+            body_size: Some(i64::try_from(body.len()).unwrap_or(i64::MAX)),
+            content_type: row.content_type,
+        };
+        self.deliveries.insert(&replay_row).await?;
+        Ok(status)
+    }
+
     fn open_audit_body(
         &self,
         owner_id: &str,
@@ -688,6 +976,7 @@ impl WebhookService {
             name,
             signature_headers,
             bearer_header,
+            bearer_path_token,
             request_id,
             forward_headers,
             content_type,
@@ -700,6 +989,7 @@ impl WebhookService {
                 name,
                 signature_headers,
                 bearer_header,
+                bearer_path_token,
                 &forward_headers,
                 body,
             )
@@ -708,6 +998,10 @@ impl WebhookService {
         let (status_code, signature_ok, error_text) = match &res {
             Ok(s) => (i32::from(*s), true, None),
             Err(WebhookError::SignatureMismatch) => (401, false, Some("signature mismatch".into())),
+            Err(WebhookError::Verify(e)) => (401, false, Some(e.to_string())),
+            Err(WebhookError::ReplayDeduped(key)) => {
+                (200, true, Some(format!("replay deduped: {key}")))
+            }
             Err(WebhookError::NotFound) => (404, false, Some("not found".into())),
             Err(WebhookError::NotReady) => (503, true, Some("instance warming up".into())),
             Err(WebhookError::Dispatch(e)) => (502, true, Some(e.clone())),
@@ -749,6 +1043,13 @@ impl WebhookService {
                 request_id: request_id.map(str::to_owned),
                 signature_ok,
                 error: error_text,
+                verify_error: match &res {
+                    Err(WebhookError::Verify(e)) => Some(e.to_string()),
+                    _ => None,
+                },
+                request_headers: serde_json::to_string(&forward_headers).ok(),
+                replayed_from_delivery_id: None,
+                replayed_by_user_id: None,
                 // Audit storage: keep the body for every delivery we
                 // accepted into the pipeline, sealed under the owner's
                 // age cipher.  An attacker with read access to the
@@ -803,6 +1104,7 @@ impl WebhookService {
         name: &str,
         signature_headers: &[(String, String)],
         bearer_header: Option<&str>,
+        bearer_path_token: Option<&str>,
         forward_headers: &[(String, String)],
         body: &[u8],
     ) -> Result<u16, WebhookError> {
@@ -826,34 +1128,43 @@ impl WebhookService {
         }
         let owner_id = instance.owner_id.clone();
 
-        // Verify before fetching the secret for `none` (cheap path
-        // first) so we avoid the round-trip when auth is disabled.
-        match row.auth_scheme {
-            WebhookAuthScheme::None => {}
-            WebhookAuthScheme::Bearer => {
-                let provided = bearer_header
-                    .and_then(strip_bearer)
-                    .ok_or(WebhookError::SignatureMismatch)?;
-                let expected = self.load_secret(&owner_id, &row).await?;
-                if !ct_eq(expected.as_bytes(), provided.as_bytes()) {
-                    return Err(WebhookError::SignatureMismatch);
-                }
+        let verifier = row_verifier_config(&row)?;
+        let secret = if verifier_needs_user_secret(&verifier) {
+            Some(self.load_secret(&owner_id, &row).await?)
+        } else {
+            None
+        };
+        let verified = verify_inbound_request(
+            &verifier,
+            secret.as_deref(),
+            signature_headers,
+            bearer_header,
+            bearer_path_token,
+            body,
+            crate::now_secs(),
+        )
+        .map_err(|e| match verifier.mode {
+            WebhookVerifierMode::LegacyHmac | WebhookVerifierMode::LegacyBearer => {
+                WebhookError::SignatureMismatch
             }
-            WebhookAuthScheme::HmacSha256 => {
-                let header = signature_header_value(signature_headers, &row.signature_header)
-                    .ok_or(WebhookError::SignatureMismatch)?;
-                let provided_hex = header.strip_prefix("sha256=").unwrap_or(header).trim();
-                let provided =
-                    hex::decode(provided_hex).map_err(|_| WebhookError::SignatureMismatch)?;
-                let key = self.load_secret(&owner_id, &row).await?;
-                let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key.as_bytes())
-                    .map_err(|_| WebhookError::SignatureMismatch)?;
-                mac.update(body);
-                if mac.verify_slice(&provided).is_err() {
-                    return Err(WebhookError::SignatureMismatch);
-                }
+            _ => WebhookError::Verify(e),
+        })?;
+        if let Some(header_name) = verifier.idempotency_header.as_deref() {
+            let key = signature_header_value(signature_headers, header_name).ok_or_else(|| {
+                WebhookError::Verify(VerifyError::MissingHeader {
+                    name: header_name.to_owned(),
+                })
+            })?;
+            let row_key = webhook_row_key(&row.instance_id, &row.name);
+            let first = self
+                .deliveries
+                .try_mark_delivery_seen(&row_key, key, crate::now_secs())
+                .await?;
+            if !first {
+                return Err(WebhookError::ReplayDeduped(key.to_owned()));
             }
         }
+        let _ = verified;
 
         let status = self
             .dispatcher
@@ -923,6 +1234,502 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     a.ct_eq(b).into()
 }
 
+pub fn constant_time_bytes_eq(a: &[u8], b: &[u8]) -> bool {
+    ct_eq(a, b)
+}
+
+pub fn validate_payload_template(template: &str) -> Result<(), VerifyError> {
+    let mut rest = template;
+    while let Some(start) = rest.find("{{") {
+        let after_start = &rest[start + 2..];
+        let Some(end) = after_start.find("}}") else {
+            return Err(VerifyError::UnknownPlaceholder {
+                name: after_start.to_owned(),
+            });
+        };
+        let name = &after_start[..end];
+        match name {
+            "body" | "timestamp" | "id" | "version" => {}
+            other => {
+                return Err(VerifyError::UnknownPlaceholder {
+                    name: other.to_owned(),
+                });
+            }
+        }
+        rest = &after_start[end + 2..];
+    }
+    Ok(())
+}
+
+pub fn verify_inbound_request(
+    config: &WebhookVerifierConfig,
+    secret: Option<&str>,
+    headers: &[(String, String)],
+    bearer_header: Option<&str>,
+    bearer_path_token: Option<&str>,
+    body: &[u8],
+    now_secs: i64,
+) -> Result<VerifyOutcome, VerifyError> {
+    match config.mode {
+        WebhookVerifierMode::None => Ok(VerifyOutcome {
+            rendered_payload: None,
+            matched_version: None,
+        }),
+        WebhookVerifierMode::LegacyBearer => {
+            let provided = bearer_header
+                .and_then(strip_bearer)
+                .ok_or(VerifyError::AllSignaturesMismatched)?;
+            let expected = secret.ok_or(VerifyError::AllSignaturesMismatched)?;
+            if ct_eq(expected.as_bytes(), provided.as_bytes()) {
+                Ok(VerifyOutcome {
+                    rendered_payload: None,
+                    matched_version: None,
+                })
+            } else {
+                Err(VerifyError::AllSignaturesMismatched)
+            }
+        }
+        WebhookVerifierMode::BearerV2 => {
+            let expected = config
+                .bearer_path_token
+                .as_deref()
+                .ok_or(VerifyError::AllSignaturesMismatched)?;
+            let provided = bearer_path_token.ok_or(VerifyError::AllSignaturesMismatched)?;
+            if ct_eq(expected.as_bytes(), provided.as_bytes()) {
+                Ok(VerifyOutcome {
+                    rendered_payload: None,
+                    matched_version: None,
+                })
+            } else {
+                Err(VerifyError::AllSignaturesMismatched)
+            }
+        }
+        WebhookVerifierMode::LegacyHmac => {
+            let header = signature_header_value(headers, &config.signature_header)
+                .ok_or(VerifyError::MissingSignature)?;
+            let provided_hex = header.strip_prefix("sha256=").unwrap_or(header).trim();
+            let provided =
+                hex::decode(provided_hex).map_err(|e| VerifyError::MalformedSignature {
+                    reason: e.to_string(),
+                })?;
+            let key = secret.ok_or(VerifyError::AllSignaturesMismatched)?;
+            let expected = hmac_digest(SignatureAlgorithm::Sha256, key.as_bytes(), body);
+            if ct_eq(&expected, &provided) {
+                Ok(VerifyOutcome {
+                    rendered_payload: None,
+                    matched_version: None,
+                })
+            } else {
+                Err(VerifyError::AllSignaturesMismatched)
+            }
+        }
+        WebhookVerifierMode::HmacV2 => verify_hmac_v2(config, secret, headers, body, now_secs),
+    }
+}
+
+fn legacy_verifier_config(
+    auth_scheme: WebhookAuthScheme,
+    signature_header: String,
+) -> WebhookVerifierConfig {
+    match auth_scheme {
+        WebhookAuthScheme::HmacSha256 => WebhookVerifierConfig {
+            mode: WebhookVerifierMode::LegacyHmac,
+            signature_header,
+            signature_algo: None,
+            signature_encoding: None,
+            signature_prefix: None,
+            signature_separator: None,
+            signature_value_split: None,
+            timestamp_header: None,
+            timestamp_skew_secs: None,
+            payload_template: None,
+            idempotency_header: None,
+            bearer_path_token: None,
+        },
+        WebhookAuthScheme::Bearer => WebhookVerifierConfig {
+            mode: WebhookVerifierMode::LegacyBearer,
+            signature_header: String::new(),
+            signature_algo: None,
+            signature_encoding: None,
+            signature_prefix: None,
+            signature_separator: None,
+            signature_value_split: None,
+            timestamp_header: None,
+            timestamp_skew_secs: None,
+            payload_template: None,
+            idempotency_header: None,
+            bearer_path_token: None,
+        },
+        WebhookAuthScheme::None => WebhookVerifierConfig {
+            mode: WebhookVerifierMode::None,
+            signature_header: String::new(),
+            signature_algo: None,
+            signature_encoding: None,
+            signature_prefix: None,
+            signature_separator: None,
+            signature_value_split: None,
+            timestamp_header: None,
+            timestamp_skew_secs: None,
+            payload_template: None,
+            idempotency_header: None,
+            bearer_path_token: None,
+        },
+    }
+}
+
+pub fn row_verifier_config(row: &WebhookRow) -> Result<WebhookVerifierConfig, WebhookError> {
+    let mode =
+        WebhookVerifierMode::parse(&row.verifier_mode).unwrap_or_else(|| match row.auth_scheme {
+            WebhookAuthScheme::HmacSha256 => WebhookVerifierMode::LegacyHmac,
+            WebhookAuthScheme::Bearer => WebhookVerifierMode::LegacyBearer,
+            WebhookAuthScheme::None => WebhookVerifierMode::None,
+        });
+    let signature_algo =
+        match row.signature_algo.as_deref() {
+            Some(raw) => Some(SignatureAlgorithm::parse(raw).ok_or_else(|| {
+                WebhookError::BadRequest("unknown signature algorithm".to_owned())
+            })?),
+            None => None,
+        };
+    let signature_encoding = match row.signature_encoding.as_deref() {
+        Some(raw) => Some(
+            SignatureEncoding::parse(raw)
+                .ok_or_else(|| WebhookError::BadRequest("unknown signature encoding".to_owned()))?,
+        ),
+        None => None,
+    };
+    Ok(WebhookVerifierConfig {
+        mode,
+        signature_header: row.signature_header.clone(),
+        signature_algo,
+        signature_encoding,
+        signature_prefix: row.signature_prefix.clone(),
+        signature_separator: row.signature_separator.clone(),
+        signature_value_split: row.signature_value_split.clone(),
+        timestamp_header: row.timestamp_header.clone(),
+        timestamp_skew_secs: row.timestamp_skew_secs.map(|v| v as u64),
+        payload_template: row.payload_template.clone(),
+        idempotency_header: row.idempotency_header.clone(),
+        bearer_path_token: row.bearer_path_token.clone(),
+    })
+}
+
+fn validate_verifier_config(config: &WebhookVerifierConfig) -> Result<(), VerifyError> {
+    if let Some(template) = config.payload_template.as_deref() {
+        validate_payload_template(template)?;
+    }
+    Ok(())
+}
+
+fn verifier_needs_user_secret(config: &WebhookVerifierConfig) -> bool {
+    matches!(
+        config.mode,
+        WebhookVerifierMode::LegacyHmac
+            | WebhookVerifierMode::LegacyBearer
+            | WebhookVerifierMode::HmacV2
+    )
+}
+
+fn random_path_token() -> String {
+    format!("whp_{}", Uuid::new_v4().simple())
+}
+
+fn verify_hmac_v2(
+    config: &WebhookVerifierConfig,
+    secret: Option<&str>,
+    headers: &[(String, String)],
+    body: &[u8],
+    now_secs: i64,
+) -> Result<VerifyOutcome, VerifyError> {
+    validate_payload_template(config.payload_template.as_deref().unwrap_or("{{body}}"))?;
+    let secret = secret.ok_or(VerifyError::AllSignaturesMismatched)?;
+    let key = verifier_secret_key(secret)?;
+    let signature_header = signature_header_value(headers, &config.signature_header)
+        .ok_or(VerifyError::MissingSignature)?;
+    let timestamp = match config.timestamp_header.as_deref() {
+        None => None,
+        Some(header_name) => {
+            let raw = signature_header_value(headers, header_name)
+                .ok_or(VerifyError::MissingTimestamp)?;
+            Some(extract_timestamp(raw, config)?)
+        }
+    };
+    if let Some(ts_raw) = timestamp.as_deref() {
+        let ts = ts_raw
+            .parse::<i64>()
+            .map_err(|_| VerifyError::MissingTimestamp)?;
+        let skew = config.timestamp_skew_secs.unwrap_or(300);
+        if now_secs.abs_diff(ts) > skew {
+            return Err(VerifyError::TimestampOutOfSkew {
+                now: now_secs,
+                ts,
+                skew_secs: skew,
+            });
+        }
+    }
+    let id = match config.idempotency_header.as_deref() {
+        None => None,
+        Some(header_name) => Some(
+            signature_header_value(headers, header_name)
+                .ok_or_else(|| VerifyError::MissingHeader {
+                    name: header_name.to_owned(),
+                })?
+                .to_owned(),
+        ),
+    };
+
+    let algo = config.signature_algo.unwrap_or(SignatureAlgorithm::Sha256);
+    let encoding = config.signature_encoding.unwrap_or(SignatureEncoding::Hex);
+    let candidates = split_signature_candidates(signature_header, config);
+    if candidates.is_empty() {
+        return Err(VerifyError::MissingSignature);
+    }
+    let known_version = version_from_prefix(config.signature_prefix.as_deref().unwrap_or(""));
+    let mut saw_known = false;
+    let mut unknown_versions = Vec::new();
+    let mut first_malformed = None;
+    for candidate in candidates {
+        let parsed = match parse_signature_candidate(&candidate, config) {
+            Ok(Some(parsed)) => parsed,
+            Ok(None) => {
+                if let Some(version) = candidate_version(&candidate, config) {
+                    unknown_versions.push(version);
+                }
+                continue;
+            }
+            Err(e) => {
+                first_malformed.get_or_insert(e);
+                continue;
+            }
+        };
+        saw_known = true;
+        let rendered = render_payload_template(
+            config.payload_template.as_deref().unwrap_or("{{body}}"),
+            body,
+            timestamp.as_deref(),
+            id.as_deref(),
+            parsed.version.as_deref(),
+        )?;
+        let expected = hmac_digest(algo, &key, &rendered);
+        let provided = match decode_signature(parsed.encoded.trim(), encoding) {
+            Ok(sig) => sig,
+            Err(e) => {
+                first_malformed.get_or_insert(e);
+                continue;
+            }
+        };
+        if ct_eq(&expected, &provided) {
+            return Ok(VerifyOutcome {
+                rendered_payload: Some(rendered),
+                matched_version: parsed.version,
+            });
+        }
+    }
+    if !saw_known && !unknown_versions.is_empty() {
+        let version = unknown_versions.remove(0);
+        return Err(VerifyError::UnknownVersion {
+            version,
+            known: known_version.into_iter().collect(),
+        });
+    }
+    if !saw_known && let Some(e) = first_malformed {
+        return Err(e);
+    }
+    Err(VerifyError::AllSignaturesMismatched)
+}
+
+#[derive(Debug)]
+struct ParsedSignature {
+    version: Option<String>,
+    encoded: String,
+}
+
+fn split_signature_candidates(header: &str, config: &WebhookVerifierConfig) -> Vec<String> {
+    match config
+        .signature_separator
+        .as_deref()
+        .filter(|s| !s.is_empty())
+    {
+        Some(sep) => header
+            .split(sep)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .collect(),
+        None => {
+            let trimmed = header.trim();
+            if trimmed.is_empty() {
+                Vec::new()
+            } else {
+                vec![trimmed.to_owned()]
+            }
+        }
+    }
+}
+
+fn parse_signature_candidate(
+    candidate: &str,
+    config: &WebhookVerifierConfig,
+) -> Result<Option<ParsedSignature>, VerifyError> {
+    let prefix = config.signature_prefix.as_deref().unwrap_or("");
+    if !prefix.is_empty() && !candidate.starts_with(prefix) {
+        return Ok(None);
+    }
+    let version = candidate_version(candidate, config);
+    let encoded = if let Some(split) = config
+        .signature_value_split
+        .as_deref()
+        .filter(|s| !s.is_empty())
+    {
+        candidate
+            .split_once(split)
+            .map(|(_, encoded)| encoded)
+            .ok_or_else(|| VerifyError::MalformedSignature {
+                reason: format!("signature missing value split {split:?}"),
+            })?
+            .to_owned()
+    } else if prefix.is_empty() {
+        candidate.to_owned()
+    } else {
+        candidate[prefix.len()..].to_owned()
+    };
+    Ok(Some(ParsedSignature { version, encoded }))
+}
+
+fn candidate_version(candidate: &str, config: &WebhookVerifierConfig) -> Option<String> {
+    let split = config.signature_value_split.as_deref()?;
+    if split.is_empty() {
+        return None;
+    }
+    candidate
+        .split_once(split)
+        .map(|(version, _)| version.trim().to_owned())
+        .filter(|version| !version.is_empty())
+}
+
+fn version_from_prefix(prefix: &str) -> Option<String> {
+    let idx = prefix.find([',', '='])?;
+    let version = prefix[..idx].trim();
+    if version.is_empty() {
+        None
+    } else {
+        Some(version.to_owned())
+    }
+}
+
+fn decode_signature(raw: &str, encoding: SignatureEncoding) -> Result<Vec<u8>, VerifyError> {
+    match encoding {
+        SignatureEncoding::Hex => hex::decode(raw).map_err(|e| VerifyError::MalformedSignature {
+            reason: e.to_string(),
+        }),
+        SignatureEncoding::Base64 => B64
+            .decode(raw)
+            .map_err(|e| VerifyError::MalformedSignature {
+                reason: e.to_string(),
+            }),
+    }
+}
+
+fn verifier_secret_key(secret: &str) -> Result<Vec<u8>, VerifyError> {
+    if let Some(rest) = secret.strip_prefix("whsec_") {
+        return B64
+            .decode(rest)
+            .map_err(|e| VerifyError::MalformedSignature {
+                reason: format!("invalid whsec secret: {e}"),
+            });
+    }
+    Ok(secret.as_bytes().to_vec())
+}
+
+fn hmac_digest(algo: SignatureAlgorithm, key: &[u8], payload: &[u8]) -> Vec<u8> {
+    match algo {
+        SignatureAlgorithm::Sha256 => {
+            let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key).expect("HMAC accepts any key");
+            mac.update(payload);
+            mac.finalize().into_bytes().to_vec()
+        }
+        SignatureAlgorithm::Sha1 => {
+            let mut mac = <Hmac<Sha1> as Mac>::new_from_slice(key).expect("HMAC accepts any key");
+            mac.update(payload);
+            mac.finalize().into_bytes().to_vec()
+        }
+        SignatureAlgorithm::Sha512 => {
+            let mut mac = <Hmac<Sha512> as Mac>::new_from_slice(key).expect("HMAC accepts any key");
+            mac.update(payload);
+            mac.finalize().into_bytes().to_vec()
+        }
+    }
+}
+
+fn extract_timestamp(raw: &str, config: &WebhookVerifierConfig) -> Result<String, VerifyError> {
+    let trimmed = raw.trim();
+    if !trimmed.is_empty() && trimmed.bytes().all(|b| b.is_ascii_digit()) {
+        return Ok(trimmed.to_owned());
+    }
+    let separator = config
+        .signature_separator
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(",");
+    for part in trimmed.split(separator).map(str::trim) {
+        if let Some(ts) = part.strip_prefix("t=")
+            && !ts.is_empty()
+        {
+            return Ok(ts.to_owned());
+        }
+    }
+    Err(VerifyError::MissingTimestamp)
+}
+
+fn render_payload_template(
+    template: &str,
+    body: &[u8],
+    timestamp: Option<&str>,
+    id: Option<&str>,
+    version: Option<&str>,
+) -> Result<Vec<u8>, VerifyError> {
+    validate_payload_template(template)?;
+    let mut out = Vec::with_capacity(template.len() + body.len());
+    let mut rest = template;
+    while let Some(start) = rest.find("{{") {
+        out.extend_from_slice(rest[..start].as_bytes());
+        let after_start = &rest[start + 2..];
+        let Some(end) = after_start.find("}}") else {
+            return Err(VerifyError::UnknownPlaceholder {
+                name: after_start.to_owned(),
+            });
+        };
+        let name = &after_start[..end];
+        match name {
+            "body" => out.extend_from_slice(body),
+            "timestamp" => {
+                let value = timestamp.ok_or(VerifyError::MissingTimestamp)?;
+                out.extend_from_slice(value.as_bytes());
+            }
+            "id" => {
+                let value = id.ok_or_else(|| VerifyError::MissingHeader {
+                    name: "idempotency header".to_owned(),
+                })?;
+                out.extend_from_slice(value.as_bytes());
+            }
+            "version" => {
+                let value = version.ok_or_else(|| VerifyError::MalformedSignature {
+                    reason: "signature version required by payload template".to_owned(),
+                })?;
+                out.extend_from_slice(value.as_bytes());
+            }
+            other => {
+                return Err(VerifyError::UnknownPlaceholder {
+                    name: other.to_owned(),
+                });
+            }
+        }
+        rest = &after_start[end + 2..];
+    }
+    out.extend_from_slice(rest.as_bytes());
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -958,6 +1765,490 @@ mod tests {
         async fn delete_snapshot(&self, _: &str, _: &str) -> Result<(), crate::error::CubeError> {
             unreachable!()
         }
+    }
+
+    fn fixture(vendor: &str, file: &str) -> &'static [u8] {
+        match (vendor, file) {
+            ("github", "request.txt") => {
+                include_bytes!("../tests/fixtures/webhooks/github/request.txt")
+            }
+            ("github", "secret.txt") => {
+                include_bytes!("../tests/fixtures/webhooks/github/secret.txt")
+            }
+            ("standard", "request.txt") => {
+                include_bytes!("../tests/fixtures/webhooks/standard/request.txt")
+            }
+            ("standard", "secret.txt") => {
+                include_bytes!("../tests/fixtures/webhooks/standard/secret.txt")
+            }
+            ("stripe", "request.txt") => {
+                include_bytes!("../tests/fixtures/webhooks/stripe/request.txt")
+            }
+            ("stripe", "secret.txt") => {
+                include_bytes!("../tests/fixtures/webhooks/stripe/secret.txt")
+            }
+            ("slack", "request.txt") => {
+                include_bytes!("../tests/fixtures/webhooks/slack/request.txt")
+            }
+            ("slack", "secret.txt") => {
+                include_bytes!("../tests/fixtures/webhooks/slack/secret.txt")
+            }
+            ("shopify", "request.txt") => {
+                include_bytes!("../tests/fixtures/webhooks/shopify/request.txt")
+            }
+            ("shopify", "secret.txt") => {
+                include_bytes!("../tests/fixtures/webhooks/shopify/secret.txt")
+            }
+            ("agentmail", "request.txt") => {
+                include_bytes!("../tests/fixtures/webhooks/agentmail/request.txt")
+            }
+            ("agentmail", "secret.txt") => {
+                include_bytes!("../tests/fixtures/webhooks/agentmail/secret.txt")
+            }
+            _ => panic!("unknown webhook fixture {vendor}/{file}"),
+        }
+    }
+
+    fn fixture_text(vendor: &str, file: &str) -> String {
+        std::str::from_utf8(fixture(vendor, file))
+            .unwrap()
+            .trim()
+            .to_owned()
+    }
+
+    fn hmac_v2_config(
+        signature_header: &str,
+        signature_encoding: SignatureEncoding,
+        signature_prefix: &str,
+        signature_separator: Option<&str>,
+        signature_value_split: Option<&str>,
+        timestamp_header: Option<&str>,
+        payload_template: &str,
+        idempotency_header: Option<&str>,
+    ) -> WebhookVerifierConfig {
+        WebhookVerifierConfig {
+            mode: WebhookVerifierMode::HmacV2,
+            signature_header: signature_header.to_owned(),
+            signature_algo: Some(SignatureAlgorithm::Sha256),
+            signature_encoding: Some(signature_encoding),
+            signature_prefix: Some(signature_prefix.to_owned()),
+            signature_separator: signature_separator.map(str::to_owned),
+            signature_value_split: signature_value_split.map(str::to_owned),
+            timestamp_header: timestamp_header.map(str::to_owned),
+            timestamp_skew_secs: Some(300),
+            payload_template: Some(payload_template.to_owned()),
+            idempotency_header: idempotency_header.map(str::to_owned),
+            bearer_path_token: None,
+        }
+    }
+
+    fn verify_fixture(
+        cfg: &WebhookVerifierConfig,
+        vendor: &str,
+        headers: Vec<(&str, &str)>,
+        now: i64,
+    ) -> Result<VerifyOutcome, VerifyError> {
+        let headers = headers
+            .into_iter()
+            .map(|(k, v)| (k.to_owned(), v.to_owned()))
+            .collect::<Vec<_>>();
+        verify_inbound_request(
+            cfg,
+            Some(fixture_text(vendor, "secret.txt").as_str()),
+            &headers,
+            None,
+            None,
+            fixture(vendor, "request.txt"),
+            now,
+        )
+    }
+
+    #[test]
+    fn legacy_hmac_path_unchanged_for_github_fixture() {
+        let cfg = WebhookVerifierConfig {
+            mode: WebhookVerifierMode::LegacyHmac,
+            signature_header: "x-hub-signature-256".to_owned(),
+            signature_algo: None,
+            signature_encoding: None,
+            signature_prefix: None,
+            signature_separator: None,
+            signature_value_split: None,
+            timestamp_header: None,
+            timestamp_skew_secs: None,
+            payload_template: None,
+            idempotency_header: None,
+            bearer_path_token: None,
+        };
+        let out = verify_fixture(
+            &cfg,
+            "github",
+            vec![(
+                "X-Hub-Signature-256",
+                "sha256=1ae84c7f758faa88395f24d75a762947277389c2071f1c3c478492f6a2112d0d",
+            )],
+            1_700_000_000,
+        )
+        .unwrap();
+        assert!(out.rendered_payload.is_none());
+        assert!(out.matched_version.is_none());
+    }
+
+    #[test]
+    fn hmac_v2_sha256_hex_no_prefix_verifies_github_fixture() {
+        let cfg = hmac_v2_config(
+            "x-hub-signature-256",
+            SignatureEncoding::Hex,
+            "",
+            None,
+            None,
+            None,
+            "{{body}}",
+            None,
+        );
+        verify_fixture(
+            &cfg,
+            "github",
+            vec![(
+                "X-Hub-Signature-256",
+                "1ae84c7f758faa88395f24d75a762947277389c2071f1c3c478492f6a2112d0d",
+            )],
+            1_700_000_000,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn hmac_v2_sha256_base64_with_v1_prefix_verifies_standard_webhooks_fixture() {
+        let cfg = hmac_v2_config(
+            "webhook-signature",
+            SignatureEncoding::Base64,
+            "v1,",
+            Some(" "),
+            Some(","),
+            Some("webhook-timestamp"),
+            "{{id}}.{{timestamp}}.{{body}}",
+            Some("webhook-id"),
+        );
+        let out = verify_fixture(
+            &cfg,
+            "standard",
+            vec![
+                ("webhook-id", "msg_123"),
+                ("webhook-timestamp", "1700000000"),
+                (
+                    "webhook-signature",
+                    "v1,wra4YjTmfmlGzjR8dmrWdQ/P1d0y1bbdInTre89XmGs=",
+                ),
+            ],
+            1_700_000_000,
+        )
+        .unwrap();
+        assert_eq!(out.matched_version.as_deref(), Some("v1"));
+        assert_eq!(
+            out.rendered_payload.as_deref(),
+            Some(b"msg_123.1700000000.{\"event\":\"ping\",\"ok\":true}\n".as_slice())
+        );
+    }
+
+    #[test]
+    fn hmac_v2_sha256_hex_with_timestamp_payload_verifies_stripe_fixture() {
+        let cfg = hmac_v2_config(
+            "stripe-signature",
+            SignatureEncoding::Hex,
+            "v1=",
+            Some(","),
+            Some("="),
+            Some("stripe-signature"),
+            "{{timestamp}}.{{body}}",
+            None,
+        );
+        verify_fixture(
+            &cfg,
+            "stripe",
+            vec![(
+                "Stripe-Signature",
+                "t=1700000000,v1=2101deb845397d1a40375dcb3dbfe33a57291ed706133814e22a52b09e6300c9",
+            )],
+            1_700_000_000,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn hmac_v2_sha256_hex_with_v0_version_payload_verifies_slack_fixture() {
+        let cfg = hmac_v2_config(
+            "x-slack-signature",
+            SignatureEncoding::Hex,
+            "v0=",
+            None,
+            Some("="),
+            Some("x-slack-request-timestamp"),
+            "v0:{{timestamp}}:{{body}}",
+            None,
+        );
+        let out = verify_fixture(
+            &cfg,
+            "slack",
+            vec![
+                ("X-Slack-Request-Timestamp", "1700000000"),
+                (
+                    "X-Slack-Signature",
+                    "v0=2fe4647cd9c1970d385177f613fee537c122efa6a48011ed5270b7e5a1b8f1c0",
+                ),
+            ],
+            1_700_000_000,
+        )
+        .unwrap();
+        assert_eq!(out.matched_version.as_deref(), Some("v0"));
+    }
+
+    #[test]
+    fn hmac_v2_sha256_base64_verifies_shopify_fixture() {
+        let cfg = hmac_v2_config(
+            "x-shopify-hmac-sha256",
+            SignatureEncoding::Base64,
+            "",
+            None,
+            None,
+            None,
+            "{{body}}",
+            None,
+        );
+        verify_fixture(
+            &cfg,
+            "shopify",
+            vec![(
+                "X-Shopify-Hmac-Sha256",
+                "GuhMf3WPqog5XyTXWnYpRydzicIHHxw8R4SS9qIRLQ0=",
+            )],
+            1_700_000_000,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn hmac_v2_replay_outside_skew_rejected_with_timestamp_out_of_skew() {
+        let cfg = hmac_v2_config(
+            "webhook-signature",
+            SignatureEncoding::Base64,
+            "v1,",
+            Some(" "),
+            Some(","),
+            Some("webhook-timestamp"),
+            "{{id}}.{{timestamp}}.{{body}}",
+            Some("webhook-id"),
+        );
+        let err = verify_fixture(
+            &cfg,
+            "standard",
+            vec![
+                ("webhook-id", "msg_123"),
+                ("webhook-timestamp", "1700000000"),
+                (
+                    "webhook-signature",
+                    "v1,wra4YjTmfmlGzjR8dmrWdQ/P1d0y1bbdInTre89XmGs=",
+                ),
+            ],
+            1_700_003_601,
+        )
+        .unwrap_err();
+        assert!(matches!(err, VerifyError::TimestampOutOfSkew { .. }));
+    }
+
+    #[test]
+    fn hmac_v2_missing_timestamp_header_returns_missing_timestamp() {
+        let cfg = hmac_v2_config(
+            "webhook-signature",
+            SignatureEncoding::Base64,
+            "v1,",
+            Some(" "),
+            Some(","),
+            Some("webhook-timestamp"),
+            "{{id}}.{{timestamp}}.{{body}}",
+            Some("webhook-id"),
+        );
+        let err = verify_fixture(
+            &cfg,
+            "standard",
+            vec![
+                ("webhook-id", "msg_123"),
+                (
+                    "webhook-signature",
+                    "v1,wra4YjTmfmlGzjR8dmrWdQ/P1d0y1bbdInTre89XmGs=",
+                ),
+            ],
+            1_700_000_000,
+        )
+        .unwrap_err();
+        assert_eq!(err, VerifyError::MissingTimestamp);
+    }
+
+    #[test]
+    fn hmac_v2_multi_sig_header_accepts_when_any_one_matches() {
+        let cfg = hmac_v2_config(
+            "webhook-signature",
+            SignatureEncoding::Base64,
+            "v1,",
+            Some(" "),
+            Some(","),
+            Some("webhook-timestamp"),
+            "{{id}}.{{timestamp}}.{{body}}",
+            Some("webhook-id"),
+        );
+        verify_fixture(
+            &cfg,
+            "standard",
+            vec![
+                ("webhook-id", "msg_123"),
+                ("webhook-timestamp", "1700000000"),
+                (
+                    "webhook-signature",
+                    "v1,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA= v1,wra4YjTmfmlGzjR8dmrWdQ/P1d0y1bbdInTre89XmGs=",
+                ),
+            ],
+            1_700_000_000,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn hmac_v2_multi_sig_header_skips_unknown_versions() {
+        let cfg = hmac_v2_config(
+            "webhook-signature",
+            SignatureEncoding::Base64,
+            "v1,",
+            Some(" "),
+            Some(","),
+            Some("webhook-timestamp"),
+            "{{id}}.{{timestamp}}.{{body}}",
+            Some("webhook-id"),
+        );
+        let out = verify_fixture(
+            &cfg,
+            "standard",
+            vec![
+                ("webhook-id", "msg_123"),
+                ("webhook-timestamp", "1700000000"),
+                (
+                    "webhook-signature",
+                    "v9,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA= v1,wra4YjTmfmlGzjR8dmrWdQ/P1d0y1bbdInTre89XmGs=",
+                ),
+            ],
+            1_700_000_000,
+        )
+        .unwrap();
+        assert_eq!(out.matched_version.as_deref(), Some("v1"));
+    }
+
+    #[test]
+    fn hmac_v2_wrong_secret_returns_all_signatures_mismatched() {
+        let cfg = hmac_v2_config(
+            "x-shopify-hmac-sha256",
+            SignatureEncoding::Base64,
+            "",
+            None,
+            None,
+            None,
+            "{{body}}",
+            None,
+        );
+        let headers = vec![(
+            "X-Shopify-Hmac-Sha256".to_owned(),
+            "GuhMf3WPqog5XyTXWnYpRydzicIHHxw8R4SS9qIRLQ0=".to_owned(),
+        )];
+        let err = verify_inbound_request(
+            &cfg,
+            Some("wrong-secret"),
+            &headers,
+            None,
+            None,
+            fixture("shopify", "request.txt"),
+            1_700_000_000,
+        )
+        .unwrap_err();
+        assert_eq!(err, VerifyError::AllSignaturesMismatched);
+    }
+
+    #[test]
+    fn hmac_v2_constant_time_compare_does_not_short_circuit_on_byte_match() {
+        let expected = [0xabu8; 32];
+        for i in 0..1000 {
+            let mut candidate = expected;
+            candidate[i % candidate.len()] ^= 0x01;
+            assert!(!constant_time_bytes_eq(&expected, &candidate));
+        }
+        assert!(constant_time_bytes_eq(&expected, &expected));
+    }
+
+    #[test]
+    fn bearer_v2_correct_token_accepted() {
+        let cfg = WebhookVerifierConfig {
+            mode: WebhookVerifierMode::BearerV2,
+            signature_header: String::new(),
+            signature_algo: None,
+            signature_encoding: None,
+            signature_prefix: None,
+            signature_separator: None,
+            signature_value_split: None,
+            timestamp_header: None,
+            timestamp_skew_secs: None,
+            payload_template: None,
+            idempotency_header: None,
+            bearer_path_token: Some("tok_live_123".to_owned()),
+        };
+        verify_inbound_request(&cfg, None, &[], None, Some("tok_live_123"), b"{}", 0).unwrap();
+    }
+
+    #[test]
+    fn bearer_v2_wrong_token_constant_time_rejected() {
+        let cfg = WebhookVerifierConfig {
+            mode: WebhookVerifierMode::BearerV2,
+            signature_header: String::new(),
+            signature_algo: None,
+            signature_encoding: None,
+            signature_prefix: None,
+            signature_separator: None,
+            signature_value_split: None,
+            timestamp_header: None,
+            timestamp_skew_secs: None,
+            payload_template: None,
+            idempotency_header: None,
+            bearer_path_token: Some("tok_live_123".to_owned()),
+        };
+        let err = verify_inbound_request(&cfg, None, &[], None, Some("tok_live_456"), b"{}", 0)
+            .unwrap_err();
+        assert_eq!(err, VerifyError::AllSignaturesMismatched);
+    }
+
+    #[test]
+    fn unknown_placeholder_rejected_at_save_time() {
+        let err = validate_payload_template("{{id}}.{{missing}}.{{body}}").unwrap_err();
+        assert_eq!(
+            err,
+            VerifyError::UnknownPlaceholder {
+                name: "missing".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn agentmail_preset_verifies_recorded_fixture() {
+        let cfg = agentmail_preset().verifier;
+        let out = verify_fixture(
+            &cfg,
+            "agentmail",
+            vec![
+                ("svix-id", "msg_agentmail_1"),
+                ("svix-timestamp", "1700000000"),
+                (
+                    "svix-signature",
+                    "v1,oug8mHA2dpffa4PvUVQusImcR2iyw0xgEzhxwzfti4w=",
+                ),
+            ],
+            1_700_000_000,
+        )
+        .unwrap();
+        assert_eq!(out.matched_version.as_deref(), Some("v1"));
     }
 
     #[test]
@@ -1015,6 +2306,7 @@ mod tests {
             name: "github",
             signature_headers: &headers,
             bearer_header: Some("Bearer tok"),
+            bearer_path_token: None,
             request_id: Some("req-1"),
             forward_headers: headers.clone(),
             content_type: Some("application/json".to_owned()),
@@ -1114,6 +2406,7 @@ mod tests {
                     name: "ping".into(),
                     description: "verify me".into(),
                     auth_scheme: WebhookAuthScheme::HmacSha256,
+                    verifier: None,
                     signature_header: None,
                     secret_plaintext: Some("super-secret".into()),
                     enabled: true,
@@ -1215,6 +2508,7 @@ mod tests {
                     name: "github".into(),
                     description: "handle github".into(),
                     auth_scheme: WebhookAuthScheme::HmacSha256,
+                    verifier: None,
                     signature_header: Some("X-Hub-Signature-256".into()),
                     secret_plaintext: Some("super-secret".into()),
                     enabled: true,
@@ -1236,6 +2530,7 @@ mod tests {
                 name: "github",
                 signature_headers: &wrong_headers,
                 bearer_header: None,
+                bearer_path_token: None,
                 request_id: None,
                 forward_headers: Vec::new(),
                 content_type: Some("application/json".into()),
@@ -1252,6 +2547,7 @@ mod tests {
                 name: "github",
                 signature_headers: &right_headers,
                 bearer_header: None,
+                bearer_path_token: None,
                 request_id: Some("req-1"),
                 forward_headers: Vec::new(),
                 content_type: Some("application/json".into()),

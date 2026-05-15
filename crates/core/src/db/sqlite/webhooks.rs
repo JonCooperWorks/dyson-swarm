@@ -45,6 +45,17 @@ fn row_to_webhook(r: sqlx::sqlite::SqliteRow) -> Result<WebhookRow, StoreError> 
         description: r.try_get("description").map_err(map_sqlx)?,
         auth_scheme,
         signature_header: r.try_get("signature_header").map_err(map_sqlx)?,
+        verifier_mode: r.try_get("verifier_mode").map_err(map_sqlx)?,
+        signature_algo: r.try_get("signature_algo").map_err(map_sqlx)?,
+        signature_encoding: r.try_get("signature_encoding").map_err(map_sqlx)?,
+        signature_prefix: r.try_get("signature_prefix").map_err(map_sqlx)?,
+        signature_separator: r.try_get("signature_separator").map_err(map_sqlx)?,
+        signature_value_split: r.try_get("signature_value_split").map_err(map_sqlx)?,
+        timestamp_header: r.try_get("timestamp_header").map_err(map_sqlx)?,
+        timestamp_skew_secs: r.try_get("timestamp_skew_secs").map_err(map_sqlx)?,
+        payload_template: r.try_get("payload_template").map_err(map_sqlx)?,
+        idempotency_header: r.try_get("idempotency_header").map_err(map_sqlx)?,
+        bearer_path_token: r.try_get("bearer_path_token").map_err(map_sqlx)?,
         secret_name: r.try_get("secret_name").map_err(map_sqlx)?,
         enabled: r.try_get::<i64, _>("enabled").map_err(map_sqlx)? != 0,
         created_at: r.try_get("created_at").map_err(map_sqlx)?,
@@ -58,15 +69,28 @@ impl WebhookStore for SqlxWebhookStore {
         sqlx::query(
             "INSERT INTO instance_webhooks \
                 (instance_id, name, description, auth_scheme, signature_header, secret_name, \
-                 enabled, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                 enabled, created_at, updated_at, verifier_mode, signature_algo, signature_encoding, \
+                 signature_prefix, signature_separator, signature_value_split, timestamp_header, \
+                 timestamp_skew_secs, payload_template, idempotency_header, bearer_path_token) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT(instance_id, name) DO UPDATE SET \
                 description = excluded.description, \
                 auth_scheme = excluded.auth_scheme, \
                 signature_header = excluded.signature_header, \
                 secret_name = excluded.secret_name, \
                 enabled     = excluded.enabled, \
-                updated_at  = excluded.updated_at",
+                updated_at  = excluded.updated_at, \
+                verifier_mode = excluded.verifier_mode, \
+                signature_algo = excluded.signature_algo, \
+                signature_encoding = excluded.signature_encoding, \
+                signature_prefix = excluded.signature_prefix, \
+                signature_separator = excluded.signature_separator, \
+                signature_value_split = excluded.signature_value_split, \
+                timestamp_header = excluded.timestamp_header, \
+                timestamp_skew_secs = excluded.timestamp_skew_secs, \
+                payload_template = excluded.payload_template, \
+                idempotency_header = excluded.idempotency_header, \
+                bearer_path_token = excluded.bearer_path_token",
         )
         .bind(&row.instance_id)
         .bind(&row.name)
@@ -77,6 +101,17 @@ impl WebhookStore for SqlxWebhookStore {
         .bind(i64::from(row.enabled))
         .bind(row.created_at)
         .bind(row.updated_at)
+        .bind(&row.verifier_mode)
+        .bind(&row.signature_algo)
+        .bind(&row.signature_encoding)
+        .bind(&row.signature_prefix)
+        .bind(&row.signature_separator)
+        .bind(&row.signature_value_split)
+        .bind(&row.timestamp_header)
+        .bind(row.timestamp_skew_secs)
+        .bind(&row.payload_template)
+        .bind(&row.idempotency_header)
+        .bind(&row.bearer_path_token)
         .execute(&self.pool)
         .await
         .map_err(map_sqlx)?;
@@ -86,7 +121,9 @@ impl WebhookStore for SqlxWebhookStore {
     async fn get(&self, instance_id: &str, name: &str) -> Result<Option<WebhookRow>, StoreError> {
         let row = sqlx::query(
             "SELECT instance_id, name, description, auth_scheme, signature_header, secret_name, \
-                    enabled, created_at, updated_at \
+                    enabled, created_at, updated_at, verifier_mode, signature_algo, signature_encoding, \
+                    signature_prefix, signature_separator, signature_value_split, timestamp_header, \
+                    timestamp_skew_secs, payload_template, idempotency_header, bearer_path_token \
              FROM instance_webhooks \
              WHERE instance_id = ? AND name = ?",
         )
@@ -104,7 +141,9 @@ impl WebhookStore for SqlxWebhookStore {
     async fn list_for_instance(&self, instance_id: &str) -> Result<Vec<WebhookRow>, StoreError> {
         let rows = sqlx::query(
             "SELECT instance_id, name, description, auth_scheme, signature_header, secret_name, \
-                    enabled, created_at, updated_at \
+                    enabled, created_at, updated_at, verifier_mode, signature_algo, signature_encoding, \
+                    signature_prefix, signature_separator, signature_value_split, timestamp_header, \
+                    timestamp_skew_secs, payload_template, idempotency_header, bearer_path_token \
              FROM instance_webhooks \
              WHERE instance_id = ? \
              ORDER BY name",
@@ -171,6 +210,17 @@ impl WebhookStore for SqlxWebhookStore {
                 .unwrap_or(existing.description),
             auth_scheme: auth_scheme.unwrap_or(existing.auth_scheme),
             signature_header: existing.signature_header,
+            verifier_mode: existing.verifier_mode,
+            signature_algo: existing.signature_algo,
+            signature_encoding: existing.signature_encoding,
+            signature_prefix: existing.signature_prefix,
+            signature_separator: existing.signature_separator,
+            signature_value_split: existing.signature_value_split,
+            timestamp_header: existing.timestamp_header,
+            timestamp_skew_secs: existing.timestamp_skew_secs,
+            payload_template: existing.payload_template,
+            idempotency_header: existing.idempotency_header,
+            bearer_path_token: existing.bearer_path_token,
             secret_name: match secret_name {
                 Some(v) => v.map(str::to_owned),
                 None => existing.secret_name,
@@ -190,8 +240,9 @@ impl DeliveryStore for SqlxDeliveryStore {
             "INSERT INTO webhook_deliveries \
                 (id, instance_id, webhook_name, fired_at, status_code, \
                  latency_ms, request_id, signature_ok, error, \
-                 body, body_size, content_type) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                 body, body_size, content_type, verify_error, request_headers, \
+                 replayed_from_delivery_id, replayed_by_user_id) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&row.id)
         .bind(&row.instance_id)
@@ -205,10 +256,43 @@ impl DeliveryStore for SqlxDeliveryStore {
         .bind(row.body.as_deref())
         .bind(row.body_size)
         .bind(&row.content_type)
+        .bind(&row.verify_error)
+        .bind(&row.request_headers)
+        .bind(&row.replayed_from_delivery_id)
+        .bind(&row.replayed_by_user_id)
         .execute(&self.pool)
         .await
         .map_err(map_sqlx)?;
         Ok(())
+    }
+
+    async fn try_mark_delivery_seen(
+        &self,
+        webhook_row_id: &str,
+        idempotency_key: &str,
+        first_seen_at: i64,
+    ) -> Result<bool, StoreError> {
+        let res = sqlx::query(
+            "INSERT OR IGNORE INTO webhook_deliveries_seen \
+                (webhook_row_id, idempotency_key, first_seen_at) \
+             VALUES (?, ?, ?)",
+        )
+        .bind(webhook_row_id)
+        .bind(idempotency_key)
+        .bind(first_seen_at)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(res.rows_affected() == 1)
+    }
+
+    async fn sweep_seen_deliveries_before(&self, cutoff: i64) -> Result<u64, StoreError> {
+        let res = sqlx::query("DELETE FROM webhook_deliveries_seen WHERE first_seen_at < ?")
+            .bind(cutoff)
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+        Ok(res.rows_affected())
     }
 
     async fn list_for_webhook(
@@ -225,7 +309,8 @@ impl DeliveryStore for SqlxDeliveryStore {
         let rows = sqlx::query(
             "SELECT id, instance_id, webhook_name, fired_at, status_code, \
                     latency_ms, request_id, signature_ok, error, \
-                    body_size, content_type \
+                    verify_error, request_headers, replayed_from_delivery_id, \
+                    replayed_by_user_id, body_size, content_type \
              FROM webhook_deliveries \
              WHERE instance_id = ? AND webhook_name = ? \
              ORDER BY fired_at DESC \
@@ -263,7 +348,8 @@ impl DeliveryStore for SqlxDeliveryStore {
         let mut sql = String::from(
             "SELECT id, instance_id, webhook_name, fired_at, status_code, \
                     latency_ms, request_id, signature_ok, error, \
-                    body_size, content_type \
+                    verify_error, request_headers, replayed_from_delivery_id, \
+                    replayed_by_user_id, body_size, content_type \
              FROM webhook_deliveries \
              WHERE instance_id = ?",
         );
@@ -307,7 +393,8 @@ impl DeliveryStore for SqlxDeliveryStore {
         let row = sqlx::query(
             "SELECT id, instance_id, webhook_name, fired_at, status_code, \
                     latency_ms, request_id, signature_ok, error, \
-                    body, body_size, content_type \
+                    verify_error, request_headers, replayed_from_delivery_id, \
+                    replayed_by_user_id, body, body_size, content_type \
              FROM webhook_deliveries \
              WHERE instance_id = ? AND id = ?",
         )
@@ -328,6 +415,12 @@ impl DeliveryStore for SqlxDeliveryStore {
                 request_id: r.try_get("request_id").map_err(map_sqlx)?,
                 signature_ok: r.try_get::<i64, _>("signature_ok").map_err(map_sqlx)? != 0,
                 error: r.try_get("error").map_err(map_sqlx)?,
+                verify_error: r.try_get("verify_error").map_err(map_sqlx)?,
+                request_headers: r.try_get("request_headers").map_err(map_sqlx)?,
+                replayed_from_delivery_id: r
+                    .try_get("replayed_from_delivery_id")
+                    .map_err(map_sqlx)?,
+                replayed_by_user_id: r.try_get("replayed_by_user_id").map_err(map_sqlx)?,
                 body: r.try_get::<Option<Vec<u8>>, _>("body").map_err(map_sqlx)?,
                 body_size: r.try_get("body_size").map_err(map_sqlx)?,
                 content_type: r.try_get("content_type").map_err(map_sqlx)?,
@@ -347,6 +440,10 @@ fn metadata_row(r: sqlx::sqlite::SqliteRow) -> Result<DeliveryRow, StoreError> {
         request_id: r.try_get("request_id").map_err(map_sqlx)?,
         signature_ok: r.try_get::<i64, _>("signature_ok").map_err(map_sqlx)? != 0,
         error: r.try_get("error").map_err(map_sqlx)?,
+        verify_error: r.try_get("verify_error").map_err(map_sqlx)?,
+        request_headers: r.try_get("request_headers").map_err(map_sqlx)?,
+        replayed_from_delivery_id: r.try_get("replayed_from_delivery_id").map_err(map_sqlx)?,
+        replayed_by_user_id: r.try_get("replayed_by_user_id").map_err(map_sqlx)?,
         body: None,
         body_size: r.try_get("body_size").map_err(map_sqlx)?,
         content_type: r.try_get("content_type").map_err(map_sqlx)?,
@@ -398,6 +495,17 @@ mod tests {
             description: "do the thing".into(),
             auth_scheme: WebhookAuthScheme::HmacSha256,
             signature_header: "x-swarm-signature".into(),
+            verifier_mode: "legacy_hmac".into(),
+            signature_algo: None,
+            signature_encoding: None,
+            signature_prefix: None,
+            signature_separator: None,
+            signature_value_split: None,
+            timestamp_header: None,
+            timestamp_skew_secs: None,
+            payload_template: None,
+            idempotency_header: None,
+            bearer_path_token: None,
             secret_name: Some(format!("webhook:{instance}:{name}")),
             enabled: true,
             created_at: 100,
@@ -504,6 +612,10 @@ mod tests {
                     request_id: None,
                     signature_ok: true,
                     error: None,
+                    verify_error: None,
+                    request_headers: None,
+                    replayed_from_delivery_id: None,
+                    replayed_by_user_id: None,
                     body: None,
                     body_size: None,
                     content_type: None,
@@ -536,6 +648,10 @@ mod tests {
                 request_id: Some("req-1".into()),
                 signature_ok: true,
                 error: None,
+                verify_error: None,
+                request_headers: Some("{\"x-test\":\"1\"}".into()),
+                replayed_from_delivery_id: None,
+                replayed_by_user_id: None,
                 body: Some(b"{\"smoke\":true}".to_vec()),
                 body_size: Some(14),
                 content_type: Some("application/json".into()),
@@ -593,6 +709,10 @@ mod tests {
                 request_id: None,
                 signature_ok: true,
                 error: error.map(str::to_owned),
+                verify_error: None,
+                request_headers: None,
+                replayed_from_delivery_id: None,
+                replayed_by_user_id: None,
                 body: Some(body.to_vec()),
                 body_size: Some(body.len() as i64),
                 content_type: Some("application/json".into()),
@@ -698,6 +818,10 @@ mod tests {
                 request_id: Some("req-1".into()),
                 signature_ok: true,
                 error: None,
+                verify_error: None,
+                request_headers: None,
+                replayed_from_delivery_id: None,
+                replayed_by_user_id: None,
                 body: Some(b"{\"hello\":\"world\"}".to_vec()),
                 body_size: Some(17),
                 content_type: Some("application/json".into()),
@@ -719,6 +843,128 @@ mod tests {
                 .await
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn idempotency_first_delivery_dispatches() {
+        let pool = open_in_memory().await.unwrap();
+        let deliveries = SqlxDeliveryStore::new(pool);
+        assert!(
+            deliveries
+                .try_mark_delivery_seen("i1:ping", "msg-1", 100)
+                .await
+                .unwrap(),
+            "first idempotency key should be inserted and dispatch"
+        );
+    }
+
+    #[tokio::test]
+    async fn idempotency_replay_returns_replay_deduped_and_does_not_redispatch() {
+        let pool = open_in_memory().await.unwrap();
+        let deliveries = SqlxDeliveryStore::new(pool);
+        assert!(
+            deliveries
+                .try_mark_delivery_seen("i1:ping", "msg-1", 100)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !deliveries
+                .try_mark_delivery_seen("i1:ping", "msg-1", 101)
+                .await
+                .unwrap(),
+            "duplicate idempotency key should be deduped"
+        );
+    }
+
+    #[tokio::test]
+    async fn idempotency_different_id_redispatches() {
+        let pool = open_in_memory().await.unwrap();
+        let deliveries = SqlxDeliveryStore::new(pool);
+        assert!(
+            deliveries
+                .try_mark_delivery_seen("i1:ping", "msg-1", 100)
+                .await
+                .unwrap()
+        );
+        assert!(
+            deliveries
+                .try_mark_delivery_seen("i1:ping", "msg-2", 101)
+                .await
+                .unwrap(),
+            "a different idempotency key should not dedupe"
+        );
+    }
+
+    #[tokio::test]
+    async fn idempotency_disabled_when_header_field_is_null() {
+        let pool = open_in_memory().await.unwrap();
+        let deliveries = SqlxDeliveryStore::new(pool);
+        assert!(
+            deliveries
+                .try_mark_delivery_seen_if_configured("i1:ping", None, 100)
+                .await
+                .unwrap()
+        );
+        assert!(
+            deliveries
+                .try_mark_delivery_seen_if_configured("i1:ping", None, 101)
+                .await
+                .unwrap(),
+            "missing configured idempotency header means no dedupe"
+        );
+    }
+
+    #[tokio::test]
+    async fn idempotency_sweeper_deletes_rows_older_than_ttl() {
+        let pool = open_in_memory().await.unwrap();
+        let deliveries = SqlxDeliveryStore::new(pool);
+        deliveries
+            .try_mark_delivery_seen("i1:ping", "old", 100)
+            .await
+            .unwrap();
+        deliveries
+            .try_mark_delivery_seen("i1:ping", "new", 200)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            deliveries.sweep_seen_deliveries_before(150).await.unwrap(),
+            1
+        );
+        assert!(
+            deliveries
+                .try_mark_delivery_seen("i1:ping", "old", 201)
+                .await
+                .unwrap(),
+            "swept key should be accepted again"
+        );
+        assert!(
+            !deliveries
+                .try_mark_delivery_seen("i1:ping", "new", 202)
+                .await
+                .unwrap(),
+            "newer key should remain deduped"
+        );
+    }
+
+    #[tokio::test]
+    async fn idempotency_dedupe_is_per_webhook_row_not_global() {
+        let pool = open_in_memory().await.unwrap();
+        let deliveries = SqlxDeliveryStore::new(pool);
+        assert!(
+            deliveries
+                .try_mark_delivery_seen("i1:ping", "msg-1", 100)
+                .await
+                .unwrap()
+        );
+        assert!(
+            deliveries
+                .try_mark_delivery_seen("i1:deploy", "msg-1", 100)
+                .await
+                .unwrap(),
+            "same provider id on a different webhook row is independent"
         );
     }
 
@@ -808,5 +1054,118 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(legacy_count, 0);
+    }
+
+    #[tokio::test]
+    async fn migration_0045_backfills_existing_rows_to_legacy_modes() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE instance_webhooks (
+                instance_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                auth_scheme TEXT NOT NULL,
+                secret_name TEXT,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                signature_header TEXT,
+                PRIMARY KEY (instance_id, name)
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TABLE webhook_deliveries (
+                id TEXT PRIMARY KEY,
+                instance_id TEXT NOT NULL,
+                webhook_name TEXT NOT NULL,
+                fired_at INTEGER NOT NULL,
+                status_code INTEGER NOT NULL,
+                latency_ms INTEGER NOT NULL,
+                request_id TEXT,
+                signature_ok INTEGER NOT NULL,
+                error TEXT,
+                body BLOB,
+                body_size INTEGER,
+                content_type TEXT
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO instance_webhooks \
+             (instance_id, name, auth_scheme, secret_name, created_at, updated_at, signature_header) \
+             VALUES \
+             ('i1', 'hmac', 'hmac_sha256', 's', 1, 1, 'x-hub-signature-256'), \
+             ('i1', 'bearer', 'bearer', 's', 1, 1, NULL), \
+             ('i1', 'none', 'none', NULL, 1, 1, NULL)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let migration_sql =
+            include_str!("../../../migrations/sqlite/0045_data_driven_webhook_verifier.sql")
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("--"))
+                .collect::<Vec<_>>()
+                .join("\n");
+        for statement in migration_sql.split(';') {
+            let statement = statement.trim();
+            if !statement.is_empty() {
+                sqlx::query(statement).execute(&pool).await.unwrap();
+            }
+        }
+
+        let modes: Vec<(String, String)> =
+            sqlx::query_as("SELECT name, verifier_mode FROM instance_webhooks ORDER BY name")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            modes,
+            vec![
+                ("bearer".to_owned(), "legacy_bearer".to_owned()),
+                ("hmac".to_owned(), "legacy_hmac".to_owned()),
+                ("none".to_owned(), "none".to_owned()),
+            ]
+        );
+
+        let secret = include_str!("../../../tests/fixtures/webhooks/github/secret.txt").trim();
+        let body = include_bytes!("../../../tests/fixtures/webhooks/github/request.txt");
+        crate::webhooks::verify_inbound_request(
+            &crate::webhooks::WebhookVerifierConfig {
+                mode: crate::webhooks::WebhookVerifierMode::LegacyHmac,
+                signature_header: "x-hub-signature-256".to_owned(),
+                signature_algo: None,
+                signature_encoding: None,
+                signature_prefix: None,
+                signature_separator: None,
+                signature_value_split: None,
+                timestamp_header: None,
+                timestamp_skew_secs: None,
+                payload_template: None,
+                idempotency_header: None,
+                bearer_path_token: None,
+            },
+            Some(secret),
+            &[(
+                "x-hub-signature-256".to_owned(),
+                "sha256=1ae84c7f758faa88395f24d75a762947277389c2071f1c3c478492f6a2112d0d"
+                    .to_owned(),
+            )],
+            None,
+            None,
+            body,
+            crate::now_secs(),
+        )
+        .unwrap();
     }
 }

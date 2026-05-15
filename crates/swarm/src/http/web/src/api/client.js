@@ -332,6 +332,24 @@ export class SwarmClient {
     );
   }
 
+  verifyWebhookDelivery(instanceId, name, body) {
+    return this._json(
+      `/v1/instances/${encodeURIComponent(instanceId)}/webhooks/${encodeURIComponent(name)}/verify-only`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      },
+    );
+  }
+
+  replayWebhookDelivery(instanceId, name, deliveryId) {
+    return this._json(
+      `/v1/instances/${encodeURIComponent(instanceId)}/webhooks/${encodeURIComponent(name)}/replay/${encodeURIComponent(deliveryId)}`,
+      { method: 'POST' },
+    );
+  }
+
   /// Cross-task audit log for an instance — newest first, cursor-paginated
   /// by `fired_at` seconds.  `before` is the previous page's oldest
   /// `fired_at`; `webhook` filters to one task. Each row also carries

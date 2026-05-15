@@ -27,6 +27,7 @@ full = [
     "dep:reqwest",
     "dep:rust-s3",
     "dep:serde_json",
+    "dep:sha1",
     "dep:sha2",
     "dep:sqlx",
     "dep:subtle",
@@ -55,6 +56,7 @@ rand = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
 rust-s3 = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
+sha1 = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
 sqlx = { workspace = true, optional = true }
 subtle = { workspace = true, optional = true }

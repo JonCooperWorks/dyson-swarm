@@ -756,6 +756,17 @@ pub struct WebhookRow {
     /// Header name used by HMAC-SHA256 signed webhooks.  Stored
     /// lower-case so lookup is stable across HTTP clients.
     pub signature_header: String,
+    pub verifier_mode: String,
+    pub signature_algo: Option<String>,
+    pub signature_encoding: Option<String>,
+    pub signature_prefix: Option<String>,
+    pub signature_separator: Option<String>,
+    pub signature_value_split: Option<String>,
+    pub timestamp_header: Option<String>,
+    pub timestamp_skew_secs: Option<i64>,
+    pub payload_template: Option<String>,
+    pub idempotency_header: Option<String>,
+    pub bearer_path_token: Option<String>,
     pub secret_name: Option<String>,
     pub enabled: bool,
     pub created_at: i64,
@@ -834,6 +845,10 @@ pub struct DeliveryRow {
     pub request_id: Option<String>,
     pub signature_ok: bool,
     pub error: Option<String>,
+    pub verify_error: Option<String>,
+    pub request_headers: Option<String>,
+    pub replayed_from_delivery_id: Option<String>,
+    pub replayed_by_user_id: Option<String>,
     /// Inbound request body for audit.  At the store layer this is
     /// opaque bytes — the service layer (`crate::webhooks`) seals it
     /// under the instance owner's age cipher on write and opens it on
@@ -856,6 +871,31 @@ pub struct DeliveryRow {
 #[async_trait]
 pub trait DeliveryStore: Send + Sync {
     async fn insert(&self, row: &DeliveryRow) -> Result<(), StoreError>;
+    /// Insert an idempotency key for one webhook row. Returns `true`
+    /// when this is the first sighting and dispatch should continue;
+    /// `false` when it is a replay that should be acknowledged without
+    /// redispatch.
+    async fn try_mark_delivery_seen(
+        &self,
+        webhook_row_id: &str,
+        idempotency_key: &str,
+        first_seen_at: i64,
+    ) -> Result<bool, StoreError>;
+    async fn try_mark_delivery_seen_if_configured(
+        &self,
+        webhook_row_id: &str,
+        idempotency_key: Option<&str>,
+        first_seen_at: i64,
+    ) -> Result<bool, StoreError> {
+        match idempotency_key {
+            Some(key) if !key.is_empty() => {
+                self.try_mark_delivery_seen(webhook_row_id, key, first_seen_at)
+                    .await
+            }
+            _ => Ok(true),
+        }
+    }
+    async fn sweep_seen_deliveries_before(&self, cutoff: i64) -> Result<u64, StoreError>;
     /// Newest-first, capped at `limit`.  Used by the SPA's "recent
     /// deliveries" panel on the task edit page.
     async fn list_for_webhook(

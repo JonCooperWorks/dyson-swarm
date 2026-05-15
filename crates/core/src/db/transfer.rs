@@ -223,6 +223,17 @@ const INSTANCE_WEBHOOKS: &[ColumnSpec] = &[
     col("created_at", ColumnKind::I64),
     col("updated_at", ColumnKind::I64),
     col("signature_header", ColumnKind::Text),
+    col("verifier_mode", ColumnKind::Text),
+    col("signature_algo", ColumnKind::Text),
+    col("signature_encoding", ColumnKind::Text),
+    col("signature_prefix", ColumnKind::Text),
+    col("signature_separator", ColumnKind::Text),
+    col("signature_value_split", ColumnKind::Text),
+    col("timestamp_header", ColumnKind::Text),
+    col("timestamp_skew_secs", ColumnKind::I64),
+    col("payload_template", ColumnKind::Text),
+    col("idempotency_header", ColumnKind::Text),
+    col("bearer_path_token", ColumnKind::Text),
 ];
 
 const WEBHOOK_DELIVERIES: &[ColumnSpec] = &[
@@ -238,6 +249,16 @@ const WEBHOOK_DELIVERIES: &[ColumnSpec] = &[
     col("body", ColumnKind::Bytes),
     col("body_size", ColumnKind::I64),
     col("content_type", ColumnKind::Text),
+    col("verify_error", ColumnKind::Text),
+    col("request_headers", ColumnKind::Text),
+    col("replayed_from_delivery_id", ColumnKind::Text),
+    col("replayed_by_user_id", ColumnKind::Text),
+];
+
+const WEBHOOK_DELIVERIES_SEEN: &[ColumnSpec] = &[
+    col("webhook_row_id", ColumnKind::Text),
+    col("idempotency_key", ColumnKind::Text),
+    col("first_seen_at", ColumnKind::I64),
 ];
 
 const STATE_FILES: &[ColumnSpec] = &[
@@ -421,6 +442,12 @@ const TABLES: &[TableSpec] = &[
         serial_column: None,
     },
     TableSpec {
+        name: "webhook_deliveries_seen",
+        columns: WEBHOOK_DELIVERIES_SEEN,
+        order_by: "webhook_row_id, idempotency_key",
+        serial_column: None,
+    },
+    TableSpec {
         name: "instance_state_files",
         columns: STATE_FILES,
         order_by: "id",
@@ -523,6 +550,7 @@ pub const fn table_names() -> &'static [&'static str] {
         "artefact_share_accesses",
         "instance_webhooks",
         "webhook_deliveries",
+        "webhook_deliveries_seen",
         "instance_state_files",
         "mcp_docker_catalog",
         "skill_marketplace_sources",
@@ -1125,16 +1153,29 @@ mod tests {
         .unwrap();
         sqlx::query(
             "INSERT INTO instance_webhooks \
-             (instance_id, name, description, auth_scheme, secret_name, enabled, created_at, updated_at, signature_header) \
-             VALUES ('i1', 'hook', 'desc', 'hmac-sha256', 'user.secret', 1, 290, 291, 'X-Signature')",
+             (instance_id, name, description, auth_scheme, secret_name, enabled, created_at, updated_at, signature_header, \
+              verifier_mode, signature_algo, signature_encoding, signature_prefix, signature_separator, signature_value_split, \
+              timestamp_header, timestamp_skew_secs, payload_template, idempotency_header, bearer_path_token) \
+             VALUES ('i1', 'hook', 'desc', 'hmac-sha256', 'user.secret', 1, 290, 291, 'X-Signature', \
+              'hmac_v2', 'sha256', 'hex', 'sha256=', NULL, '=', NULL, 300, '{{body}}', 'x-delivery-id', NULL)",
         )
         .execute(pool)
         .await
         .unwrap();
         sqlx::query(
             "INSERT INTO webhook_deliveries \
-             (id, instance_id, webhook_name, fired_at, status_code, latency_ms, request_id, signature_ok, error, body, body_size, content_type) \
-             VALUES ('delivery-1', 'i1', 'hook', 292, 202, 12, 'req-1', 1, NULL, x'0506', 2, 'application/json')",
+             (id, instance_id, webhook_name, fired_at, status_code, latency_ms, request_id, signature_ok, error, body, body_size, content_type, \
+              verify_error, request_headers, replayed_from_delivery_id, replayed_by_user_id) \
+             VALUES ('delivery-1', 'i1', 'hook', 292, 202, 12, 'req-1', 1, NULL, x'0506', 2, 'application/json', \
+              NULL, '{\"x-test\":\"1\"}', NULL, NULL)",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO webhook_deliveries_seen \
+             (webhook_row_id, idempotency_key, first_seen_at) \
+             VALUES ('i1/hook', 'req-1', 292)",
         )
         .execute(pool)
         .await

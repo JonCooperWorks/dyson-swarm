@@ -17,17 +17,20 @@
 use axum::body::Bytes;
 use axum::extract::{Extension, Path, State};
 use axum::http::{HeaderMap, StatusCode, Uri};
-use axum::response::IntoResponse;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as B64;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::auth::CallerIdentity;
 use crate::http::AppState;
-use crate::traits::{DeliveryRow, WebhookAuthScheme, WebhookRow};
+use crate::traits::{AdminAuditEntry, DeliveryRow, WebhookAuthScheme, WebhookRow};
 use crate::webhooks::{
-    DEFAULT_DELIVERY_LIMIT, DispatchCtx, MAX_WEBHOOK_BODY, WebhookError, WebhookSpec,
-    validate_webhook_name,
+    DEFAULT_DELIVERY_LIMIT, DispatchCtx, MAX_WEBHOOK_BODY, SignatureAlgorithm, SignatureEncoding,
+    WebhookError, WebhookSpec, WebhookVerifierConfig, WebhookVerifierMode, validate_webhook_name,
 };
 
 pub fn router(state: AppState) -> Router {
@@ -45,6 +48,14 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/instances/:id/webhooks/:name/deliveries",
             get(list_deliveries),
+        )
+        .route(
+            "/v1/instances/:id/webhooks/:name/verify-only",
+            post(verify_only),
+        )
+        .route(
+            "/v1/instances/:id/webhooks/:name/replay/:delivery_id",
+            post(replay_delivery),
         )
         // Cross-task audit log for the SPA's audit page.  Sibling of
         // /webhooks rather than nested under it because it spans every
@@ -64,6 +75,10 @@ pub fn router(state: AppState) -> Router {
 pub fn public_router(state: AppState) -> Router {
     Router::new()
         .route("/webhooks/:instance_id/:name", post(fire_webhook))
+        .route(
+            "/webhooks/:instance_id/:name/:bearer_path_token",
+            post(fire_webhook_with_path_token),
+        )
         .with_state(state)
 }
 
@@ -73,6 +88,17 @@ pub struct WebhookView {
     pub description: String,
     pub auth_scheme: String,
     pub signature_header: String,
+    pub verifier_mode: String,
+    pub signature_algo: Option<String>,
+    pub signature_encoding: Option<String>,
+    pub signature_prefix: Option<String>,
+    pub signature_separator: Option<String>,
+    pub signature_value_split: Option<String>,
+    pub timestamp_header: Option<String>,
+    pub timestamp_skew_secs: Option<i64>,
+    pub payload_template: Option<String>,
+    pub idempotency_header: Option<String>,
+    pub bearer_path_token: Option<String>,
     pub enabled: bool,
     pub created_at: i64,
     pub updated_at: i64,
@@ -86,12 +112,30 @@ pub struct WebhookView {
 
 impl WebhookView {
     fn from_row(r: WebhookRow) -> Self {
-        let path = format!("/webhooks/{}/{}", r.instance_id, r.name);
+        let path = if r.verifier_mode == "bearer_v2" {
+            match r.bearer_path_token.as_deref() {
+                Some(token) => format!("/webhooks/{}/{}/{}", r.instance_id, r.name, token),
+                None => format!("/webhooks/{}/{}", r.instance_id, r.name),
+            }
+        } else {
+            format!("/webhooks/{}/{}", r.instance_id, r.name)
+        };
         Self {
             name: r.name,
             description: r.description,
             auth_scheme: r.auth_scheme.as_str().to_owned(),
             signature_header: r.signature_header,
+            verifier_mode: r.verifier_mode,
+            signature_algo: r.signature_algo,
+            signature_encoding: r.signature_encoding,
+            signature_prefix: r.signature_prefix,
+            signature_separator: r.signature_separator,
+            signature_value_split: r.signature_value_split,
+            timestamp_header: r.timestamp_header,
+            timestamp_skew_secs: r.timestamp_skew_secs,
+            payload_template: r.payload_template,
+            idempotency_header: r.idempotency_header,
+            bearer_path_token: r.bearer_path_token,
             enabled: r.enabled,
             created_at: r.created_at,
             updated_at: r.updated_at,
@@ -110,6 +154,7 @@ pub struct DeliveryView {
     pub signature_ok: bool,
     pub request_id: Option<String>,
     pub error: Option<String>,
+    pub verify_error: Option<String>,
     /// Inbound body size in bytes — surfaced so the SPA can render
     /// "<n> bytes" alongside the delivery.  The body itself is
     /// audit-only and never crosses the wire here.
@@ -127,6 +172,7 @@ impl DeliveryView {
             signature_ok: r.signature_ok,
             request_id: r.request_id,
             error: r.error,
+            verify_error: r.verify_error,
             body_size: r.body_size,
             content_type: r.content_type,
         }
@@ -145,6 +191,7 @@ pub struct AuditDeliveryView {
     pub signature_ok: bool,
     pub request_id: Option<String>,
     pub error: Option<String>,
+    pub verify_error: Option<String>,
     pub body_size: Option<i64>,
     pub content_type: Option<String>,
 }
@@ -160,6 +207,7 @@ impl AuditDeliveryView {
             signature_ok: r.signature_ok,
             request_id: r.request_id,
             error: r.error,
+            verify_error: r.verify_error,
             body_size: r.body_size,
             content_type: r.content_type,
         }
@@ -183,6 +231,10 @@ pub struct DeliveryDetailView {
     pub signature_ok: bool,
     pub request_id: Option<String>,
     pub error: Option<String>,
+    pub verify_error: Option<String>,
+    pub request_headers: Option<serde_json::Value>,
+    pub replayed_from_delivery_id: Option<String>,
+    pub replayed_by_user_id: Option<String>,
     pub body_size: Option<i64>,
     pub content_type: Option<String>,
     pub body_text: Option<String>,
@@ -199,6 +251,10 @@ impl DeliveryDetailView {
                 (text, Some(b64))
             }
         };
+        let request_headers = r
+            .request_headers
+            .as_deref()
+            .and_then(|raw| serde_json::from_str(raw).ok());
         Self {
             id: r.id,
             webhook_name: r.webhook_name,
@@ -208,6 +264,10 @@ impl DeliveryDetailView {
             signature_ok: r.signature_ok,
             request_id: r.request_id,
             error: r.error,
+            verify_error: r.verify_error,
+            request_headers,
+            replayed_from_delivery_id: r.replayed_from_delivery_id,
+            replayed_by_user_id: r.replayed_by_user_id,
             body_size: r.body_size,
             content_type: r.content_type,
             body_text,
@@ -260,6 +320,28 @@ pub struct CreateWebhookBody {
     pub auth_scheme: String,
     #[serde(default)]
     pub signature_header: Option<String>,
+    #[serde(default)]
+    pub verifier_mode: Option<String>,
+    #[serde(default)]
+    pub signature_algo: Option<String>,
+    #[serde(default)]
+    pub signature_encoding: Option<String>,
+    #[serde(default)]
+    pub signature_prefix: Option<String>,
+    #[serde(default)]
+    pub signature_separator: Option<String>,
+    #[serde(default)]
+    pub signature_value_split: Option<String>,
+    #[serde(default)]
+    pub timestamp_header: Option<String>,
+    #[serde(default)]
+    pub timestamp_skew_secs: Option<i64>,
+    #[serde(default)]
+    pub payload_template: Option<String>,
+    #[serde(default)]
+    pub idempotency_header: Option<String>,
+    #[serde(default)]
+    pub bearer_path_token: Option<String>,
     /// Required when `auth_scheme` requires a key (hmac_sha256, bearer).
     #[serde(default)]
     pub secret: Option<String>,
@@ -275,11 +357,46 @@ pub struct UpdateWebhookBody {
     pub auth_scheme: Option<String>,
     #[serde(default)]
     pub signature_header: Option<String>,
+    #[serde(default)]
+    pub verifier_mode: Option<String>,
+    #[serde(default)]
+    pub signature_algo: Option<String>,
+    #[serde(default)]
+    pub signature_encoding: Option<String>,
+    #[serde(default)]
+    pub signature_prefix: Option<String>,
+    #[serde(default)]
+    pub signature_separator: Option<String>,
+    #[serde(default)]
+    pub signature_value_split: Option<String>,
+    #[serde(default)]
+    pub timestamp_header: Option<String>,
+    #[serde(default)]
+    pub timestamp_skew_secs: Option<i64>,
+    #[serde(default)]
+    pub payload_template: Option<String>,
+    #[serde(default)]
+    pub idempotency_header: Option<String>,
+    #[serde(default)]
+    pub bearer_path_token: Option<String>,
     /// `Some(plaintext)` rotates the signing key; `None` leaves it.
     #[serde(default)]
     pub secret: Option<String>,
     #[serde(default)]
     pub enabled: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct VerifyOnlyBody {
+    pub headers: serde_json::Value,
+    pub body_b64: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct VerifyOnlyOk {
+    pub ok: bool,
+    pub rendered_payload_b64: Option<String>,
+    pub matched_version: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -290,11 +407,72 @@ fn parse_scheme(s: &str) -> Result<WebhookAuthScheme, StatusCode> {
     WebhookAuthScheme::parse(s).ok_or(StatusCode::BAD_REQUEST)
 }
 
+fn parse_verifier_mode(s: &str) -> Result<WebhookVerifierMode, StatusCode> {
+    WebhookVerifierMode::parse(s).ok_or(StatusCode::BAD_REQUEST)
+}
+
+fn parse_signature_algo(s: Option<&str>) -> Result<Option<SignatureAlgorithm>, StatusCode> {
+    match s {
+        Some(raw) => SignatureAlgorithm::parse(raw)
+            .map(Some)
+            .ok_or(StatusCode::BAD_REQUEST),
+        None => Ok(None),
+    }
+}
+
+fn parse_signature_encoding(s: Option<&str>) -> Result<Option<SignatureEncoding>, StatusCode> {
+    match s {
+        Some(raw) => SignatureEncoding::parse(raw)
+            .map(Some)
+            .ok_or(StatusCode::BAD_REQUEST),
+        None => Ok(None),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_verifier_config(
+    verifier_mode: Option<&str>,
+    signature_header: Option<String>,
+    signature_algo: Option<&str>,
+    signature_encoding: Option<&str>,
+    signature_prefix: Option<String>,
+    signature_separator: Option<String>,
+    signature_value_split: Option<String>,
+    timestamp_header: Option<String>,
+    timestamp_skew_secs: Option<i64>,
+    payload_template: Option<String>,
+    idempotency_header: Option<String>,
+    bearer_path_token: Option<String>,
+) -> Result<Option<WebhookVerifierConfig>, StatusCode> {
+    let Some(mode_raw) = verifier_mode else {
+        return Ok(None);
+    };
+    let mode = parse_verifier_mode(mode_raw)?;
+    Ok(Some(WebhookVerifierConfig {
+        mode,
+        signature_header: signature_header
+            .map(|s| s.trim().to_ascii_lowercase())
+            .unwrap_or_default(),
+        signature_algo: parse_signature_algo(signature_algo)?,
+        signature_encoding: parse_signature_encoding(signature_encoding)?,
+        signature_prefix,
+        signature_separator,
+        signature_value_split,
+        timestamp_header: timestamp_header.map(|s| s.trim().to_ascii_lowercase()),
+        timestamp_skew_secs: timestamp_skew_secs.map(|v| v as u64),
+        payload_template,
+        idempotency_header: idempotency_header.map(|s| s.trim().to_ascii_lowercase()),
+        bearer_path_token,
+    }))
+}
+
 fn err_to_status(e: &WebhookError) -> StatusCode {
     match e {
         WebhookError::NotFound => StatusCode::NOT_FOUND,
         WebhookError::BadRequest(_) => StatusCode::BAD_REQUEST,
         WebhookError::SignatureMismatch => StatusCode::UNAUTHORIZED,
+        WebhookError::Verify(_) => StatusCode::UNAUTHORIZED,
+        WebhookError::ReplayDeduped(_) => StatusCode::OK,
         WebhookError::NotReady => StatusCode::SERVICE_UNAVAILABLE,
         WebhookError::Dispatch(_) => StatusCode::BAD_GATEWAY,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
@@ -338,7 +516,27 @@ async fn create_webhook(
         return Err(StatusCode::BAD_REQUEST);
     }
     let scheme = parse_scheme(&body.auth_scheme)?;
-    if scheme != WebhookAuthScheme::None && body.secret.as_deref().is_none_or(str::is_empty) {
+    let verifier = build_verifier_config(
+        body.verifier_mode.as_deref(),
+        body.signature_header.clone(),
+        body.signature_algo.as_deref(),
+        body.signature_encoding.as_deref(),
+        body.signature_prefix.clone(),
+        body.signature_separator.clone(),
+        body.signature_value_split.clone(),
+        body.timestamp_header.clone(),
+        body.timestamp_skew_secs,
+        body.payload_template.clone(),
+        body.idempotency_header.clone(),
+        body.bearer_path_token.clone(),
+    )?;
+    let secret_required = verifier.as_ref().is_none_or(|v| {
+        !matches!(
+            v.mode,
+            WebhookVerifierMode::BearerV2 | WebhookVerifierMode::None
+        )
+    }) && scheme != WebhookAuthScheme::None;
+    if secret_required && body.secret.as_deref().is_none_or(str::is_empty) {
         return Err(StatusCode::BAD_REQUEST);
     }
     // 409 when a row with this name already exists — POST is create-only;
@@ -357,6 +555,7 @@ async fn create_webhook(
         name: body.name,
         description: body.description,
         auth_scheme: scheme,
+        verifier,
         signature_header: body.signature_header,
         secret_plaintext: body.secret.filter(|s| !s.is_empty()),
         enabled: body.enabled,
@@ -384,9 +583,29 @@ async fn update_webhook(
         Some(s) => parse_scheme(s)?,
         None => existing.auth_scheme,
     };
+    let verifier = build_verifier_config(
+        body.verifier_mode.as_deref(),
+        body.signature_header.clone(),
+        body.signature_algo.as_deref(),
+        body.signature_encoding.as_deref(),
+        body.signature_prefix.clone(),
+        body.signature_separator.clone(),
+        body.signature_value_split.clone(),
+        body.timestamp_header.clone(),
+        body.timestamp_skew_secs,
+        body.payload_template.clone(),
+        body.idempotency_header.clone(),
+        body.bearer_path_token.clone(),
+    )?;
     let secret_plaintext = body.secret.filter(|s| !s.is_empty());
     if scheme != WebhookAuthScheme::None
         && existing.auth_scheme != scheme
+        && verifier.as_ref().is_none_or(|v| {
+            !matches!(
+                v.mode,
+                WebhookVerifierMode::BearerV2 | WebhookVerifierMode::None
+            )
+        })
         && secret_plaintext.is_none()
     {
         // Switching scheme requires a fresh key (the old one was sized
@@ -398,6 +617,7 @@ async fn update_webhook(
         name: existing.name.clone(),
         description: body.description.unwrap_or(existing.description.clone()),
         auth_scheme: scheme,
+        verifier,
         signature_header: body.signature_header,
         secret_plaintext,
         enabled: body.enabled.unwrap_or(existing.enabled),
@@ -442,6 +662,57 @@ async fn list_deliveries(
         .await
         .map_err(|e| err_to_status(&e))?;
     Ok(Json(rows.into_iter().map(DeliveryView::from_row).collect()))
+}
+
+async fn verify_only(
+    State(state): State<AppState>,
+    Extension(caller): Extension<CallerIdentity>,
+    Path((id, name)): Path<(String, String)>,
+    Json(body): Json<VerifyOnlyBody>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let raw_body = B64
+        .decode(body.body_b64.as_bytes())
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    let headers = json_headers_to_pairs(&body.headers)?;
+    match state
+        .webhooks
+        .verify_only(
+            &caller.user_id,
+            &id,
+            &name,
+            &headers,
+            header_value(&headers, "authorization"),
+            None,
+            &raw_body,
+        )
+        .await
+    {
+        Ok(outcome) => Ok(Json(serde_json::json!({
+            "ok": true,
+            "rendered_payload_b64": outcome.rendered_payload.as_deref().map(|b| B64.encode(b)),
+            "matched_version": outcome.matched_version,
+        }))),
+        Err(WebhookError::Verify(e)) => serde_json::to_value(e)
+            .map(Json)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR),
+        Err(e) => Err(err_to_status(&e)),
+    }
+}
+
+async fn replay_delivery(
+    State(state): State<AppState>,
+    Extension(caller): Extension<CallerIdentity>,
+    Path((id, name, delivery_id)): Path<(String, String, String)>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let status = state
+        .webhooks
+        .replay_delivery(&caller.user_id, &id, &delivery_id, &caller.user_id)
+        .await
+        .map_err(|e| err_to_status(&e))?;
+    audit_replay(&state, &caller, &id, &name, &delivery_id).await?;
+    Ok(Json(
+        serde_json::json!({ "ok": true, "status_code": status }),
+    ))
 }
 
 async fn list_instance_deliveries(
@@ -541,6 +812,56 @@ fn qs_decode(s: &str) -> String {
     String::from_utf8(out).unwrap_or_else(|_| s.to_owned())
 }
 
+fn json_headers_to_pairs(raw: &serde_json::Value) -> Result<Vec<(String, String)>, StatusCode> {
+    let Some(obj) = raw.as_object() else {
+        return Err(StatusCode::BAD_REQUEST);
+    };
+    let mut out = Vec::with_capacity(obj.len());
+    for (name, value) in obj {
+        let Some(value) = value.as_str() else {
+            return Err(StatusCode::BAD_REQUEST);
+        };
+        out.push((name.to_ascii_lowercase(), value.to_owned()));
+    }
+    Ok(out)
+}
+
+fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|(n, _)| n.eq_ignore_ascii_case(name))
+        .map(|(_, v)| v.as_str())
+}
+
+async fn audit_replay(
+    state: &AppState,
+    caller: &CallerIdentity,
+    instance_id: &str,
+    webhook_name: &str,
+    delivery_id: &str,
+) -> Result<(), StatusCode> {
+    let params = serde_json::json!({
+        "instance_id": instance_id,
+        "webhook_name": webhook_name,
+        "delivery_id": delivery_id,
+    });
+    let bytes = serde_json::to_vec(&params).map_err(|err| {
+        tracing::warn!(error = %err, "webhook replay audit params encode failed");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    let entry = AdminAuditEntry {
+        actor_subject: caller.identity.subject.clone(),
+        action: "webhook.replay".to_owned(),
+        target_user: caller.user_id.clone(),
+        params_hash: hex::encode(Sha256::digest(&bytes)),
+        ts: crate::now_secs(),
+    };
+    state.admin_audit.insert(&entry).await.map_err(|err| {
+        tracing::warn!(error = %err, "webhook replay audit insert failed");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })
+}
+
 /// Public webhook delivery.  Strictly POST.  Body is buffered up to
 /// `MAX_WEBHOOK_BODY`; oversize requests get 413.
 async fn fire_webhook(
@@ -549,8 +870,36 @@ async fn fire_webhook(
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
+    fire_webhook_inner(state, instance_id, name, None, headers, body).await
+}
+
+async fn fire_webhook_with_path_token(
+    State(state): State<AppState>,
+    Path((instance_id, name, bearer_path_token)): Path<(String, String, String)>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    fire_webhook_inner(
+        state,
+        instance_id,
+        name,
+        Some(bearer_path_token),
+        headers,
+        body,
+    )
+    .await
+}
+
+async fn fire_webhook_inner(
+    state: AppState,
+    instance_id: String,
+    name: String,
+    bearer_path_token: Option<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
     if body.len() > MAX_WEBHOOK_BODY {
-        return StatusCode::PAYLOAD_TOO_LARGE;
+        return StatusCode::PAYLOAD_TOO_LARGE.into_response();
     }
     let signature_headers = readable_header_values(&headers);
     let bearer_header = headers.get("authorization").and_then(|v| v.to_str().ok());
@@ -572,6 +921,7 @@ async fn fire_webhook(
             name: &name,
             signature_headers: &signature_headers,
             bearer_header,
+            bearer_path_token: bearer_path_token.as_deref(),
             request_id: request_id.as_deref(),
             forward_headers: forward,
             content_type,
@@ -579,8 +929,16 @@ async fn fire_webhook(
         })
         .await
     {
-        Ok(_) => StatusCode::NO_CONTENT,
-        Err(e) => err_to_status(&e),
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(WebhookError::ReplayDeduped(_)) => (
+            [(
+                axum::http::header::HeaderName::from_static("x-webhook-status"),
+                "replay-deduped",
+            )],
+            StatusCode::OK,
+        )
+            .into_response(),
+        Err(e) => err_to_status(&e).into_response(),
     }
 }
 

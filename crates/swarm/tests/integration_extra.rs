@@ -33,6 +33,8 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
 use axum::routing::{any, delete, post};
 use axum::{Json, Router};
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as B64;
 use futures::stream;
 use serde_json::json;
 
@@ -57,6 +59,7 @@ use dyson_swarm::{
         AuditStore, BackupSink, CubeClient, HealthProber, InstanceRow, InstanceStore, PolicyStore,
         ProbeResult, SnapshotStore, SystemSecretStore, TokenStore, UserSecretStore, UserStore,
     },
+    webhooks::WebhookDispatcher,
 };
 
 // ---------------------------------------------------------------------
@@ -170,6 +173,26 @@ impl DysonReconfigurer for RecordingReconfigurer {
     }
 }
 
+#[derive(Clone, Default)]
+struct RecordingWebhookDispatcher {
+    calls: Arc<AtomicU32>,
+}
+
+#[async_trait::async_trait]
+impl WebhookDispatcher for RecordingWebhookDispatcher {
+    async fn dispatch(
+        &self,
+        _: &InstanceRow,
+        _: &str,
+        _: &str,
+        _: &[(String, String)],
+        _: &[u8],
+    ) -> Result<u16, String> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(204)
+    }
+}
+
 /// `(name, label, limit_usd)` recorded for every mint call.
 type MintCall = (String, Option<String>, f64);
 
@@ -235,9 +258,11 @@ async fn spawn(router: Router) -> String {
 /// hits + handles to mocks the test will assert against.
 struct Stack {
     base: String,
+    pool: sqlx::SqlitePool,
     cube: CubeState,
     llm: LlmState,
     or_prov: Arc<RecordingProvisioning>,
+    webhook_dispatches: Arc<AtomicU32>,
     users: Arc<dyn UserStore>,
     instances: Arc<dyn InstanceStore>,
     instance_svc: Arc<InstanceService>,
@@ -390,12 +415,14 @@ async fn build_stack(subject_for_no_bearer: &str) -> Stack {
     let delivery_store: Arc<dyn dyson_swarm::traits::DeliveryStore> = Arc::new(
         dyson_swarm::db::sqlite::webhooks::SqlxDeliveryStore::new(pool.clone()),
     );
+    let webhook_dispatcher = RecordingWebhookDispatcher::default();
+    let webhook_dispatches = webhook_dispatcher.calls.clone();
     let webhooks_svc = Arc::new(dyson_swarm::webhooks::WebhookService::new(
         webhook_store,
         delivery_store,
         user_secrets_svc.clone(),
         instance_svc.clone(),
-        Arc::new(dyson_swarm::webhooks::NullWebhookDispatcher),
+        Arc::new(webhook_dispatcher),
         cipher_dir.clone(),
     ));
     let artefact_cache = Arc::new(dyson_swarm::artefacts::ArtefactCacheService::new(
@@ -471,9 +498,11 @@ async fn build_stack(subject_for_no_bearer: &str) -> Stack {
 
     Stack {
         base,
+        pool,
         cube: cube_state,
         llm: llm_state,
         or_prov,
+        webhook_dispatches,
         users: users_store,
         instances: instances_store,
         instance_svc,
@@ -561,6 +590,269 @@ async fn startup_warns_when_live_open_rows_exist_and_flag_disabled() {
         ),
         "startup warning missing from logs: {text}"
     );
+}
+
+#[tokio::test]
+async fn post_verify_only_returns_structured_verify_error() {
+    let stack = build_stack("alice-webhook-verify").await;
+    let client = reqwest::Client::new();
+    let user_id = create_user(&client, &stack.base, "alice-webhook-verify-user", true).await;
+    let token = mint_api_key(&client, &stack.base, &user_id).await;
+    let instance_id = create_live_instance(&client, &stack.base, &token).await;
+    create_standard_webhook(&client, &stack.base, &token, &instance_id, "standard").await;
+
+    let r = client
+        .post(format!(
+            "{}/v1/instances/{}/webhooks/standard/verify-only",
+            stack.base, instance_id
+        ))
+        .bearer_auth(&token)
+        .json(&json!({
+            "headers": {
+                "webhook-id": "msg_123",
+                "webhook-timestamp": "1700000000",
+                "webhook-signature": "v1,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+            },
+            "body_b64": B64.encode(include_bytes!("../../core/tests/fixtures/webhooks/standard/request.txt")),
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let body: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(body["type"], "all_signatures_mismatched");
+}
+
+#[tokio::test]
+async fn post_verify_only_does_not_write_delivery_row() {
+    let stack = build_stack("alice-webhook-verify-row").await;
+    let client = reqwest::Client::new();
+    let user_id = create_user(&client, &stack.base, "alice-webhook-verify-row-user", true).await;
+    let token = mint_api_key(&client, &stack.base, &user_id).await;
+    let instance_id = create_live_instance(&client, &stack.base, &token).await;
+    create_standard_webhook(&client, &stack.base, &token, &instance_id, "standard").await;
+
+    let r = client
+        .post(format!(
+            "{}/v1/instances/{}/webhooks/standard/verify-only",
+            stack.base, instance_id
+        ))
+        .bearer_auth(&token)
+        .json(&json!({
+            "headers": {
+                "webhook-id": "msg_123",
+                "webhook-timestamp": "1700000000",
+                "webhook-signature": "v1,wra4YjTmfmlGzjR8dmrWdQ/P1d0y1bbdInTre89XmGs="
+            },
+            "body_b64": B64.encode(include_bytes!("../../core/tests/fixtures/webhooks/standard/request.txt")),
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+
+    let rows: serde_json::Value = client
+        .get(format!(
+            "{}/v1/instances/{}/webhooks/standard/deliveries",
+            stack.base, instance_id
+        ))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(rows.as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn post_verify_only_does_not_dispatch() {
+    let stack = build_stack("alice-webhook-verify-dispatch").await;
+    let client = reqwest::Client::new();
+    let user_id = create_user(
+        &client,
+        &stack.base,
+        "alice-webhook-verify-dispatch-user",
+        true,
+    )
+    .await;
+    let token = mint_api_key(&client, &stack.base, &user_id).await;
+    let instance_id = create_live_instance(&client, &stack.base, &token).await;
+    create_standard_webhook(&client, &stack.base, &token, &instance_id, "standard").await;
+
+    let r = client
+        .post(format!(
+            "{}/v1/instances/{}/webhooks/standard/verify-only",
+            stack.base, instance_id
+        ))
+        .bearer_auth(&token)
+        .json(&json!({
+            "headers": {
+                "webhook-id": "msg_123",
+                "webhook-timestamp": "1700000000",
+                "webhook-signature": "v1,wra4YjTmfmlGzjR8dmrWdQ/P1d0y1bbdInTre89XmGs="
+            },
+            "body_b64": B64.encode(include_bytes!("../../core/tests/fixtures/webhooks/standard/request.txt")),
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(stack.webhook_dispatches.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn post_replay_redispatches_without_reverifying() {
+    let stack = build_stack("alice-webhook-replay").await;
+    let client = reqwest::Client::new();
+    let user_id = create_user(&client, &stack.base, "alice-webhook-replay-user", true).await;
+    let token = mint_api_key(&client, &stack.base, &user_id).await;
+    let instance_id = create_live_instance(&client, &stack.base, &token).await;
+    create_legacy_hmac_webhook(&client, &stack.base, &token, &instance_id, "github").await;
+
+    let bad = client
+        .post(format!("{}/webhooks/{}/github", stack.base, instance_id))
+        .header(
+            "x-hub-signature-256",
+            "sha256=0000000000000000000000000000000000000000000000000000000000000000",
+        )
+        .body(
+            include_bytes!("../../core/tests/fixtures/webhooks/github/request.txt")
+                .as_slice()
+                .to_vec(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad.status(), 401);
+    assert_eq!(stack.webhook_dispatches.load(Ordering::SeqCst), 0);
+    let delivery_id =
+        latest_delivery_id(&client, &stack.base, &token, &instance_id, "github").await;
+
+    let replay = client
+        .post(format!(
+            "{}/v1/instances/{}/webhooks/github/replay/{}",
+            stack.base, instance_id, delivery_id
+        ))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(replay.status(), 200);
+    assert_eq!(stack.webhook_dispatches.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn replay_is_audited_with_user_id() {
+    let stack = build_stack("alice-webhook-replay-audit").await;
+    let client = reqwest::Client::new();
+    let user_id = create_user(
+        &client,
+        &stack.base,
+        "alice-webhook-replay-audit-user",
+        true,
+    )
+    .await;
+    let token = mint_api_key(&client, &stack.base, &user_id).await;
+    let instance_id = create_live_instance(&client, &stack.base, &token).await;
+    create_legacy_hmac_webhook(&client, &stack.base, &token, &instance_id, "github").await;
+    let bad = client
+        .post(format!("{}/webhooks/{}/github", stack.base, instance_id))
+        .header(
+            "x-hub-signature-256",
+            "sha256=0000000000000000000000000000000000000000000000000000000000000000",
+        )
+        .body(
+            include_bytes!("../../core/tests/fixtures/webhooks/github/request.txt")
+                .as_slice()
+                .to_vec(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad.status(), 401);
+    let delivery_id =
+        latest_delivery_id(&client, &stack.base, &token, &instance_id, "github").await;
+
+    let replay = client
+        .post(format!(
+            "{}/v1/instances/{}/webhooks/github/replay/{}",
+            stack.base, instance_id, delivery_id
+        ))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(replay.status(), 200);
+
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM admin_audit WHERE action = 'webhook.replay' AND target_user = ?",
+    )
+    .bind(&user_id)
+    .fetch_one(&stack.pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 1);
+}
+
+#[tokio::test]
+async fn bearer_v2_path_token_required_on_ingest_url() {
+    let stack = build_stack("alice-webhook-bearer-v2").await;
+    let client = reqwest::Client::new();
+    let user_id = create_user(&client, &stack.base, "alice-webhook-bearer-v2-user", true).await;
+    let token = mint_api_key(&client, &stack.base, &user_id).await;
+    let instance_id = create_live_instance(&client, &stack.base, &token).await;
+    let row =
+        create_bearer_v2_webhook(&client, &stack.base, &token, &instance_id, "agentmail").await;
+    let path = row["path"].as_str().unwrap();
+    let path_token = path.rsplit('/').next().unwrap();
+
+    let without = client
+        .post(format!("{}/webhooks/{}/agentmail", stack.base, instance_id))
+        .body("{}")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(without.status(), 401);
+
+    let with = client
+        .post(format!(
+            "{}/webhooks/{}/agentmail/{}",
+            stack.base, instance_id, path_token
+        ))
+        .body("{}")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(with.status(), 204);
+}
+
+#[tokio::test]
+async fn legacy_hmac_endpoint_still_accepts_github_fixture() {
+    let stack = build_stack("alice-webhook-legacy").await;
+    let client = reqwest::Client::new();
+    let user_id = create_user(&client, &stack.base, "alice-webhook-legacy-user", true).await;
+    let token = mint_api_key(&client, &stack.base, &user_id).await;
+    let instance_id = create_live_instance(&client, &stack.base, &token).await;
+    create_legacy_hmac_webhook(&client, &stack.base, &token, &instance_id, "github").await;
+
+    let r = client
+        .post(format!("{}/webhooks/{}/github", stack.base, instance_id))
+        .header(
+            "x-hub-signature-256",
+            "sha256=1ae84c7f758faa88395f24d75a762947277389c2071f1c3c478492f6a2112d0d",
+        )
+        .body(
+            include_bytes!("../../core/tests/fixtures/webhooks/github/request.txt")
+                .as_slice()
+                .to_vec(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 204);
+    assert_eq!(stack.webhook_dispatches.load(Ordering::SeqCst), 1);
 }
 
 /// Tenancy isolation — alice's instance is invisible to bob via every
@@ -1189,6 +1481,115 @@ async fn create_live_instance(client: &reqwest::Client, base: &str, token: &str)
     assert_eq!(r.status(), 201, "create_live_instance failed");
     let v: serde_json::Value = r.json().await.unwrap();
     v["id"].as_str().unwrap().to_string()
+}
+
+async fn create_legacy_hmac_webhook(
+    client: &reqwest::Client,
+    base: &str,
+    token: &str,
+    instance_id: &str,
+    name: &str,
+) -> serde_json::Value {
+    let r = client
+        .post(format!("{base}/v1/instances/{instance_id}/webhooks"))
+        .bearer_auth(token)
+        .json(&json!({
+            "name": name,
+            "description": "test legacy webhook",
+            "auth_scheme": "hmac_sha256",
+            "signature_header": "x-hub-signature-256",
+            "secret": "top-secret",
+            "enabled": true
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 201, "create_legacy_hmac_webhook failed");
+    r.json().await.unwrap()
+}
+
+async fn create_standard_webhook(
+    client: &reqwest::Client,
+    base: &str,
+    token: &str,
+    instance_id: &str,
+    name: &str,
+) -> serde_json::Value {
+    let r = client
+        .post(format!("{base}/v1/instances/{instance_id}/webhooks"))
+        .bearer_auth(token)
+        .json(&json!({
+            "name": name,
+            "description": "test standard webhook",
+            "auth_scheme": "hmac_sha256",
+            "verifier_mode": "hmac_v2",
+            "signature_header": "webhook-signature",
+            "signature_algo": "sha256",
+            "signature_encoding": "base64",
+            "signature_prefix": "v1,",
+            "signature_separator": " ",
+            "signature_value_split": ",",
+            "timestamp_header": "webhook-timestamp",
+            "timestamp_skew_secs": 999999999,
+            "payload_template": "{{id}}.{{timestamp}}.{{body}}",
+            "idempotency_header": "webhook-id",
+            "secret": "top-secret",
+            "enabled": true
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 201, "create_standard_webhook failed");
+    r.json().await.unwrap()
+}
+
+async fn create_bearer_v2_webhook(
+    client: &reqwest::Client,
+    base: &str,
+    token: &str,
+    instance_id: &str,
+    name: &str,
+) -> serde_json::Value {
+    let r = client
+        .post(format!("{base}/v1/instances/{instance_id}/webhooks"))
+        .bearer_auth(token)
+        .json(&json!({
+            "name": name,
+            "description": "test bearer v2 webhook",
+            "auth_scheme": "bearer",
+            "verifier_mode": "bearer_v2",
+            "secret": "legacy-unused",
+            "enabled": true
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 201, "create_bearer_v2_webhook failed");
+    r.json().await.unwrap()
+}
+
+async fn latest_delivery_id(
+    client: &reqwest::Client,
+    base: &str,
+    token: &str,
+    instance_id: &str,
+    name: &str,
+) -> String {
+    let rows: serde_json::Value = client
+        .get(format!(
+            "{base}/v1/instances/{instance_id}/webhooks/{name}/deliveries"
+        ))
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    rows.as_array().unwrap()[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned()
 }
 
 async fn create_user(

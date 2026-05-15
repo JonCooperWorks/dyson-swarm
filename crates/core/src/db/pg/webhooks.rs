@@ -45,6 +45,17 @@ fn row_to_webhook(r: sqlx::postgres::PgRow) -> Result<WebhookRow, StoreError> {
         description: r.try_get("description").map_err(map_sqlx)?,
         auth_scheme,
         signature_header: r.try_get("signature_header").map_err(map_sqlx)?,
+        verifier_mode: r.try_get("verifier_mode").map_err(map_sqlx)?,
+        signature_algo: r.try_get("signature_algo").map_err(map_sqlx)?,
+        signature_encoding: r.try_get("signature_encoding").map_err(map_sqlx)?,
+        signature_prefix: r.try_get("signature_prefix").map_err(map_sqlx)?,
+        signature_separator: r.try_get("signature_separator").map_err(map_sqlx)?,
+        signature_value_split: r.try_get("signature_value_split").map_err(map_sqlx)?,
+        timestamp_header: r.try_get("timestamp_header").map_err(map_sqlx)?,
+        timestamp_skew_secs: r.try_get("timestamp_skew_secs").map_err(map_sqlx)?,
+        payload_template: r.try_get("payload_template").map_err(map_sqlx)?,
+        idempotency_header: r.try_get("idempotency_header").map_err(map_sqlx)?,
+        bearer_path_token: r.try_get("bearer_path_token").map_err(map_sqlx)?,
         secret_name: r.try_get("secret_name").map_err(map_sqlx)?,
         enabled: r.try_get::<i64, _>("enabled").map_err(map_sqlx)? != 0,
         created_at: r.try_get("created_at").map_err(map_sqlx)?,
@@ -58,15 +69,28 @@ impl WebhookStore for PgWebhookStore {
         sqlx::query(
             "INSERT INTO instance_webhooks \
                 (instance_id, name, description, auth_scheme, signature_header, secret_name, \
-                 enabled, created_at, updated_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) \
+                 enabled, created_at, updated_at, verifier_mode, signature_algo, signature_encoding, \
+                 signature_prefix, signature_separator, signature_value_split, timestamp_header, \
+                 timestamp_skew_secs, payload_template, idempotency_header, bearer_path_token) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20) \
              ON CONFLICT(instance_id, name) DO UPDATE SET \
                 description = excluded.description, \
                 auth_scheme = excluded.auth_scheme, \
                 signature_header = excluded.signature_header, \
                 secret_name = excluded.secret_name, \
                 enabled     = excluded.enabled, \
-                updated_at  = excluded.updated_at",
+                updated_at  = excluded.updated_at, \
+                verifier_mode = excluded.verifier_mode, \
+                signature_algo = excluded.signature_algo, \
+                signature_encoding = excluded.signature_encoding, \
+                signature_prefix = excluded.signature_prefix, \
+                signature_separator = excluded.signature_separator, \
+                signature_value_split = excluded.signature_value_split, \
+                timestamp_header = excluded.timestamp_header, \
+                timestamp_skew_secs = excluded.timestamp_skew_secs, \
+                payload_template = excluded.payload_template, \
+                idempotency_header = excluded.idempotency_header, \
+                bearer_path_token = excluded.bearer_path_token",
         )
         .bind(&row.instance_id)
         .bind(&row.name)
@@ -77,6 +101,17 @@ impl WebhookStore for PgWebhookStore {
         .bind(i64::from(row.enabled))
         .bind(row.created_at)
         .bind(row.updated_at)
+        .bind(&row.verifier_mode)
+        .bind(&row.signature_algo)
+        .bind(&row.signature_encoding)
+        .bind(&row.signature_prefix)
+        .bind(&row.signature_separator)
+        .bind(&row.signature_value_split)
+        .bind(&row.timestamp_header)
+        .bind(row.timestamp_skew_secs)
+        .bind(&row.payload_template)
+        .bind(&row.idempotency_header)
+        .bind(&row.bearer_path_token)
         .execute(&self.pool)
         .await
         .map_err(map_sqlx)?;
@@ -86,7 +121,9 @@ impl WebhookStore for PgWebhookStore {
     async fn get(&self, instance_id: &str, name: &str) -> Result<Option<WebhookRow>, StoreError> {
         let row = sqlx::query(
             "SELECT instance_id, name, description, auth_scheme, signature_header, secret_name, \
-                    enabled, created_at, updated_at \
+                    enabled, created_at, updated_at, verifier_mode, signature_algo, signature_encoding, \
+                    signature_prefix, signature_separator, signature_value_split, timestamp_header, \
+                    timestamp_skew_secs, payload_template, idempotency_header, bearer_path_token \
              FROM instance_webhooks \
              WHERE instance_id = $1 AND name = $2",
         )
@@ -104,7 +141,9 @@ impl WebhookStore for PgWebhookStore {
     async fn list_for_instance(&self, instance_id: &str) -> Result<Vec<WebhookRow>, StoreError> {
         let rows = sqlx::query(
             "SELECT instance_id, name, description, auth_scheme, signature_header, secret_name, \
-                    enabled, created_at, updated_at \
+                    enabled, created_at, updated_at, verifier_mode, signature_algo, signature_encoding, \
+                    signature_prefix, signature_separator, signature_value_split, timestamp_header, \
+                    timestamp_skew_secs, payload_template, idempotency_header, bearer_path_token \
              FROM instance_webhooks \
              WHERE instance_id = $1 \
              ORDER BY name",
@@ -171,6 +210,17 @@ impl WebhookStore for PgWebhookStore {
                 .unwrap_or(existing.description),
             auth_scheme: auth_scheme.unwrap_or(existing.auth_scheme),
             signature_header: existing.signature_header,
+            verifier_mode: existing.verifier_mode,
+            signature_algo: existing.signature_algo,
+            signature_encoding: existing.signature_encoding,
+            signature_prefix: existing.signature_prefix,
+            signature_separator: existing.signature_separator,
+            signature_value_split: existing.signature_value_split,
+            timestamp_header: existing.timestamp_header,
+            timestamp_skew_secs: existing.timestamp_skew_secs,
+            payload_template: existing.payload_template,
+            idempotency_header: existing.idempotency_header,
+            bearer_path_token: existing.bearer_path_token,
             secret_name: match secret_name {
                 Some(v) => v.map(str::to_owned),
                 None => existing.secret_name,
@@ -190,8 +240,9 @@ impl DeliveryStore for PgDeliveryStore {
             "INSERT INTO webhook_deliveries \
                 (id, instance_id, webhook_name, fired_at, status_code, \
                  latency_ms, request_id, signature_ok, error, \
-                 body, body_size, content_type) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+                 body, body_size, content_type, verify_error, request_headers, \
+                 replayed_from_delivery_id, replayed_by_user_id) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)",
         )
         .bind(&row.id)
         .bind(&row.instance_id)
@@ -205,10 +256,44 @@ impl DeliveryStore for PgDeliveryStore {
         .bind(row.body.as_deref())
         .bind(row.body_size)
         .bind(&row.content_type)
+        .bind(&row.verify_error)
+        .bind(&row.request_headers)
+        .bind(&row.replayed_from_delivery_id)
+        .bind(&row.replayed_by_user_id)
         .execute(&self.pool)
         .await
         .map_err(map_sqlx)?;
         Ok(())
+    }
+
+    async fn try_mark_delivery_seen(
+        &self,
+        webhook_row_id: &str,
+        idempotency_key: &str,
+        first_seen_at: i64,
+    ) -> Result<bool, StoreError> {
+        let res = sqlx::query(
+            "INSERT INTO webhook_deliveries_seen \
+                (webhook_row_id, idempotency_key, first_seen_at) \
+             VALUES ($1, $2, $3) \
+             ON CONFLICT(webhook_row_id, idempotency_key) DO NOTHING",
+        )
+        .bind(webhook_row_id)
+        .bind(idempotency_key)
+        .bind(first_seen_at)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(res.rows_affected() == 1)
+    }
+
+    async fn sweep_seen_deliveries_before(&self, cutoff: i64) -> Result<u64, StoreError> {
+        let res = sqlx::query("DELETE FROM webhook_deliveries_seen WHERE first_seen_at < $1")
+            .bind(cutoff)
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+        Ok(res.rows_affected())
     }
 
     async fn list_for_webhook(
@@ -225,7 +310,8 @@ impl DeliveryStore for PgDeliveryStore {
         let rows = sqlx::query(
             "SELECT id, instance_id, webhook_name, fired_at, status_code, \
                     latency_ms, request_id, signature_ok, error, \
-                    body_size, content_type \
+                    verify_error, request_headers, replayed_from_delivery_id, \
+                    replayed_by_user_id, body_size, content_type \
              FROM webhook_deliveries \
              WHERE instance_id = $1 AND webhook_name = $2 \
              ORDER BY fired_at DESC \
@@ -263,7 +349,8 @@ impl DeliveryStore for PgDeliveryStore {
         let mut sql = String::from(
             "SELECT id, instance_id, webhook_name, fired_at, status_code, \
                     latency_ms, request_id, signature_ok, error, \
-                    body_size, content_type \
+                    verify_error, request_headers, replayed_from_delivery_id, \
+                    replayed_by_user_id, body_size, content_type \
              FROM webhook_deliveries \
              WHERE instance_id = $1",
         );
@@ -311,7 +398,8 @@ impl DeliveryStore for PgDeliveryStore {
         let row = sqlx::query(
             "SELECT id, instance_id, webhook_name, fired_at, status_code, \
                     latency_ms, request_id, signature_ok, error, \
-                    body, body_size, content_type \
+                    verify_error, request_headers, replayed_from_delivery_id, \
+                    replayed_by_user_id, body, body_size, content_type \
              FROM webhook_deliveries \
              WHERE instance_id = $1 AND id = $2",
         )
@@ -332,6 +420,12 @@ impl DeliveryStore for PgDeliveryStore {
                 request_id: r.try_get("request_id").map_err(map_sqlx)?,
                 signature_ok: r.try_get::<i64, _>("signature_ok").map_err(map_sqlx)? != 0,
                 error: r.try_get("error").map_err(map_sqlx)?,
+                verify_error: r.try_get("verify_error").map_err(map_sqlx)?,
+                request_headers: r.try_get("request_headers").map_err(map_sqlx)?,
+                replayed_from_delivery_id: r
+                    .try_get("replayed_from_delivery_id")
+                    .map_err(map_sqlx)?,
+                replayed_by_user_id: r.try_get("replayed_by_user_id").map_err(map_sqlx)?,
                 body: r.try_get::<Option<Vec<u8>>, _>("body").map_err(map_sqlx)?,
                 body_size: r.try_get("body_size").map_err(map_sqlx)?,
                 content_type: r.try_get("content_type").map_err(map_sqlx)?,
@@ -351,6 +445,10 @@ fn metadata_row(r: sqlx::postgres::PgRow) -> Result<DeliveryRow, StoreError> {
         request_id: r.try_get("request_id").map_err(map_sqlx)?,
         signature_ok: r.try_get::<i64, _>("signature_ok").map_err(map_sqlx)? != 0,
         error: r.try_get("error").map_err(map_sqlx)?,
+        verify_error: r.try_get("verify_error").map_err(map_sqlx)?,
+        request_headers: r.try_get("request_headers").map_err(map_sqlx)?,
+        replayed_from_delivery_id: r.try_get("replayed_from_delivery_id").map_err(map_sqlx)?,
+        replayed_by_user_id: r.try_get("replayed_by_user_id").map_err(map_sqlx)?,
         body: None,
         body_size: r.try_get("body_size").map_err(map_sqlx)?,
         content_type: r.try_get("content_type").map_err(map_sqlx)?,

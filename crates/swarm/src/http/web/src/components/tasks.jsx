@@ -26,6 +26,7 @@ import {
 } from '../store/app.js';
 import { EmptyState, Pager } from './ui.jsx';
 import { fmtBytes, fmtTime, shortId } from '../utils/format.js';
+import { WEBHOOK_PRESETS } from './webhookPresets.js';
 
 const SCHEMES = [
   {
@@ -54,6 +55,59 @@ const TASK_MARKDOWN_COMPONENTS = {
     <a {...props} target="_blank" rel="noopener noreferrer"/>
   ),
 };
+
+function nullableText(value) {
+  const s = String(value ?? '').trim();
+  return s ? s : null;
+}
+
+function b64Text(value) {
+  if (typeof TextEncoder !== 'undefined') {
+    const bytes = new TextEncoder().encode(value);
+    let raw = '';
+    bytes.forEach(b => { raw += String.fromCharCode(b); });
+    return btoa(raw);
+  }
+  return btoa(value);
+}
+
+function b64DecodeText(value) {
+  try {
+    const raw = atob(value || '');
+    if (typeof TextDecoder !== 'undefined') {
+      const bytes = Uint8Array.from(raw, ch => ch.charCodeAt(0));
+      return new TextDecoder().decode(bytes);
+    }
+    return raw;
+  } catch {
+    return '';
+  }
+}
+
+function textToHex(value) {
+  if (typeof TextEncoder !== 'undefined') {
+    return Array.from(new TextEncoder().encode(value || ''))
+      .map(b => b.toString(16).padStart(2, '0'))
+      .join('');
+  }
+  return Array.from(value || '')
+    .map(ch => ch.charCodeAt(0).toString(16).padStart(2, '0'))
+    .join('');
+}
+
+function parseRecordedDelivery(raw) {
+  const normalised = String(raw || '').replace(/\r\n/g, '\n');
+  const sep = normalised.indexOf('\n\n');
+  const headerText = sep >= 0 ? normalised.slice(0, sep) : normalised;
+  const body = sep >= 0 ? normalised.slice(sep + 2) : '';
+  const headers = {};
+  headerText.split('\n').forEach(line => {
+    const idx = line.indexOf(':');
+    if (idx <= 0) return;
+    headers[line.slice(0, idx).trim()] = line.slice(idx + 1).trim();
+  });
+  return { headers, body_b64: b64Text(body) };
+}
 
 function schemeLabel(s) {
   return SCHEMES.find(x => x.value === s)?.label || s;
@@ -283,6 +337,16 @@ function TaskForm({ instanceId, taskName }) {
   const [description, setDescription] = React.useState('');
   const [scheme, setScheme] = React.useState('hmac_sha256');
   const [signatureHeader, setSignatureHeader] = React.useState(DEFAULT_SIGNATURE_HEADER);
+  const [verifierMode, setVerifierMode] = React.useState('legacy_hmac');
+  const [signatureAlgo, setSignatureAlgo] = React.useState('sha256');
+  const [signatureEncoding, setSignatureEncoding] = React.useState('hex');
+  const [signaturePrefix, setSignaturePrefix] = React.useState('sha256=');
+  const [signatureSeparator, setSignatureSeparator] = React.useState('');
+  const [signatureValueSplit, setSignatureValueSplit] = React.useState('=');
+  const [timestampHeader, setTimestampHeader] = React.useState('');
+  const [timestampSkewSecs, setTimestampSkewSecs] = React.useState('300');
+  const [payloadTemplate, setPayloadTemplate] = React.useState('{{body}}');
+  const [idempotencyHeader, setIdempotencyHeader] = React.useState('');
   const [secret, setSecret] = React.useState('');
   const [hasSecret, setHasSecret] = React.useState(false);
   const [enabled, setEnabled] = React.useState(true);
@@ -290,6 +354,9 @@ function TaskForm({ instanceId, taskName }) {
   const [err, setErr] = React.useState(null);
   const [submitting, setSubmitting] = React.useState(false);
   const [origScheme, setOrigScheme] = React.useState('hmac_sha256');
+  const [recordedDelivery, setRecordedDelivery] = React.useState('');
+  const [verifyResult, setVerifyResult] = React.useState(null);
+  const [verifying, setVerifying] = React.useState(false);
 
   React.useEffect(() => {
     if (!editing) return;
@@ -301,6 +368,16 @@ function TaskForm({ instanceId, taskName }) {
       setScheme(row.auth_scheme);
       setOrigScheme(row.auth_scheme);
       setSignatureHeader(row.signature_header || DEFAULT_SIGNATURE_HEADER);
+      setVerifierMode(row.verifier_mode || 'legacy_hmac');
+      setSignatureAlgo(row.signature_algo || 'sha256');
+      setSignatureEncoding(row.signature_encoding || 'hex');
+      setSignaturePrefix(row.signature_prefix || '');
+      setSignatureSeparator(row.signature_separator || '');
+      setSignatureValueSplit(row.signature_value_split || '');
+      setTimestampHeader(row.timestamp_header || '');
+      setTimestampSkewSecs(String(row.timestamp_skew_secs ?? 300));
+      setPayloadTemplate(row.payload_template || '{{body}}');
+      setIdempotencyHeader(row.idempotency_header || '');
       setHasSecret(!!row.has_secret);
       setEnabled(!!row.enabled);
       setLoaded(true);
@@ -311,9 +388,39 @@ function TaskForm({ instanceId, taskName }) {
   }, [client, editing, instanceId, taskName]);
 
   const schemeChanged = editing && scheme !== origScheme;
-  const usesHmac = scheme === 'hmac_sha256';
-  const needsSecret = scheme !== 'none';
+  const usesHmac = scheme === 'hmac_sha256' || verifierMode === 'hmac_v2';
+  const needsSecret = scheme !== 'none' && verifierMode !== 'none' && verifierMode !== 'bearer_v2';
   const requireSecretOnSave = needsSecret && (!editing || schemeChanged || !hasSecret);
+
+  const applyPreset = (preset) => {
+    setScheme(preset.auth_scheme);
+    setSignatureHeader(preset.signature_header);
+    setVerifierMode(preset.verifier_mode);
+    setSignatureAlgo(preset.signature_algo || 'sha256');
+    setSignatureEncoding(preset.signature_encoding || 'hex');
+    setSignaturePrefix(preset.signature_prefix || '');
+    setSignatureSeparator(preset.signature_separator || '');
+    setSignatureValueSplit(preset.signature_value_split || '');
+    setTimestampHeader(preset.timestamp_header || '');
+    setTimestampSkewSecs(String(preset.timestamp_skew_secs ?? 300));
+    setPayloadTemplate(preset.payload_template || '{{body}}');
+    setIdempotencyHeader(preset.idempotency_header || '');
+    setDanger(false);
+    setVerifyResult(null);
+  };
+
+  const verifierBody = () => ({
+    verifier_mode: verifierMode,
+    signature_algo: nullableText(signatureAlgo),
+    signature_encoding: nullableText(signatureEncoding),
+    signature_prefix: nullableText(signaturePrefix),
+    signature_separator: nullableText(signatureSeparator),
+    signature_value_split: nullableText(signatureValueSplit),
+    timestamp_header: nullableText(timestampHeader),
+    timestamp_skew_secs: timestampSkewSecs === '' ? null : Number(timestampSkewSecs),
+    payload_template: nullableText(payloadTemplate),
+    idempotency_header: nullableText(idempotencyHeader),
+  });
 
   const submit = async (e) => {
     e.preventDefault();
@@ -330,13 +437,13 @@ function TaskForm({ instanceId, taskName }) {
     setSubmitting(true);
     try {
       if (editing) {
-        const body = { description, auth_scheme: scheme, enabled };
+        const body = { description, auth_scheme: scheme, enabled, ...verifierBody() };
         if (usesHmac) body.signature_header = signatureHeader.trim() || DEFAULT_SIGNATURE_HEADER;
         if (secret) body.secret = secret;
         const updated = await client.updateWebhook(instanceId, taskName, body);
         upsertWebhook(instanceId, updated);
       } else {
-        const body = { name, description, auth_scheme: scheme, enabled };
+        const body = { name, description, auth_scheme: scheme, enabled, ...verifierBody() };
         if (usesHmac) body.signature_header = signatureHeader.trim() || DEFAULT_SIGNATURE_HEADER;
         if (secret) body.secret = secret;
         const created = await client.createWebhook(instanceId, body);
@@ -347,6 +454,25 @@ function TaskForm({ instanceId, taskName }) {
       setErr(e?.detail || e?.message || 'save failed');
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const verifyRecorded = async () => {
+    if (!editing || verifying) return;
+    setVerifying(true);
+    setVerifyResult(null);
+    setErr(null);
+    try {
+      const result = await client.verifyWebhookDelivery(
+        instanceId,
+        taskName,
+        parseRecordedDelivery(recordedDelivery),
+      );
+      setVerifyResult(result);
+    } catch (e) {
+      setVerifyResult({ type: 'request_failed', reason: e?.detail || e?.message || 'verify failed' });
+    } finally {
+      setVerifying(false);
     }
   };
 
@@ -396,6 +522,19 @@ function TaskForm({ instanceId, taskName }) {
 
         <section className="page-section">
           <h2 className="section-title">verification</h2>
+          <div className="task-preset-strip" aria-label="webhook verifier presets">
+            {WEBHOOK_PRESETS.map(preset => (
+              <button
+                key={preset.label}
+                type="button"
+                className="btn btn-ghost btn-sm"
+                onClick={() => applyPreset(preset)}
+                disabled={submitting}
+              >
+                {preset.label}
+              </button>
+            ))}
+          </div>
           <div className="task-scheme-grid">
             {SCHEMES.map(s => (
               <label key={s.value} className={`task-scheme ${scheme === s.value ? 'selected' : ''} ${s.value === 'none' ? 'danger' : ''}`}>
@@ -459,6 +598,157 @@ function TaskForm({ instanceId, taskName }) {
                 Use the provider's header name, for example x-hub-signature-256 or x-swarm-signature.
               </small>
             </label>
+          ) : null}
+          <div className="task-verifier-grid">
+            <label className="field">
+              <span>verifier mode</span>
+              <select
+                aria-label="verifier mode"
+                value={verifierMode}
+                onChange={e => setVerifierMode(e.target.value)}
+                disabled={submitting}
+              >
+                <option value="legacy_hmac">legacy_hmac</option>
+                <option value="legacy_bearer">legacy_bearer</option>
+                <option value="none">none</option>
+                <option value="hmac_v2">hmac_v2</option>
+                <option value="bearer_v2">bearer_v2</option>
+              </select>
+            </label>
+            <label className="field">
+              <span>algorithm</span>
+              <select
+                aria-label="signature algorithm"
+                value={signatureAlgo}
+                onChange={e => setSignatureAlgo(e.target.value)}
+                disabled={submitting}
+              >
+                <option value="sha256">sha256</option>
+                <option value="sha1">sha1</option>
+                <option value="sha512">sha512</option>
+              </select>
+            </label>
+            <label className="field">
+              <span>encoding</span>
+              <select
+                aria-label="signature encoding"
+                value={signatureEncoding}
+                onChange={e => setSignatureEncoding(e.target.value)}
+                disabled={submitting}
+              >
+                <option value="hex">hex</option>
+                <option value="base64">base64</option>
+              </select>
+            </label>
+            <label className="field">
+              <span>signature prefix</span>
+              <input
+                aria-label="signature prefix"
+                value={signaturePrefix}
+                onChange={e => setSignaturePrefix(e.target.value)}
+                placeholder="sha256="
+                disabled={submitting}
+                autoComplete="off"
+              />
+            </label>
+            <label className="field">
+              <span>signature separator</span>
+              <input
+                aria-label="signature separator"
+                value={signatureSeparator}
+                onChange={e => setSignatureSeparator(e.target.value)}
+                placeholder="space or comma for multi-sig headers"
+                disabled={submitting}
+                autoComplete="off"
+              />
+            </label>
+            <label className="field">
+              <span>value split</span>
+              <input
+                aria-label="signature value split"
+                value={signatureValueSplit}
+                onChange={e => setSignatureValueSplit(e.target.value)}
+                placeholder="= or ,"
+                disabled={submitting}
+                autoComplete="off"
+              />
+            </label>
+            <label className="field">
+              <span>timestamp header</span>
+              <input
+                aria-label="timestamp header"
+                value={timestampHeader}
+                onChange={e => setTimestampHeader(e.target.value.toLowerCase())}
+                placeholder="webhook-timestamp"
+                disabled={submitting}
+                autoComplete="off"
+              />
+            </label>
+            <label className="field">
+              <span>timestamp skew seconds</span>
+              <input
+                aria-label="timestamp skew seconds"
+                type="number"
+                min="0"
+                value={timestampSkewSecs}
+                onChange={e => setTimestampSkewSecs(e.target.value)}
+                disabled={submitting}
+              />
+            </label>
+            <label className="field">
+              <span>idempotency header</span>
+              <input
+                aria-label="idempotency header"
+                value={idempotencyHeader}
+                onChange={e => setIdempotencyHeader(e.target.value.toLowerCase())}
+                placeholder="webhook-id"
+                disabled={submitting}
+                autoComplete="off"
+              />
+            </label>
+          </div>
+          <label className="field">
+            <span>payload template</span>
+            <input
+              aria-label="payload template"
+              value={payloadTemplate}
+              onChange={e => setPayloadTemplate(e.target.value)}
+              placeholder="{{body}}"
+              disabled={submitting}
+              autoComplete="off"
+            />
+            <small className="muted">
+              Placeholders: {'{{body}}'}, {'{{timestamp}}'}, {'{{id}}'}, {'{{version}}'}.
+            </small>
+          </label>
+          {editing ? (
+            <section className="task-verify-widget" aria-label="verify recorded delivery">
+              <label className="field">
+                <span>Paste a recorded delivery (headers + body)</span>
+                <textarea
+                  aria-label="recorded delivery"
+                  className="textarea"
+                  value={recordedDelivery}
+                  onChange={e => setRecordedDelivery(e.target.value)}
+                  rows={5}
+                  placeholder={'webhook-id: msg_123\nwebhook-timestamp: 1700000000\n\n{"event":"ping"}'}
+                  disabled={verifying}
+                />
+              </label>
+              <div className="panel-actions">
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-sm"
+                  onClick={verifyRecorded}
+                  disabled={verifying || !recordedDelivery.trim()}
+                >
+                  {verifying ? 'verifying…' : 'verify'}
+                </button>
+              </div>
+              {verifyResult ? (
+                <VerifyResult result={verifyResult}/>
+              ) : null}
+            </section>
           ) : null}
         </section>
 
@@ -536,6 +826,20 @@ const TaskMarkdown = React.memo(function TaskMarkdown({ markdown }) {
   );
 });
 
+function VerifyResult({ result }) {
+  if (result?.ok) {
+    const rendered = b64DecodeText(result.rendered_payload_b64 || '');
+    return (
+      <div className="success small">
+        <div>matched {result.matched_version || 'signature'}</div>
+        {rendered ? <pre className="audit-body">{rendered}</pre> : null}
+      </div>
+    );
+  }
+  const reason = result?.type || result?.reason || 'verify failed';
+  return <div className="error small">{reason}</div>;
+}
+
 function UrlField({ value, disabled = false }) {
   const [copied, setCopied] = React.useState(false);
   const copy = async (e) => {
@@ -562,6 +866,8 @@ function DeliveriesPanel({ instanceId, taskName }) {
   const [rows, setRows] = React.useState([]);
   const [loading, setLoading] = React.useState(true);
   const [err, setErr] = React.useState(null);
+  const [inspectRow, setInspectRow] = React.useState(null);
+  const [hexMode, setHexMode] = React.useState(false);
 
   const refresh = React.useCallback(async () => {
     try {
@@ -580,6 +886,27 @@ function DeliveriesPanel({ instanceId, taskName }) {
     const id = setInterval(() => { if (!document.hidden) refresh(); }, 30_000);
     return () => clearInterval(id);
   }, [refresh]);
+
+  const inspect = async (delivery) => {
+    setErr(null);
+    setHexMode(false);
+    try {
+      const row = await client.getDelivery(instanceId, delivery.id);
+      setInspectRow(row);
+    } catch (e) {
+      setErr(e?.detail || e?.message || 'inspect failed');
+    }
+  };
+
+  const replay = async (delivery) => {
+    setErr(null);
+    try {
+      await client.replayWebhookDelivery(instanceId, taskName, delivery.id);
+      await refresh();
+    } catch (e) {
+      setErr(e?.detail || e?.message || 'replay failed');
+    }
+  };
 
   return (
     <section className="panel">
@@ -612,10 +939,49 @@ function DeliveriesPanel({ instanceId, taskName }) {
                 {d.request_id ? <code className="mono-sm muted">{shortId(d.request_id)}</code> : null}
               </div>
               {d.error ? <div className="deliveries-row-err small">{d.error}</div> : null}
+              <div className="deliveries-row-actions">
+                <button type="button" className="btn btn-ghost btn-sm" onClick={() => inspect(d)}>
+                  Inspect
+                </button>
+                <button type="button" className="btn btn-ghost btn-sm" onClick={() => replay(d)}>
+                  Replay
+                </button>
+              </div>
             </li>
           ))}
         </ul>
       )}
+      {inspectRow ? (
+        <section className="panel task-inspect-modal" role="dialog" aria-label="delivery inspect">
+          <div className="panel-header">
+            <div className="panel-title">request bytes</div>
+            <div className="panel-actions">
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm"
+                onClick={() => setHexMode(h => !h)}
+              >
+                {hexMode ? 'view as text' : 'view as hex'}
+              </button>
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm"
+                onClick={() => setInspectRow(null)}
+              >
+                close
+              </button>
+            </div>
+          </div>
+          {inspectRow.request_headers ? (
+            <pre className="audit-body">{JSON.stringify(inspectRow.request_headers, null, 2)}</pre>
+          ) : null}
+          <pre className="audit-body">
+            {hexMode
+              ? textToHex(inspectRow.body_text ?? b64DecodeText(inspectRow.body_b64 || ''))
+              : (inspectRow.body_text ?? b64DecodeText(inspectRow.body_b64 || ''))}
+          </pre>
+        </section>
+      ) : null}
     </section>
   );
 }

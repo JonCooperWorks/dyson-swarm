@@ -80,9 +80,13 @@
 .admin-pane {
   padding: 16px 24px;
   overflow-y: auto;
+  overflow-x: hidden;
   display: flex;
   flex-direction: column;
   gap: 16px;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
 }
 .admin-header {
   display: flex;
@@ -276,14 +280,15 @@
 }
 
 .admin-kms-audit-table {
-  width: max-content;
-  min-width: 1600px;
-  table-layout: auto;
+  width: 100%;
+  table-layout: fixed;
 }
 
 .admin-kms-audit-table :is(th, td) {
   white-space: nowrap;
   vertical-align: top;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .admin-kms-audit-table td {
@@ -301,6 +306,67 @@
   max-width: 100%;
   overflow-x: auto;
   -webkit-overflow-scrolling: touch;
+}
+
+@media (max-width: 1500px) {
+  .rows.admin-kms-audit-table {
+    display: block;
+  }
+
+  .rows.admin-kms-audit-table thead {
+    display: none;
+  }
+
+  .rows.admin-kms-audit-table tbody {
+    display: grid;
+    gap: 8px;
+  }
+
+  .rows.admin-kms-audit-table tr {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 8px 12px;
+    width: 100%;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg);
+  }
+
+  .rows.admin-kms-audit-table td {
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr);
+    gap: 2px;
+    min-width: 0;
+    padding: 0;
+    border-bottom: 0;
+    white-space: nowrap;
+  }
+
+  .rows.admin-kms-audit-table td[data-label]::before {
+    content: attr(data-label);
+    display: block;
+    color: var(--fg-muted);
+    font-size: 10px;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+  }
+
+  .rows.admin-kms-audit-table td[data-label="actor"],
+  .rows.admin-kms-audit-table td[data-label="instance"] {
+    grid-column: span 2;
+  }
+
+  .rows.admin-kms-audit-table .kms-audit-error-cell {
+    grid-column: 1 / -1;
+    max-width: none;
+  }
+}
+
+@media (max-width: 900px) {
+  .rows.admin-kms-audit-table tr {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 620px) {

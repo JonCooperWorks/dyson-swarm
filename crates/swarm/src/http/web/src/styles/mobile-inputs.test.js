@@ -32,9 +32,20 @@ describe('activity controls', () => {
 });
 
 describe('admin KMS audit layout', () => {
-  test('keeps audit rows compact by scrolling horizontally instead of wrapping IDs', () => {
-    expect(panelsCss).toMatch(/\.admin-kms-audit-table\s*\{[\s\S]*width:\s*max-content;[\s\S]*min-width:\s*1600px/);
+  test('keeps audit rows compact by fitting the panel and truncating long values', () => {
+    const tableRule = ruleBody(panelsCss, '.admin-kms-audit-table');
+    const cellRule = ruleBody(panelsCss, '.admin-kms-audit-table :is(th, td)');
+
+    expect(tableRule).toContain('width: 100%');
+    expect(tableRule).toContain('table-layout: fixed');
     expect(panelsCss).toMatch(/\.admin-kms-audit-table\s+:is\(th,\s*td\)\s*\{[\s\S]*white-space:\s*nowrap;/);
+    expect(cellRule).toContain('overflow: hidden');
+    expect(cellRule).toContain('text-overflow: ellipsis');
+  });
+
+  test('uses a card-style audit row before the table can crowd the admin page', () => {
+    expect(panelsCss).toMatch(/@media \(max-width:\s*1500px\)\s*\{[\s\S]*\.admin-kms-audit-table\s*\{[\s\S]*display:\s*block;/);
+    expect(panelsCss).toMatch(/@media \(max-width:\s*1500px\)\s*\{[\s\S]*\.admin-kms-audit-table tr\s*\{[\s\S]*grid-template-columns:\s*repeat\(4,\s*minmax\(0,\s*1fr\)\);/);
   });
 
   test('keeps the wide audit table from expanding the admin page chrome', () => {

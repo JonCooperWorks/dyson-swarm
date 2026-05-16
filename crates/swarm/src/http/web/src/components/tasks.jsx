@@ -68,6 +68,11 @@ function nullableText(value) {
   return s ? s : null;
 }
 
+function nullableExactText(value) {
+  const s = String(value ?? '');
+  return s ? s : null;
+}
+
 function b64Text(value) {
   if (typeof TextEncoder !== 'undefined') {
     const bytes = new TextEncoder().encode(value);
@@ -512,7 +517,7 @@ function TaskForm({ instanceId, taskName }) {
     signature_algo: nullableText(signatureAlgo),
     signature_encoding: nullableText(signatureEncoding),
     signature_prefix: nullableText(signaturePrefix),
-    signature_separator: nullableText(signatureSeparator),
+    signature_separator: nullableExactText(signatureSeparator),
     signature_value_split: nullableText(signatureValueSplit),
     timestamp_header: nullableText(timestampHeader),
     timestamp_skew_secs: timestampSkewSecs === '' ? null : Number(timestampSkewSecs),

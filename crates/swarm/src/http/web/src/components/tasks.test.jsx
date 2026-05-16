@@ -136,6 +136,44 @@ describe('TaskFormPage', () => {
     });
   });
 
+  test('Svix create preserves the single-space signature separator', async () => {
+    const createWebhook = vi.fn().mockResolvedValue({
+      name: 'svix',
+      description: '',
+      preset_id: 'svix',
+      auth_scheme: 'hmac_sha256',
+      signature_header: 'svix-signature',
+      enabled: true,
+      path: '/webhooks/inst-a/svix',
+    });
+
+    render(
+      <ApiProvider client={{ createWebhook }} auth={{ mode: 'none' }}>
+        <TaskFormPage instanceId="inst-a" taskName={null} embedded/>
+      </ApiProvider>,
+    );
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Svix' }));
+    fireEvent.change(screen.getByLabelText('name'), {
+      target: { value: 'svix' },
+    });
+    fireEvent.change(screen.getByLabelText(/shared secret/i), {
+      target: { value: 'svix-secret-with-enough-length' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'create webhook' }));
+
+    await waitFor(() => expect(createWebhook).toHaveBeenCalledTimes(1));
+    expect(createWebhook.mock.calls[0][1]).toMatchObject({
+      preset_id: 'svix',
+      signature_header: 'svix-signature',
+      signature_separator: ' ',
+      signature_value_split: ',',
+      timestamp_header: 'svix-timestamp',
+      payload_template: '{{id}}.{{timestamp}}.{{body}}',
+      idempotency_header: 'svix-id',
+    });
+  });
+
   test('vendor tab renders read-only summary card with algo, encoding, signature header, payload template', () => {
     render(
       <ApiProvider client={{}} auth={{ mode: 'none' }}>

@@ -166,7 +166,7 @@ function AdminLandingPage({ client }) {
 function AdminSectionPage({ active, children }) {
   const section = ADMIN_SECTIONS.find(s => s.key === active);
   return (
-    <main className="admin-pane">
+    <main className={`admin-pane admin-section-page admin-section-page-${active}`}>
       <AdminPageHeader title={section?.label || 'admin'} subtitle={section?.summary}>
         <a className="btn btn-ghost btn-sm" href="#/admin">overview</a>
       </AdminPageHeader>

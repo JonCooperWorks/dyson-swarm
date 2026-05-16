@@ -32,20 +32,24 @@ describe('activity controls', () => {
 });
 
 describe('admin KMS audit layout', () => {
-  test('keeps audit rows compact by fitting the panel and truncating long values', () => {
-    const tableRule = ruleBody(panelsCss, '.admin-kms-audit-table');
-    const cellRule = ruleBody(panelsCss, '.admin-kms-audit-table :is(th, td)');
+  test('caps normal admin section panels so forms do not stretch across wide screens', () => {
+    const sectionPanelRule = ruleBody(panelsCss, '.admin-section-page > .panel');
+    const kmsSectionRule = ruleBody(panelsCss, '.admin-section-page-kms-audit > .admin-kms-audit-panel');
 
-    expect(tableRule).toContain('width: 100%');
-    expect(tableRule).toContain('table-layout: fixed');
-    expect(panelsCss).toMatch(/\.admin-kms-audit-table\s+:is\(th,\s*td\)\s*\{[\s\S]*white-space:\s*nowrap;/);
-    expect(cellRule).toContain('overflow: hidden');
-    expect(cellRule).toContain('text-overflow: ellipsis');
+    expect(sectionPanelRule).toContain('width: min(100%, 1180px)');
+    expect(kmsSectionRule).toContain('width: min(100%, 1320px)');
   });
 
-  test('uses a card-style audit row before the table can crowd the admin page', () => {
-    expect(panelsCss).toMatch(/@media \(max-width:\s*1500px\)\s*\{[\s\S]*\.admin-kms-audit-table\s*\{[\s\S]*display:\s*block;/);
-    expect(panelsCss).toMatch(/@media \(max-width:\s*1500px\)\s*\{[\s\S]*\.admin-kms-audit-table tr\s*\{[\s\S]*grid-template-columns:\s*repeat\(4,\s*minmax\(0,\s*1fr\)\);/);
+  test('renders audit events as a labelled list instead of a crowded spreadsheet', () => {
+    const tableRule = ruleBody(panelsCss, '.admin-kms-audit-table');
+    const cellRule = ruleBody(panelsCss, '.admin-kms-audit-table :is(th, td)');
+    const rowRule = ruleBody(panelsCss, '.admin-kms-audit-table tr');
+
+    expect(tableRule).toContain('width: 100%');
+    expect(tableRule).toContain('display: block');
+    expect(rowRule).toContain('grid-template-columns: repeat(4, minmax(0, 1fr))');
+    expect(cellRule).toContain('white-space: normal');
+    expect(cellRule).toContain('overflow-wrap: anywhere');
   });
 
   test('keeps the wide audit table from expanding the admin page chrome', () => {
@@ -68,9 +72,13 @@ function mobileBlock(css) {
 }
 
 function ruleBody(css, selector) {
-  const start = css.indexOf(`${selector} {`);
-  if (start < 0) return '';
-  const bodyStart = css.indexOf('{', start) + 1;
+  const match = new RegExp(`(?:^|\\n)${escapeRegExp(selector)}\\s*\\{`).exec(css);
+  if (!match) return '';
+  const bodyStart = css.indexOf('{', match.index) + 1;
   const bodyEnd = css.indexOf('}', bodyStart);
   return css.slice(bodyStart, bodyEnd);
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }

@@ -307,6 +307,29 @@ describe('SwarmClient', () => {
     expect(body).toEqual({ name: 'rename', task: '' }); // empty models[] dropped
   });
 
+  test('patchTelegramChannel forwards allowlist updates as JSON', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse({ ok: true }));
+    const client = new SwarmClient({ fetch: fetchImpl, getToken: () => null });
+    await client.patchTelegramChannel('i1', { allowed_senders: ['@topman', '12345'] });
+    const [url, init] = fetchImpl.mock.calls[0];
+    expect(url).toBe('/v1/instances/i1/channels/telegram');
+    expect(init.method).toBe('PATCH');
+    expect(JSON.parse(init.body)).toEqual({ allowed_senders: ['@topman', '12345'] });
+  });
+
+  test('connectTelegramChannel sends the initial allowlist', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse({ handle: '@bot' }));
+    const client = new SwarmClient({ fetch: fetchImpl, getToken: () => null });
+    await client.connectTelegramChannel('i1', '123456:secret', ['@topman']);
+    const [url, init] = fetchImpl.mock.calls[0];
+    expect(url).toBe('/v1/instances/i1/channels/telegram');
+    expect(init.method).toBe('POST');
+    expect(JSON.parse(init.body)).toEqual({
+      token: '123456:secret',
+      allowed_senders: ['@topman'],
+    });
+  });
+
   test('updateInstance: forwards a non-empty `tools` array verbatim', async () => {
     // Regression for the silent-drop bug.  Earlier the destructure was
     // `{ name, task, models }` and any `tools` array on the call site

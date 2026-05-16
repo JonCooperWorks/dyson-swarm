@@ -31,6 +31,11 @@ When a user connects a bot:
 7. Swarm writes the `instance_channels` row.
 8. Swarm reconfigures the Dyson cube with a token-free Telegram proxy config.
 
+The connect panel can save the initial sender allowlist in the same request as
+the token. If the list is empty, the UI warns that anyone who can find or
+message the bot can talk to the agent and requires explicit confirmation before
+connecting or saving that open state.
+
 Failed `getMe` or `setWebhook` calls persist nothing. Disconnecting best-effort
 calls Telegram `deleteWebhook`, deletes both sealed secrets, deletes the channel
 row, and reconfigures the cube back out of Telegram mode. Pausing a channel keeps
@@ -47,6 +52,9 @@ The durable channel row lives in `instance_channels`:
 - `secret_name` points to the sealed BotFather token.
 - `webhook_secret_name` points to the sealed Telegram webhook secret token.
 - `enabled` controls pause/resume.
+- `allowed_senders` stores a JSON array of normalized Telegram user IDs and
+  `@usernames` allowed to drive the bot. Empty means anyone who can message the
+  bot is allowed.
 - `last_inbound_at` updates on webhook delivery.
 
 Secrets are stored through `UserSecretsService` with fixed names:
@@ -79,6 +87,15 @@ Swarm compares the Telegram secret header against the sealed webhook secret
 without data-dependent early exit. Missing or wrong secrets return 401. If the
 channel is paused, swarm returns 200 and records a dropped delivery without
 forwarding to the cube.
+
+After the secret check, swarm applies the optional sender allowlist. The
+allowlist accepts numeric Telegram user IDs and `@usernames`; entries are
+normalized and deduplicated when saved. When the list is non-empty, swarm
+extracts `message.from`, `edited_message.from`, `callback_query.from`, or
+`channel_post.from` from the update JSON and compares only the sender ID and
+username. Non-matching updates are acknowledged with 200 so Telegram does not
+retry, recorded in Recent messages with status 403, and never forwarded into
+the cube.
 
 The forwarded request is deliberately small:
 
@@ -153,12 +170,12 @@ users, but swarm-owned instances must use the proxy shape. `bot_token` and
 
 The instance editor has a "Channels" tab with three states:
 
-- Empty state: a Telegram connect card and a muted note that other surfaces may
-  come later.
-- Connect wizard: BotFather instructions, a password-style token input, local
-  token-shape validation, and connect feedback from Telegram.
+- Empty state: a Telegram connect card.
+- Connect panel: BotFather instructions, a password-style token input, and the
+  initial sender allowlist on one page, local token-shape validation, and
+  connect feedback from Telegram.
 - Connected state: handle, status dot, last message time, open-in-Telegram,
-  pause/resume, recent deliveries, and disconnect.
+  pause/resume, sender allowlist, recent deliveries, and disconnect.
 
 The token input is never populated from server data. The server returns the
 handle and metadata, never the token.

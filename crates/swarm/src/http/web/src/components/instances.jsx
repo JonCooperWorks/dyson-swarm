@@ -2812,12 +2812,13 @@ function InstanceAuxiliaryRoute({ view, instanceId }) {
 }
 
 const TELEGRAM_TOKEN_RE = /^\d+:[\w-]{35}$/;
+const TELEGRAM_OPEN_ALLOWLIST_WARNING =
+  'No Telegram users are allowlisted. Anyone who can find or message this bot can talk to this agent until you add allowed users. Continue?';
 
 function ChannelsSection({ instance }) {
   const { client } = useApi();
   const [rows, setRows] = React.useState(null);
   const [wizard, setWizard] = React.useState(false);
-  const [step, setStep] = React.useState(1);
   const [token, setToken] = React.useState('');
   const [reveal, setReveal] = React.useState(false);
   const [busy, setBusy] = React.useState(false);
@@ -2825,6 +2826,9 @@ function ChannelsSection({ instance }) {
   const [notice, setNotice] = React.useState('');
   const [recentOpen, setRecentOpen] = React.useState(false);
   const [recentRows, setRecentRows] = React.useState(null);
+  const [allowedDraft, setAllowedDraft] = React.useState('');
+  const [allowedSaving, setAllowedSaving] = React.useState(false);
+  const [allowedError, setAllowedError] = React.useState('');
   const tokenInputRef = React.useRef(null);
 
   const refresh = React.useCallback(async () => {
@@ -2841,6 +2845,15 @@ function ChannelsSection({ instance }) {
   React.useEffect(() => { refresh(); }, [refresh]);
 
   const telegram = (rows || []).find(r => r.kind === 'telegram') || null;
+  const allowedServerText = React.useMemo(
+    () => formatTelegramAllowedSenders(telegram?.allowed_senders || []),
+    [telegram?.allowed_senders],
+  );
+
+  React.useEffect(() => {
+    setAllowedDraft(allowedServerText);
+    setAllowedError('');
+  }, [allowedServerText]);
 
   const connect = async () => {
     const trimmed = token.trim();
@@ -2851,12 +2864,21 @@ function ChannelsSection({ instance }) {
       tokenInputRef.current?.focus();
       return;
     }
+    let allowed_senders;
+    try {
+      allowed_senders = parseTelegramAllowedSenders(allowedDraft);
+    } catch (e) {
+      setError(e?.message || 'Invalid allowlist');
+      return;
+    }
+    if (allowed_senders.length === 0 && !confirm(TELEGRAM_OPEN_ALLOWLIST_WARNING)) {
+      return;
+    }
     setBusy(true);
     try {
-      const connected = await client.connectTelegramChannel(instance.id, trimmed);
+      const connected = await client.connectTelegramChannel(instance.id, trimmed, allowed_senders);
       setToken('');
       setWizard(false);
-      setStep(1);
       setNotice(`Connected ${connected.handle}`);
       await refresh();
     } catch (e) {
@@ -2881,13 +2903,42 @@ function ChannelsSection({ instance }) {
     if (!telegram) return;
     setBusy(true); setError(''); setNotice('');
     try {
-      const updated = await client.patchTelegramChannel(instance.id, !telegram.enabled);
+      const updated = await client.patchTelegramChannel(instance.id, { enabled: !telegram.enabled });
       setRows(current => (current || []).map(r => r.kind === 'telegram' ? updated : r));
       setNotice(updated.enabled ? 'Telegram resumed' : 'Telegram paused');
     } catch (e) {
       setError(e?.detail || e?.message || 'update failed');
     } finally {
       setBusy(false);
+    }
+  };
+
+  const saveAllowedSenders = async () => {
+    if (!telegram) return;
+    setAllowedSaving(true);
+    setAllowedError('');
+    setError('');
+    setNotice('');
+    let allowed_senders;
+    try {
+      allowed_senders = parseTelegramAllowedSenders(allowedDraft);
+    } catch (e) {
+      setAllowedError(e?.message || 'Invalid allowlist');
+      setAllowedSaving(false);
+      return;
+    }
+    if (allowed_senders.length === 0 && !confirm(TELEGRAM_OPEN_ALLOWLIST_WARNING)) {
+      setAllowedSaving(false);
+      return;
+    }
+    try {
+      const updated = await client.patchTelegramChannel(instance.id, { allowed_senders });
+      setRows(current => (current || []).map(r => r.kind === 'telegram' ? updated : r));
+      setNotice(allowed_senders.length ? 'Telegram allowlist saved' : 'Telegram allows anyone');
+    } catch (e) {
+      setAllowedError(e?.detail || e?.message || 'allowlist update failed');
+    } finally {
+      setAllowedSaving(false);
     }
   };
 
@@ -2948,11 +2999,7 @@ function ChannelsSection({ instance }) {
       ) : null}
       {!telegram && wizard ? (
         <div className="channel-wizard">
-          <div className="channel-steps" aria-label="Telegram connect progress">
-            <span className={step === 1 ? 'active' : ''}>Create a bot</span>
-            <span className={step === 2 ? 'active' : ''}>Paste token</span>
-          </div>
-          {step === 1 ? (
+          <div className="channel-setup-grid">
             <div className="channel-step">
               <div className="botfather-art" aria-hidden="true">
                 <div className="chat-bubble bot">BotFather</div>
@@ -2964,12 +3011,7 @@ function ChannelsSection({ instance }) {
                 <li>Send /newbot and follow the prompts.</li>
                 <li>Copy the API token BotFather sends you.</li>
               </ol>
-              <div className="channel-actions">
-                <button type="button" className="btn btn-primary" onClick={() => setStep(2)}>Next</button>
-                <button type="button" className="btn btn-ghost" onClick={() => setWizard(false)}>Cancel</button>
-              </div>
             </div>
-          ) : (
             <div className="channel-step">
               <label className="field">
                 <span>Bot API token</span>
@@ -2990,14 +3032,29 @@ function ChannelsSection({ instance }) {
                   <button type="button" className="btn btn-ghost btn-sm" onClick={paste} disabled={busy}>Paste</button>
                 </div>
               </label>
+              <label className="field">
+                <span>Allowed Telegram users</span>
+                <textarea
+                  className="textarea telegram-allowlist-input"
+                  value={allowedDraft}
+                  onChange={e => setAllowedDraft(e.target.value)}
+                  placeholder="@username or numeric user id, one per line"
+                  rows={4}
+                  disabled={busy}
+                />
+                <span className="hint muted small">
+                  Add yourself before connecting. Empty leaves the bot open to anyone who can message it.
+                </span>
+              </label>
+              {allowedDraft.trim() === '' ? <TelegramOpenWarning/> : null}
               <div className="channel-actions">
                 <button type="button" className="btn btn-primary" onClick={connect} disabled={busy}>
                   {busy ? 'Connecting…' : 'Connect'}
                 </button>
-                <button type="button" className="btn btn-ghost" onClick={() => setStep(1)} disabled={busy}>Back</button>
+                <button type="button" className="btn btn-ghost" onClick={() => setWizard(false)} disabled={busy}>Cancel</button>
               </div>
             </div>
-          )}
+          </div>
         </div>
       ) : null}
       {telegram ? (
@@ -3016,6 +3073,39 @@ function ChannelsSection({ instance }) {
             <button type="button" className="btn btn-sm" onClick={loadRecent}>Recent messages</button>
             <button type="button" className="btn btn-sm btn-danger" onClick={disconnect} disabled={busy}>Disconnect</button>
           </div>
+          <div className="telegram-allowlist">
+            <label className="field">
+              <span>Allowed Telegram users</span>
+              <textarea
+                className="textarea telegram-allowlist-input"
+                value={allowedDraft}
+                onChange={e => setAllowedDraft(e.target.value)}
+                placeholder="@username or numeric user id, one per line"
+                rows={4}
+                disabled={allowedSaving}
+              />
+              <span className="hint muted small">
+                Empty allows anyone who can message the bot. Usernames are convenient; numeric user IDs are most stable.
+              </span>
+            </label>
+            {allowedDraft.trim() === '' ? <TelegramOpenWarning/> : null}
+            {allowedError ? <div className="error small">{allowedError}</div> : null}
+            <div className="channel-actions">
+              <button
+                type="button"
+                className="btn btn-sm"
+                onClick={saveAllowedSenders}
+                disabled={allowedSaving || allowedDraft === allowedServerText}
+              >
+                {allowedSaving ? 'Saving…' : 'Save allowlist'}
+              </button>
+              {allowedDraft !== allowedServerText ? (
+                <button type="button" className="btn btn-ghost btn-sm" onClick={() => setAllowedDraft(allowedServerText)} disabled={allowedSaving}>
+                  Revert
+                </button>
+              ) : null}
+            </div>
+          </div>
           {recentOpen ? (
             <div className="channel-recent">
               {(recentRows || []).length === 0 ? <p className="muted small">No recent deliveries.</p> : null}
@@ -3031,6 +3121,44 @@ function ChannelsSection({ instance }) {
         </div>
       ) : null}
     </section>
+  );
+}
+
+function formatTelegramAllowedSenders(entries) {
+  return (Array.isArray(entries) ? entries : []).join('\n');
+}
+
+function parseTelegramAllowedSenders(text) {
+  const seen = new Set();
+  const entries = [];
+  for (const raw of String(text || '').split(/[\n,]+/)) {
+    const trimmed = raw.trim();
+    if (!trimmed) continue;
+    let normalized = null;
+    if (/^\d+$/.test(trimmed)) {
+      normalized = trimmed;
+    } else {
+      const username = trimmed.startsWith('@') ? trimmed.slice(1) : trimmed;
+      if (/^[A-Za-z0-9_]{5,32}$/.test(username)) {
+        normalized = `@${username.toLowerCase()}`;
+      }
+    }
+    if (!normalized) {
+      throw new Error('Allowed Telegram users must be numeric user IDs or @usernames');
+    }
+    if (!seen.has(normalized)) {
+      seen.add(normalized);
+      entries.push(normalized);
+    }
+  }
+  return entries;
+}
+
+function TelegramOpenWarning() {
+  return (
+    <div className="telegram-open-warning" role="status">
+      Anyone who can find or message this bot can talk to this agent until you add allowed users.
+    </div>
   );
 }
 

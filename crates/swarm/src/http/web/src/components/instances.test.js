@@ -110,6 +110,190 @@ describe('instance section rail routing', () => {
     expect(screen.getByText('Beta').closest('a')).toHaveAttribute('href', '#/i/b/tasks');
   });
 
+  test('renders Telegram connect instructions and token input on one Channels page', async () => {
+    const row = {
+      id: 'a',
+      name: 'Alpha',
+      status: 'live',
+      task: 'Run useful work.',
+      created_at: 0,
+      last_active_at: 0,
+      last_probe_at: null,
+      open_url: 'https://a.example.test',
+      network_policy: { kind: 'nolocalnet', entries: [] },
+    };
+    setInstances([row]);
+    const client = {
+      getInstance: () => Promise.resolve(row),
+      listInstances: () => Promise.resolve([row]),
+      listChannels: vi.fn().mockResolvedValue([]),
+      listWebhooks: () => Promise.resolve([]),
+      listShares: () => Promise.resolve([]),
+      listInstanceSkills: () => Promise.resolve([]),
+    };
+
+    render(
+      React.createElement(ApiProvider, { client, auth: { config: { cube_profiles: [] } } },
+        React.createElement(InstancesView, { view: { name: 'instance-channels', id: 'a' } }),
+      ),
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: /telegram/i }));
+
+    expect(screen.getByText(/Send \/newbot/)).toBeInTheDocument();
+    const input = screen.getByLabelText('Bot API token');
+    expect(input).toHaveAttribute('type', 'password');
+    expect(screen.getByRole('button', { name: 'Connect' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Next' })).toBeNull();
+    expect(screen.getByText(/Anyone who can find or message this bot/)).toBeInTheDocument();
+  });
+
+  test('requires confirmation before connecting Telegram with an empty allowlist', async () => {
+    const row = {
+      id: 'a',
+      name: 'Alpha',
+      status: 'live',
+      task: 'Run useful work.',
+      created_at: 0,
+      last_active_at: 0,
+      last_probe_at: null,
+      open_url: 'https://a.example.test',
+      network_policy: { kind: 'nolocalnet', entries: [] },
+    };
+    setInstances([row]);
+    const client = {
+      getInstance: () => Promise.resolve(row),
+      listInstances: () => Promise.resolve([row]),
+      listChannels: vi.fn().mockResolvedValue([]),
+      connectTelegramChannel: vi.fn().mockResolvedValue({ handle: '@alpha_bot' }),
+      listWebhooks: () => Promise.resolve([]),
+      listShares: () => Promise.resolve([]),
+      listInstanceSkills: () => Promise.resolve([]),
+    };
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+
+    render(
+      React.createElement(ApiProvider, { client, auth: { config: { cube_profiles: [] } } },
+        React.createElement(InstancesView, { view: { name: 'instance-channels', id: 'a' } }),
+      ),
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: /telegram/i }));
+    fireEvent.change(screen.getByLabelText('Bot API token'), {
+      target: { value: `123456:${'a'.repeat(35)}` },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
+
+    expect(confirmSpy).toHaveBeenCalledWith(expect.stringMatching(/No Telegram users are allowlisted/));
+    expect(client.connectTelegramChannel).not.toHaveBeenCalled();
+    confirmSpy.mockRestore();
+  });
+
+  test('saves Telegram allowed senders from the connected Channels card', async () => {
+    const row = {
+      id: 'a',
+      name: 'Alpha',
+      status: 'live',
+      task: 'Run useful work.',
+      created_at: 0,
+      last_active_at: 0,
+      last_probe_at: null,
+      open_url: 'https://a.example.test',
+      network_policy: { kind: 'nolocalnet', entries: [] },
+    };
+    const channel = {
+      kind: 'telegram',
+      handle: '@alpha_bot',
+      enabled: true,
+      allowed_senders: ['@topman'],
+      last_inbound_at: null,
+      created_at: 1,
+      health: 'green',
+    };
+    const patchTelegramChannel = vi.fn().mockResolvedValue({
+      ...channel,
+      allowed_senders: ['@topman', '12345'],
+    });
+    setInstances([row]);
+    const client = {
+      getInstance: () => Promise.resolve(row),
+      listInstances: () => Promise.resolve([row]),
+      listChannels: vi.fn().mockResolvedValue([channel]),
+      patchTelegramChannel,
+      listWebhooks: () => Promise.resolve([]),
+      listShares: () => Promise.resolve([]),
+      listInstanceSkills: () => Promise.resolve([]),
+    };
+
+    render(
+      React.createElement(ApiProvider, { client, auth: { config: { cube_profiles: [] } } },
+        React.createElement(InstancesView, { view: { name: 'instance-channels', id: 'a' } }),
+      ),
+    );
+
+    const textarea = (await screen.findByText('Allowed Telegram users'))
+      .closest('label')
+      .querySelector('textarea');
+    fireEvent.change(textarea, { target: { value: '@TopMan\n12345' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save allowlist' }));
+
+    await waitFor(() => expect(patchTelegramChannel).toHaveBeenCalledWith('a', {
+      allowed_senders: ['@topman', '12345'],
+    }));
+  });
+
+  test('requires confirmation before saving an empty Telegram allowlist', async () => {
+    const row = {
+      id: 'a',
+      name: 'Alpha',
+      status: 'live',
+      task: 'Run useful work.',
+      created_at: 0,
+      last_active_at: 0,
+      last_probe_at: null,
+      open_url: 'https://a.example.test',
+      network_policy: { kind: 'nolocalnet', entries: [] },
+    };
+    const channel = {
+      kind: 'telegram',
+      handle: '@alpha_bot',
+      enabled: true,
+      allowed_senders: ['@topman'],
+      last_inbound_at: null,
+      created_at: 1,
+      health: 'green',
+    };
+    const patchTelegramChannel = vi.fn();
+    setInstances([row]);
+    const client = {
+      getInstance: () => Promise.resolve(row),
+      listInstances: () => Promise.resolve([row]),
+      listChannels: vi.fn().mockResolvedValue([channel]),
+      patchTelegramChannel,
+      listWebhooks: () => Promise.resolve([]),
+      listShares: () => Promise.resolve([]),
+      listInstanceSkills: () => Promise.resolve([]),
+    };
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+
+    render(
+      React.createElement(ApiProvider, { client, auth: { config: { cube_profiles: [] } } },
+        React.createElement(InstancesView, { view: { name: 'instance-channels', id: 'a' } }),
+      ),
+    );
+
+    const textarea = (await screen.findByText('Allowed Telegram users'))
+      .closest('label')
+      .querySelector('textarea');
+    fireEvent.change(textarea, { target: { value: '' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save allowlist' }));
+
+    expect(confirmSpy).toHaveBeenCalledWith(expect.stringMatching(/No Telegram users are allowlisted/));
+    expect(patchTelegramChannel).not.toHaveBeenCalled();
+    expect(screen.getByText(/Anyone who can find or message this bot/)).toBeInTheDocument();
+    confirmSpy.mockRestore();
+  });
+
   test('submitting the network editor posts the selected policy body', async () => {
     const row = {
       id: 'a',

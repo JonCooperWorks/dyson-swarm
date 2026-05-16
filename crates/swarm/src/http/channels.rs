@@ -10,7 +10,9 @@ use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 
 use crate::auth::CallerIdentity;
-use crate::channels::{ChannelsError, TELEGRAM_KIND, delivery_preview};
+use crate::channels::{
+    ChannelsError, TELEGRAM_KIND, delivery_preview, telegram_update_allowed_by_sender,
+};
 use crate::http::AppState;
 use crate::traits::{ChannelDeliveryRow, InstanceChannelRow, InstanceStatus};
 
@@ -44,6 +46,7 @@ struct ChannelView {
     kind: String,
     handle: String,
     enabled: bool,
+    allowed_senders: Vec<String>,
     last_inbound_at: Option<i64>,
     created_at: i64,
     health: String,
@@ -55,6 +58,7 @@ impl From<InstanceChannelRow> for ChannelView {
             kind: row.kind,
             handle: row.handle,
             enabled: row.enabled,
+            allowed_senders: row.allowed_senders,
             last_inbound_at: row.last_inbound_at,
             created_at: row.created_at,
             health: if row.enabled { "green" } else { "paused" }.to_owned(),
@@ -82,11 +86,14 @@ impl From<ChannelDeliveryRow> for DeliveryView {
 #[derive(Debug, Deserialize)]
 struct ConnectTelegramBody {
     token: String,
+    #[serde(default)]
+    allowed_senders: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct PatchTelegramBody {
-    enabled: bool,
+    enabled: Option<bool>,
+    allowed_senders: Option<Vec<String>>,
 }
 
 async fn list_channels(
@@ -116,7 +123,7 @@ async fn connect_telegram(
     }
     let connected = state
         .channels
-        .connect_telegram(&caller.user_id, &id, &body.token)
+        .connect_telegram(&caller.user_id, &id, &body.token, body.allowed_senders)
         .await
         .map_err(channel_err_to_response)?;
     if let Err(err) = state
@@ -157,7 +164,7 @@ async fn patch_telegram(
 ) -> Result<Json<ChannelView>, (StatusCode, String)> {
     let row = state
         .channels
-        .set_telegram_enabled(&caller.user_id, &id, body.enabled)
+        .set_telegram_settings(&caller.user_id, &id, body.enabled, body.allowed_senders)
         .await
         .map_err(channel_err_to_response)?;
     if let Err(err) = state
@@ -253,6 +260,20 @@ async fn telegram_webhook(
             )
             .await;
         return text_response(StatusCode::OK, "paused");
+    }
+    if !telegram_update_allowed_by_sender(&row.allowed_senders, &body_bytes) {
+        let _ = state
+            .channels
+            .channels
+            .record_delivery(
+                &instance_id,
+                TELEGRAM_KIND,
+                now,
+                403,
+                &delivery_preview(&body_bytes),
+            )
+            .await;
+        return text_response(StatusCode::OK, "sender not allowed");
     }
 
     let Some(sandbox_id) = instance

@@ -128,19 +128,20 @@ export class SwarmClient {
     });
   }
 
-  connectTelegramChannel(id, token) {
+  connectTelegramChannel(id, token, allowed_senders = []) {
     return this._json(`/v1/instances/${encodeURIComponent(id)}/channels/telegram`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token }),
+      body: JSON.stringify({ token, allowed_senders }),
     });
   }
 
-  patchTelegramChannel(id, enabled) {
+  patchTelegramChannel(id, patch) {
+    const body = typeof patch === 'boolean' ? { enabled: patch } : (patch || {});
     return this._json(`/v1/instances/${encodeURIComponent(id)}/channels/telegram`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ enabled }),
+      body: JSON.stringify(body),
     });
   }
 

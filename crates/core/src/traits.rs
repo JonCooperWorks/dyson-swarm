@@ -454,6 +454,7 @@ pub struct InstanceChannelRow {
     pub secret_name: String,
     pub webhook_secret_name: String,
     pub enabled: bool,
+    pub allowed_senders: Vec<String>,
     pub last_inbound_at: Option<i64>,
     pub created_at: i64,
 }
@@ -486,6 +487,13 @@ pub trait InstanceChannelStore: Send + Sync {
         instance_id: &str,
         kind: &str,
         enabled: bool,
+    ) -> Result<Option<InstanceChannelRow>, StoreError>;
+    async fn set_settings(
+        &self,
+        instance_id: &str,
+        kind: &str,
+        enabled: Option<bool>,
+        allowed_senders: Option<&[String]>,
     ) -> Result<Option<InstanceChannelRow>, StoreError>;
     async fn update_last_inbound_at(
         &self,

@@ -3,6 +3,7 @@
 //! and dyson receives only proxy URLs plus an existing per-instance
 //! bearer.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -36,6 +37,41 @@ pub fn telegram_token_shape_valid(token: &str) -> bool {
         && secret
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+}
+
+pub fn normalize_telegram_allowed_senders(entries: Vec<String>) -> ChannelsResult<Vec<String>> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for entry in entries {
+        let Some(normalized) = normalize_telegram_allowed_sender(&entry)? else {
+            continue;
+        };
+        if seen.insert(normalized.clone()) {
+            out.push(normalized);
+        }
+    }
+    Ok(out)
+}
+
+fn normalize_telegram_allowed_sender(raw: &str) -> ChannelsResult<Option<String>> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if trimmed.chars().all(|c| c.is_ascii_digit()) {
+        return Ok(Some(trimmed.to_owned()));
+    }
+    let username = trimmed.strip_prefix('@').unwrap_or(trimmed);
+    if (5..=32).contains(&username.len())
+        && username
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        return Ok(Some(format!("@{}", username.to_ascii_lowercase())));
+    }
+    Err(ChannelsError::BadRequest(
+        "Allowed Telegram users must be numeric user IDs or @usernames".into(),
+    ))
 }
 
 fn new_webhook_secret() -> String {
@@ -283,6 +319,7 @@ impl ChannelsService {
         owner_id: &str,
         instance_id: &str,
         raw_token: &str,
+        allowed_senders: Vec<String>,
     ) -> ChannelsResult<ConnectedTelegram> {
         self.ensure_owner(owner_id, instance_id).await?;
         let token = raw_token.trim();
@@ -291,6 +328,7 @@ impl ChannelsService {
                 "Telegram token must match 123456:35-character-secret".into(),
             ));
         }
+        let allowed_senders = normalize_telegram_allowed_senders(allowed_senders)?;
         if self
             .channels
             .get(instance_id, TELEGRAM_KIND)
@@ -362,6 +400,7 @@ impl ChannelsService {
                 secret_name: token_secret_name,
                 webhook_secret_name,
                 enabled: true,
+                allowed_senders,
                 last_inbound_at: None,
                 created_at: now,
             })
@@ -409,6 +448,28 @@ impl ChannelsService {
         self.ensure_owner(owner_id, instance_id).await?;
         self.channels
             .set_enabled(instance_id, TELEGRAM_KIND, enabled)
+            .await?
+            .ok_or(ChannelsError::NotFound)
+    }
+
+    pub async fn set_telegram_settings(
+        &self,
+        owner_id: &str,
+        instance_id: &str,
+        enabled: Option<bool>,
+        allowed_senders: Option<Vec<String>>,
+    ) -> ChannelsResult<InstanceChannelRow> {
+        self.ensure_owner(owner_id, instance_id).await?;
+        if enabled.is_none() && allowed_senders.is_none() {
+            return Err(ChannelsError::BadRequest(
+                "nothing to update for Telegram channel".into(),
+            ));
+        }
+        let normalized = allowed_senders
+            .map(normalize_telegram_allowed_senders)
+            .transpose()?;
+        self.channels
+            .set_settings(instance_id, TELEGRAM_KIND, enabled, normalized.as_deref())
             .await?
             .ok_or(ChannelsError::NotFound)
     }
@@ -471,6 +532,41 @@ pub fn delivery_preview(body: &[u8]) -> String {
     out
 }
 
+pub fn telegram_update_allowed_by_sender(allowed_senders: &[String], body: &[u8]) -> bool {
+    if allowed_senders.is_empty() {
+        return true;
+    }
+    let Ok(json) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return false;
+    };
+    let allowed = allowed_senders.iter().collect::<HashSet<_>>();
+    telegram_sender_candidates(&json)
+        .into_iter()
+        .any(|candidate| allowed.contains(&candidate))
+}
+
+fn telegram_sender_candidates(json: &serde_json::Value) -> Vec<String> {
+    let from = json
+        .get("message")
+        .or_else(|| json.get("edited_message"))
+        .or_else(|| json.get("channel_post"))
+        .and_then(|m| m.get("from"))
+        .or_else(|| json.get("callback_query").and_then(|c| c.get("from")));
+    let Some(from) = from else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    if let Some(id) = from.get("id").and_then(|v| v.as_i64()) {
+        out.push(id.to_string());
+    }
+    if let Some(username) = from.get("username").and_then(|v| v.as_str()) {
+        if let Ok(Some(normalized)) = normalize_telegram_allowed_sender(username) {
+            out.push(normalized);
+        }
+    }
+    out
+}
+
 impl From<ChannelsError> for SwarmError {
     fn from(value: ChannelsError) -> Self {
         match value {
@@ -483,5 +579,40 @@ impl From<ChannelsError> for SwarmError {
             }
             ChannelsError::InstanceNotReady => SwarmError::Internal("instance not ready".into()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn telegram_allowed_sender_entries_normalize_and_dedupe() {
+        let entries = normalize_telegram_allowed_senders(vec![
+            " 123456 ".into(),
+            "@TopMan".into(),
+            "topman".into(),
+            "".into(),
+        ])
+        .unwrap();
+        assert_eq!(entries, vec!["123456", "@topman"]);
+    }
+
+    #[test]
+    fn telegram_sender_allowlist_matches_id_or_username() {
+        let body = br#"{
+            "update_id": 1,
+            "message": {
+                "from": { "id": 42, "username": "TopMan" },
+                "chat": { "id": 99, "type": "private" },
+                "text": "hello"
+            }
+        }"#;
+        assert!(telegram_update_allowed_by_sender(&["42".into()], body));
+        assert!(telegram_update_allowed_by_sender(&["@topman".into()], body));
+        assert!(!telegram_update_allowed_by_sender(
+            &["@someoneelse".into()],
+            body
+        ));
     }
 }

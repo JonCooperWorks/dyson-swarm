@@ -17,6 +17,9 @@ impl PgInstanceChannelStore {
 }
 
 fn channel_from_row(row: &sqlx::postgres::PgRow) -> Result<InstanceChannelRow, StoreError> {
+    let allowed_senders_json: String = row.try_get("allowed_senders").map_err(map_sqlx)?;
+    let allowed_senders = serde_json::from_str(&allowed_senders_json)
+        .map_err(|e| StoreError::Malformed(format!("allowed_senders: {e}")))?;
     Ok(InstanceChannelRow {
         id: row.try_get::<i64, _>("id").map_err(map_sqlx)?,
         instance_id: row.try_get::<String, _>("instance_id").map_err(map_sqlx)?,
@@ -27,6 +30,7 @@ fn channel_from_row(row: &sqlx::postgres::PgRow) -> Result<InstanceChannelRow, S
             .try_get::<String, _>("webhook_secret_name")
             .map_err(map_sqlx)?,
         enabled: row.try_get::<bool, _>("enabled").map_err(map_sqlx)?,
+        allowed_senders,
         last_inbound_at: row
             .try_get::<Option<i64>, _>("last_inbound_at")
             .map_err(map_sqlx)?,
@@ -50,10 +54,10 @@ impl InstanceChannelStore for PgInstanceChannelStore {
     async fn insert(&self, row: InstanceChannelRow) -> Result<InstanceChannelRow, StoreError> {
         let inserted = sqlx::query(
             "INSERT INTO instance_channels
-             (instance_id, kind, handle, secret_name, webhook_secret_name, enabled, last_inbound_at, created_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+             (instance_id, kind, handle, secret_name, webhook_secret_name, enabled, allowed_senders, last_inbound_at, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
              RETURNING id, instance_id, kind, handle, secret_name, webhook_secret_name,
-                       enabled, last_inbound_at, created_at",
+                       enabled, allowed_senders, last_inbound_at, created_at",
         )
         .bind(row.instance_id)
         .bind(row.kind)
@@ -61,6 +65,10 @@ impl InstanceChannelStore for PgInstanceChannelStore {
         .bind(row.secret_name)
         .bind(row.webhook_secret_name)
         .bind(row.enabled)
+        .bind(
+            serde_json::to_string(&row.allowed_senders)
+                .map_err(|e| StoreError::Malformed(format!("allowed_senders: {e}")))?,
+        )
         .bind(row.last_inbound_at)
         .bind(row.created_at)
         .fetch_one(&self.pool)
@@ -76,7 +84,7 @@ impl InstanceChannelStore for PgInstanceChannelStore {
     ) -> Result<Option<InstanceChannelRow>, StoreError> {
         let row = sqlx::query(
             "SELECT id, instance_id, kind, handle, secret_name, webhook_secret_name,
-                    enabled, last_inbound_at, created_at
+                    enabled, allowed_senders, last_inbound_at, created_at
              FROM instance_channels
              WHERE instance_id = $1 AND kind = $2",
         )
@@ -94,7 +102,7 @@ impl InstanceChannelStore for PgInstanceChannelStore {
     ) -> Result<Vec<InstanceChannelRow>, StoreError> {
         let rows = sqlx::query(
             "SELECT id, instance_id, kind, handle, secret_name, webhook_secret_name,
-                    enabled, last_inbound_at, created_at
+                    enabled, allowed_senders, last_inbound_at, created_at
              FROM instance_channels
              WHERE instance_id = $1
              ORDER BY kind",
@@ -127,9 +135,38 @@ impl InstanceChannelStore for PgInstanceChannelStore {
              SET enabled = $1
              WHERE instance_id = $2 AND kind = $3
              RETURNING id, instance_id, kind, handle, secret_name, webhook_secret_name,
-                       enabled, last_inbound_at, created_at",
+                       enabled, allowed_senders, last_inbound_at, created_at",
         )
         .bind(enabled)
+        .bind(instance_id)
+        .bind(kind)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        row.as_ref().map(channel_from_row).transpose()
+    }
+
+    async fn set_settings(
+        &self,
+        instance_id: &str,
+        kind: &str,
+        enabled: Option<bool>,
+        allowed_senders: Option<&[String]>,
+    ) -> Result<Option<InstanceChannelRow>, StoreError> {
+        let allowed_senders_json = allowed_senders
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|e| StoreError::Malformed(format!("allowed_senders: {e}")))?;
+        let row = sqlx::query(
+            "UPDATE instance_channels
+             SET enabled = COALESCE($1, enabled),
+                 allowed_senders = COALESCE($2, allowed_senders)
+             WHERE instance_id = $3 AND kind = $4
+             RETURNING id, instance_id, kind, handle, secret_name, webhook_secret_name,
+                       enabled, allowed_senders, last_inbound_at, created_at",
+        )
+        .bind(enabled)
+        .bind(allowed_senders_json)
         .bind(instance_id)
         .bind(kind)
         .fetch_optional(&self.pool)

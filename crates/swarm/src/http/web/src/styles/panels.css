@@ -3658,19 +3658,13 @@
 .channel-connect-card small,
 .channel-handle { display: block; color: var(--fg-muted); margin-top: 3px; }
 .channel-icon { font-size: 1.35rem; }
-.channel-steps { display: flex; gap: 8px; flex-wrap: wrap; }
-.channel-steps span {
-  padding: 6px 10px;
-  border-radius: 999px;
-  border: 1px solid var(--border);
-  color: var(--fg-muted);
-  font-size: 0.85rem;
-}
-.channel-steps span.active {
-  color: var(--fg);
-  border-color: var(--accent, #6ea8fe);
-}
 .channel-step { display: grid; gap: 14px; }
+.channel-setup-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 1fr);
+  gap: 18px;
+  align-items: start;
+}
 .channel-instructions { margin: 0; padding-left: 22px; display: grid; gap: 8px; }
 .botfather-art {
   display: grid;
@@ -3695,6 +3689,24 @@
 .channel-connected-card.paused { opacity: 0.68; }
 .channel-card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .channel-title { font-weight: 650; }
+.telegram-allowlist {
+  display: grid;
+  gap: 8px;
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+.telegram-allowlist-input {
+  min-height: 94px;
+  font-size: 16px;
+}
+.telegram-open-warning {
+  padding: 10px 12px;
+  border: 1px solid #9a6424;
+  border-radius: 6px;
+  background: rgba(154, 100, 36, 0.16);
+  color: #f0c17a;
+  font-size: 0.9rem;
+}
 .health-dot {
   width: 10px;
   height: 10px;
@@ -3727,6 +3739,19 @@
 }
 
 @media (max-width: 640px) {
+  .channel-connect-card,
+  .channel-setup-grid,
+  .telegram-token-row,
+  .channel-recent-row {
+    grid-template-columns: 1fr;
+  }
+  .channel-connect-card {
+    align-items: stretch;
+  }
+  .telegram-token-input,
+  .telegram-allowlist-input {
+    font-size: 16px !important;
+  }
   .audit-filters { flex-direction: column; align-items: stretch; }
   .audit-task-filter { width: 100%; }
   .audit-meta { grid-template-columns: 1fr; }

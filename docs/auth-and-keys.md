@@ -73,6 +73,18 @@ Relevant code:
 - [tokens.rs](../crates/core/src/db/sqlite/tokens.rs)
 - [instance.rs](../crates/core/src/instance.rs)
 
+## Per-Instance Configure Secrets
+
+Dyson runtime reconfiguration uses a separate per-instance secret stored in
+`system_secrets` as `instance.<id>.configure`. Swarm sends it in the
+`X-Swarm-Configure` header when calling Dyson's `/api/admin/configure` and
+related admin routes. Dyson hashes the first accepted value locally and verifies
+later pushes against that hash.
+
+This secret is not a human bearer and is not stamped into the sandbox
+environment. It exists so cubeproxy reachability alone is not enough to change
+a running Dyson's model, tools, MCP servers, state sync, or channel config.
+
 ## OpenRouter Minted Keys
 
 When OpenRouter provisioning is enabled, swarm can mint a per-user upstream

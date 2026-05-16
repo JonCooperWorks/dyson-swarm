@@ -48,6 +48,19 @@ into the container at `/run/secrets`, and exported by a runtime wrapper before
 the MCP process starts. Docker argv and container config expose only `KEY_FILE`
 paths, not the secret values.
 
+## Runtime Config Sync
+
+On every swarm startup, a background sweep re-pushes desired runtime config to
+live Dysons: model list, proxy URL/token, image-generation provider, tool
+allowlist/default reset, MCP server blocks, artefact ingest, state sync, and
+Telegram proxy config. The sweep is idempotent and best-effort; create/restore
+still performs a blocking configure push before a new row becomes `live`.
+
+If the blocking configure push fails during create, swarm destroys the
+half-configured sandbox, revokes its runtime tokens, marks the row destroyed,
+and returns the error to the caller rather than exposing an instance with
+warmup-placeholder config.
+
 ## Provider Key Overlay
 
 At startup, swarm overlays provider API keys from `system_secrets` on top of

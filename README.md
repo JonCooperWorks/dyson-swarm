@@ -28,6 +28,7 @@ flowchart TB
         swarm --> llm_proxy["/llm provider proxy"]
         swarm --> mcp_proxy["/mcp proxy + OAuth"]
         swarm --> mcp_runtime["dyson-mcp-runtime"]
+        swarm --> egress_proxy["dyson-egress-proxy<br/>network policy sync"]
         swarm --> telegram_proxy["Telegram proxy"]
         swarm --> reconfig["Dyson reconfiguration API"]
     end
@@ -39,11 +40,13 @@ flowchart TB
 
     agent -->|"pt_ runtime token"| llm_proxy
     agent -->|"MCP bearer"| mcp_proxy
+    agent -->|"HTTP_PROXY / HTTPS_PROXY"| egress_proxy
     agent -->|"it_ artefact ingest"| cache
     agent -->|"st_ state sync"| cache
     agent -->|"Telegram proxy calls"| telegram_proxy
 
     llm_proxy --> providers["LLM providers, BYO upstreams, OpenRouter user keys"]
+    egress_proxy --> public_net["Allowed public or listed destinations"]
     mcp_proxy --> upstream_mcp["HTTP/SSE MCP upstreams"]
     mcp_proxy --> mcp_runtime
     mcp_runtime --> docker_mcp["Docker/stdio MCP servers"]

@@ -37,14 +37,15 @@ this order:
 8. build the `/llm/*` proxy service
 9. build the MCP proxy, OAuth routes, Docker catalog, and optional `dyson-mcp-runtime` socket client
 10. build the authenticator chain (opaque bearer first, OIDC second when configured)
-11. start background loops:
+11. wire the host egress-policy sync service used after sandbox ids or network policies change
+12. start background loops:
    - instance health probing
    - TTL reaping
    - config rewiring sweeps
    - MCP runtime restart sweeps for configured servers
    - state mirror and artefact cache maintenance paths as traffic arrives
    - optional startup binary rotation when explicitly enabled
-12. assemble the Axum router, host-based Dyson/share dispatchers, and embedded SPA
+13. assemble the Axum router, host-based Dyson/share dispatchers, and embedded SPA
 
 ## Core Data Flows
 
@@ -56,6 +57,8 @@ this order:
 - the row becomes `live` only after the configure push succeeds
 - the sandbox talks back to swarm for LLM, MCP, artefact ingest, state sync,
   Telegram proxying, and runtime webhook delivery
+- broad public HTTP/S egress goes through the host `dyson-egress-proxy` only
+  for policies that permit generic egress
 
 The host proxy forwards normal user traffic only for `live` rows. `/healthz`
 remains available during startup as a liveness check, but it is not a readiness

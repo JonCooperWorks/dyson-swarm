@@ -7,8 +7,10 @@ Swarm reads a single TOML file, typically
 At startup, selected `SWARM_*` environment variables override the TOML. Common
 overrides include `SWARM_BIND`, `SWARM_DB_PATH`, `SWARM_DATABASE_BACKEND`,
 `SWARM_DATABASE_URL`, `SWARM_KEYS_DIR`, `SWARM_HOSTNAME`, `SWARM_CUBE_URL`,
-`SWARM_CUBE_API_KEY`, `SWARM_CUBE_SANDBOX_DOMAIN`, `SWARM_BYO_*`,
-`SWARM_BACKUP_S3_*`, and `SWARM_PROVIDERS_<NAME>_API_KEY` /
+`SWARM_CUBE_API_KEY`, `SWARM_CUBE_SANDBOX_DOMAIN`,
+`SWARM_NETWORK_ALLOW_INTERNAL_NETWORK_POLICY`, `SWARM_BYO_*`,
+`SWARM_BACKUP_LOCAL_CACHE_DIR`, `SWARM_BACKUP_S3_*`, and
+`SWARM_PROVIDERS_<NAME>_API_KEY` /
 `SWARM_PROVIDERS_<NAME>_UPSTREAM` for provider stanzas already declared in
 TOML.
 
@@ -92,6 +94,11 @@ Controls backend JWT verification and the SPA browser login flow.
 
 If `[oidc]` is omitted, swarm can still be used through opaque user API keys,
 but browser login and admin-role-based access are unavailable.
+
+`--dangerous-no-auth` bypasses the `/v1/*` auth checks only when
+`SWARM_DEV_MODE=1` or `SWARM_DANGEROUS_NO_AUTH_OK=1` is also set. In that
+mode, responses include `X-Swarm-Insecure`; do not run it outside a trusted
+development network.
 
 ## Provider Configuration
 

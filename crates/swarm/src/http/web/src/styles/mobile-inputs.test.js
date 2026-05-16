@@ -36,9 +36,30 @@ describe('admin KMS audit layout', () => {
     expect(panelsCss).toMatch(/\.admin-kms-audit-table\s*\{[\s\S]*width:\s*max-content;[\s\S]*min-width:\s*1600px/);
     expect(panelsCss).toMatch(/\.admin-kms-audit-table\s+:is\(th,\s*td\)\s*\{[\s\S]*white-space:\s*nowrap;/);
   });
+
+  test('keeps the wide audit table from expanding the admin page chrome', () => {
+    const tabsRule = ruleBody(panelsCss, '.admin-section-tabs');
+    const panelRule = ruleBody(panelsCss, '.admin-kms-audit-panel');
+    const scrollRule = ruleBody(panelsCss, '.table-scroll');
+
+    expect(tabsRule).toContain('min-width: 0');
+    expect(tabsRule).toContain('max-width: 100%');
+    expect(panelRule).toContain('min-width: 0');
+    expect(panelRule).toContain('max-width: 100%');
+    expect(scrollRule).toContain('max-width: 100%');
+    expect(scrollRule).toContain('overflow-x: auto');
+  });
 });
 
 function mobileBlock(css) {
   const match = css.match(/@media \(max-width: 760px\)\s*\{([\s\S]*?)\n\}/);
   return match?.[1] || '';
+}
+
+function ruleBody(css, selector) {
+  const start = css.indexOf(`${selector} {`);
+  if (start < 0) return '';
+  const bodyStart = css.indexOf('{', start) + 1;
+  const bodyEnd = css.indexOf('}', bodyStart);
+  return css.slice(bodyStart, bodyEnd);
 }

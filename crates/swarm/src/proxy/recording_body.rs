@@ -19,6 +19,8 @@
 //! and shows up in the forensic-trail bucket.
 
 use std::collections::BTreeMap;
+use std::future::Future;
+use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
 use std::sync::{
     Arc,
@@ -28,7 +30,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use axum::body::Bytes;
-use futures::Stream;
+use futures::{FutureExt as _, Stream};
 use serde_json::Value as JsonValue;
 
 use crate::envelope::{CipherDirectory, KmsContext, KmsScope, SecretAccessReason, seal_context};
@@ -99,7 +101,7 @@ impl Drop for RecordingState {
         // assert on completion-write timing.
         let handle = tokio::runtime::Handle::try_current().ok();
         if let Some(h) = handle {
-            h.spawn(async move {
+            spawn_audit_future(&h, audit_id, async move {
                 if let Err(e) = audit.update_completion(audit_id, output_tokens).await {
                     tracing::warn!(
                         audit_id,
@@ -261,9 +263,10 @@ fn record_tool_calls(ctx: Option<ToolCallAuditContext>, calls: Vec<ToolCallEvent
     let Some(ctx) = ctx else {
         return;
     };
+    let audit_id = ctx.llm_audit_id;
     let handle = tokio::runtime::Handle::try_current().ok();
     if let Some(h) = handle {
-        h.spawn(async move {
+        spawn_audit_future(&h, audit_id, async move {
             for call in calls {
                 if let Err(err) = insert_tool_call(&ctx, call).await {
                     tracing::warn!(error = %err, "llm tool-call audit insert failed");
@@ -271,6 +274,17 @@ fn record_tool_calls(ctx: Option<ToolCallAuditContext>, calls: Vec<ToolCallEvent
             }
         });
     }
+}
+
+fn spawn_audit_future<F>(handle: &tokio::runtime::Handle, audit_id: i64, future: F)
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    handle.spawn(async move {
+        if AssertUnwindSafe(future).catch_unwind().await.is_err() {
+            tracing::error!(audit_id, "spawned audit task panicked");
+        }
+    });
 }
 
 async fn insert_tool_call(ctx: &ToolCallAuditContext, call: ToolCallEvent) -> Result<(), String> {
@@ -780,6 +794,26 @@ mod tests {
         }
     }
 
+    struct PanickingAudit {
+        notify: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    }
+
+    #[async_trait]
+    impl AuditStore for PanickingAudit {
+        async fn insert(&self, _: &AuditEntry) -> Result<i64, StoreError> {
+            Ok(1)
+        }
+        async fn daily_tokens(&self, _: &str, _: i64) -> Result<u64, StoreError> {
+            Ok(0)
+        }
+        async fn update_completion(&self, _: i64, _: Option<i64>) -> Result<(), StoreError> {
+            if let Some(tx) = self.notify.lock().unwrap().take() {
+                let _ = tx.send(());
+            }
+            panic!("intentional audit panic");
+        }
+    }
+
     #[test]
     fn extract_openai_completion_tokens() {
         let v: serde_json::Value =
@@ -982,6 +1016,41 @@ data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"argu
         }
         let calls = stub.completions.lock().unwrap();
         assert_eq!(calls.as_slice(), &[(7, None)]);
+    }
+
+    #[tokio::test]
+    async fn drop_spawned_audit_panic_is_caught_and_runtime_continues() {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let audit: Arc<dyn AuditStore> = Arc::new(PanickingAudit {
+            notify: Mutex::new(Some(tx)),
+        });
+        let chunks = vec![Ok::<Bytes, std::io::Error>(Bytes::from_static(
+            b"random bytes",
+        ))];
+        let body = RecordingBody::new(futures::stream::iter(chunks), audit, 13);
+
+        let _: Vec<_> = body.collect().await;
+        rx.await.unwrap();
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+        }
+
+        let stub = Arc::new(StubAudit::default());
+        let audit: Arc<dyn AuditStore> = stub.clone();
+        let chunks = vec![Ok::<Bytes, std::io::Error>(Bytes::from_static(
+            br#"{"usage":{"completion_tokens":3}}"#,
+        ))];
+        let body = RecordingBody::new(futures::stream::iter(chunks), audit, 14);
+        let _: Vec<_> = body.collect().await;
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+            if !stub.completions.lock().unwrap().is_empty() {
+                break;
+            }
+        }
+
+        let calls = stub.completions.lock().unwrap();
+        assert_eq!(calls.as_slice(), &[(14, Some(3))]);
     }
 
     #[tokio::test]

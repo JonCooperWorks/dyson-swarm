@@ -49,6 +49,13 @@ const SCHEMES = [
 const TASK_SLUG_RE = /^[a-z0-9_-]{1,64}$/;
 const TASK_URL_PLACEHOLDER = 'webhook-name';
 const DEFAULT_SIGNATURE_HEADER = 'x-swarm-signature';
+const CUSTOM_TAB_ID = 'custom';
+const DEFAULT_PRESET = WEBHOOK_PRESETS[0];
+const VERIFICATION_TABS = [...WEBHOOK_PRESETS, {
+  id: CUSTOM_TAB_ID,
+  label: 'Custom',
+  docs_url: '',
+}];
 const TASK_MARKDOWN_PLUGINS = [remarkGfm, remarkBreaks];
 const TASK_MARKDOWN_COMPONENTS = {
   a: ({ node, ...props }) => (
@@ -97,6 +104,15 @@ function textToHex(value) {
 
 function parseRecordedDelivery(raw) {
   const normalised = String(raw || '').replace(/\r\n/g, '\n');
+  try {
+    const parsed = JSON.parse(normalised);
+    if (parsed && typeof parsed === 'object' && parsed.headers) {
+      return {
+        headers: parsed.headers || {},
+        body_b64: parsed.body_b64 || b64Text(parsed.body || ''),
+      };
+    }
+  } catch { /* raw HTTP-ish format below */ }
   const sep = normalised.indexOf('\n\n');
   const headerText = sep >= 0 ? normalised.slice(0, sep) : normalised;
   const body = sep >= 0 ? normalised.slice(sep + 2) : '';
@@ -107,6 +123,45 @@ function parseRecordedDelivery(raw) {
     headers[line.slice(0, idx).trim()] = line.slice(idx + 1).trim();
   });
   return { headers, body_b64: b64Text(body) };
+}
+
+function randomBase64Url(bytes = 32) {
+  const buf = new Uint8Array(bytes);
+  if (globalThis.crypto?.getRandomValues) {
+    globalThis.crypto.getRandomValues(buf);
+  } else {
+    for (let i = 0; i < buf.length; i += 1) buf[i] = Math.floor(Math.random() * 256);
+  }
+  let raw = '';
+  buf.forEach(b => { raw += String.fromCharCode(b); });
+  return btoa(raw).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+}
+
+function humanVerifyReason(result) {
+  const type = result?.type || result?.reason || 'verify failed';
+  switch (type) {
+    case 'all_signatures_mismatched':
+      return 'All signatures did not match the shared secret and signed payload.';
+    case 'missing_signature':
+      return 'The configured signature header was missing.';
+    case 'missing_timestamp':
+      return 'The timestamp header was missing.';
+    case 'timestamp_out_of_skew':
+      return 'The timestamp was outside the allowed clock skew.';
+    case 'missing_header':
+      return `Missing required header${result?.name ? `: ${result.name}` : ''}.`;
+    case 'malformed_signature':
+      return `The signature header could not be decoded${result?.reason ? `: ${result.reason}` : ''}.`;
+    case 'unknown_version':
+      return `The signature version is not configured${result?.version ? `: ${result.version}` : ''}.`;
+    default:
+      return String(type).replaceAll('_', ' ');
+  }
+}
+
+function hexPreview(text, limit = 48) {
+  const hex = textToHex(text);
+  return hex.length > limit ? `${hex.slice(0, limit)}…` : hex;
 }
 
 function schemeLabel(s) {
@@ -335,28 +390,34 @@ function TaskForm({ instanceId, taskName }) {
   const [loaded, setLoaded] = React.useState(!editing);
   const [name, setName] = React.useState(taskName || '');
   const [description, setDescription] = React.useState('');
-  const [scheme, setScheme] = React.useState('hmac_sha256');
-  const [signatureHeader, setSignatureHeader] = React.useState(DEFAULT_SIGNATURE_HEADER);
-  const [verifierMode, setVerifierMode] = React.useState('legacy_hmac');
-  const [signatureAlgo, setSignatureAlgo] = React.useState('sha256');
-  const [signatureEncoding, setSignatureEncoding] = React.useState('hex');
-  const [signaturePrefix, setSignaturePrefix] = React.useState('sha256=');
-  const [signatureSeparator, setSignatureSeparator] = React.useState('');
-  const [signatureValueSplit, setSignatureValueSplit] = React.useState('=');
-  const [timestampHeader, setTimestampHeader] = React.useState('');
-  const [timestampSkewSecs, setTimestampSkewSecs] = React.useState('300');
-  const [payloadTemplate, setPayloadTemplate] = React.useState('{{body}}');
-  const [idempotencyHeader, setIdempotencyHeader] = React.useState('');
+  const [selectedTab, setSelectedTab] = React.useState(DEFAULT_PRESET.id);
+  const [scheme, setScheme] = React.useState(DEFAULT_PRESET.auth_scheme);
+  const [signatureHeader, setSignatureHeader] = React.useState(DEFAULT_PRESET.signature_header);
+  const [verifierMode, setVerifierMode] = React.useState(DEFAULT_PRESET.verifier_mode);
+  const [signatureAlgo, setSignatureAlgo] = React.useState(DEFAULT_PRESET.signature_algo);
+  const [signatureEncoding, setSignatureEncoding] = React.useState(DEFAULT_PRESET.signature_encoding);
+  const [signaturePrefix, setSignaturePrefix] = React.useState(DEFAULT_PRESET.signature_prefix);
+  const [signatureSeparator, setSignatureSeparator] = React.useState(DEFAULT_PRESET.signature_separator);
+  const [signatureValueSplit, setSignatureValueSplit] = React.useState(DEFAULT_PRESET.signature_value_split);
+  const [timestampHeader, setTimestampHeader] = React.useState(DEFAULT_PRESET.timestamp_header);
+  const [timestampSkewSecs, setTimestampSkewSecs] = React.useState(String(DEFAULT_PRESET.timestamp_skew_secs));
+  const [payloadTemplate, setPayloadTemplate] = React.useState(DEFAULT_PRESET.payload_template);
+  const [idempotencyHeader, setIdempotencyHeader] = React.useState(DEFAULT_PRESET.idempotency_header);
+  const [bearerPathToken, setBearerPathToken] = React.useState('');
   const [secret, setSecret] = React.useState('');
   const [hasSecret, setHasSecret] = React.useState(false);
+  const [secretEditing, setSecretEditing] = React.useState(!editing);
+  const [secretRevealed, setSecretRevealed] = React.useState(false);
   const [enabled, setEnabled] = React.useState(true);
   const [danger, setDanger] = React.useState(false);
   const [err, setErr] = React.useState(null);
+  const [toast, setToast] = React.useState(null);
   const [submitting, setSubmitting] = React.useState(false);
   const [origScheme, setOrigScheme] = React.useState('hmac_sha256');
   const [recordedDelivery, setRecordedDelivery] = React.useState('');
   const [verifyResult, setVerifyResult] = React.useState(null);
   const [verifying, setVerifying] = React.useState(false);
+  const [providerPath, setProviderPath] = React.useState(null);
 
   React.useEffect(() => {
     if (!editing) return;
@@ -365,6 +426,9 @@ function TaskForm({ instanceId, taskName }) {
       if (cancelled || !row) return;
       setName(row.name);
       setDescription(row.description || '');
+      setSelectedTab(row.preset_id && WEBHOOK_PRESETS.some(p => p.id === row.preset_id)
+        ? row.preset_id
+        : CUSTOM_TAB_ID);
       setScheme(row.auth_scheme);
       setOrigScheme(row.auth_scheme);
       setSignatureHeader(row.signature_header || DEFAULT_SIGNATURE_HEADER);
@@ -378,7 +442,11 @@ function TaskForm({ instanceId, taskName }) {
       setTimestampSkewSecs(String(row.timestamp_skew_secs ?? 300));
       setPayloadTemplate(row.payload_template || '{{body}}');
       setIdempotencyHeader(row.idempotency_header || '');
+      setBearerPathToken(row.bearer_path_token || '');
       setHasSecret(!!row.has_secret);
+      setSecret('');
+      setSecretEditing(!row.has_secret);
+      setProviderPath(row.path || null);
       setEnabled(!!row.enabled);
       setLoaded(true);
     }).catch(e => {
@@ -387,12 +455,16 @@ function TaskForm({ instanceId, taskName }) {
     return () => { cancelled = true; };
   }, [client, editing, instanceId, taskName]);
 
+  const selectedPreset = WEBHOOK_PRESETS.find(p => p.id === selectedTab) || null;
+  const isVendorTab = !!selectedPreset;
   const schemeChanged = editing && scheme !== origScheme;
-  const usesHmac = scheme === 'hmac_sha256' || verifierMode === 'hmac_v2';
-  const needsSecret = scheme !== 'none' && verifierMode !== 'none' && verifierMode !== 'bearer_v2';
-  const requireSecretOnSave = needsSecret && (!editing || schemeChanged || !hasSecret);
+  const usesHmac = isVendorTab || scheme === 'hmac_sha256' || verifierMode === 'hmac_v2';
+  const needsSecret = isVendorTab || (scheme !== 'none' && verifierMode !== 'none' && verifierMode !== 'bearer_v2');
+  const requireSecretOnSave = needsSecret && (!editing || schemeChanged || !hasSecret || secretEditing);
+  const secretTooShort = needsSecret && secretEditing && secret.length > 0 && secret.length < 16;
 
   const applyPreset = (preset) => {
+    setSelectedTab(preset.id);
     setScheme(preset.auth_scheme);
     setSignatureHeader(preset.signature_header);
     setVerifierMode(preset.verifier_mode);
@@ -409,6 +481,32 @@ function TaskForm({ instanceId, taskName }) {
     setVerifyResult(null);
   };
 
+  const selectCustom = () => {
+    setSelectedTab(CUSTOM_TAB_ID);
+    if (scheme === 'hmac_sha256') {
+      setVerifierMode('hmac_v2');
+    }
+    setVerifyResult(null);
+  };
+
+  const selectScheme = (value) => {
+    setSelectedTab(CUSTOM_TAB_ID);
+    setScheme(value);
+    setDanger(false);
+    if (value === 'hmac_sha256') {
+      setVerifierMode('hmac_v2');
+      setSignatureHeader(signatureHeader || DEFAULT_PRESET.signature_header);
+      setSignatureAlgo(signatureAlgo || DEFAULT_PRESET.signature_algo);
+      setSignatureEncoding(signatureEncoding || DEFAULT_PRESET.signature_encoding);
+      setPayloadTemplate(payloadTemplate || DEFAULT_PRESET.payload_template);
+    } else if (value === 'bearer') {
+      setVerifierMode('bearer_v2');
+      if (!bearerPathToken) setBearerPathToken(`whp_${randomBase64Url(24)}`);
+    } else {
+      setVerifierMode('none');
+    }
+  };
+
   const verifierBody = () => ({
     verifier_mode: verifierMode,
     signature_algo: nullableText(signatureAlgo),
@@ -420,32 +518,39 @@ function TaskForm({ instanceId, taskName }) {
     timestamp_skew_secs: timestampSkewSecs === '' ? null : Number(timestampSkewSecs),
     payload_template: nullableText(payloadTemplate),
     idempotency_header: nullableText(idempotencyHeader),
+    bearer_path_token: verifierMode === 'bearer_v2' ? nullableText(bearerPathToken) : null,
   });
+
+  const saveDisabledReason = (() => {
+    if (submitting) return null;
+    if (requireSecretOnSave && !secret) return 'save disabled: secret is empty';
+    if (secretTooShort) return 'secret is too short — vendors require ≥ 16 chars';
+    if (scheme === 'none' && !danger) return 'save disabled: confirm no-auth risk';
+    if (!editing && !validTaskSlug(name)) return 'save disabled: enter a valid webhook name';
+    return null;
+  })();
 
   const submit = async (e) => {
     e.preventDefault();
     if (submitting) return;
     setErr(null);
-    if (scheme === 'none' && !danger) {
-      setErr('Confirm "I understand this URL accepts any payload" to use no-auth.');
-      return;
-    }
-    if (requireSecretOnSave && !secret) {
-      setErr('A signing secret is required for this scheme.');
+    if (saveDisabledReason) {
+      setErr(saveDisabledReason);
       return;
     }
     setSubmitting(true);
     try {
+      const preset_id = isVendorTab ? selectedPreset.id : null;
       if (editing) {
-        const body = { description, auth_scheme: scheme, enabled, ...verifierBody() };
+        const body = { description, preset_id, auth_scheme: scheme, enabled, ...verifierBody() };
         if (usesHmac) body.signature_header = signatureHeader.trim() || DEFAULT_SIGNATURE_HEADER;
-        if (secret) body.secret = secret;
+        if (secretEditing && secret) body.secret = secret;
         const updated = await client.updateWebhook(instanceId, taskName, body);
         upsertWebhook(instanceId, updated);
       } else {
-        const body = { name, description, auth_scheme: scheme, enabled, ...verifierBody() };
+        const body = { name, description, preset_id, auth_scheme: scheme, enabled, ...verifierBody() };
         if (usesHmac) body.signature_header = signatureHeader.trim() || DEFAULT_SIGNATURE_HEADER;
-        if (secret) body.secret = secret;
+        if (secretEditing && secret) body.secret = secret;
         const created = await client.createWebhook(instanceId, body);
         upsertWebhook(instanceId, created);
       }
@@ -476,13 +581,52 @@ function TaskForm({ instanceId, taskName }) {
     }
   };
 
+  const verifyLastFailed = async () => {
+    if (!editing || verifying) return;
+    setVerifying(true);
+    setVerifyResult(null);
+    setErr(null);
+    try {
+      const result = await client.verifyWebhookDelivery(
+        instanceId,
+        taskName,
+        null,
+        { fromLastFailed: true },
+      );
+      setVerifyResult(result);
+    } catch (e) {
+      setVerifyResult({ type: 'request_failed', reason: e?.detail || e?.message || 'verify failed' });
+    } finally {
+      setVerifying(false);
+    }
+  };
+
+  const generateSecret = async () => {
+    const next = randomBase64Url(32);
+    setSecret(next);
+    setSecretEditing(true);
+    setSecretRevealed(false);
+    try {
+      await navigator.clipboard?.writeText(next);
+      setToast('Generated and copied. Save before closing.');
+    } catch {
+      setToast('Generated. Save before closing.');
+    }
+  };
+
+  const rotateBearerPath = () => {
+    setBearerPathToken(`whp_${randomBase64Url(24)}`);
+  };
+
   if (editing && !loaded) {
     return <div className="muted">loading…</div>;
   }
 
   const activeSlug = editing ? taskName : name;
   const urlReady = validTaskSlug(activeSlug);
-  const fullUrl = webhookUrlFor(instanceId, activeSlug, { showPlaceholder: true });
+  const fullUrl = editing && providerPath && typeof window !== 'undefined'
+    ? `${window.location.origin}${providerPath}`
+    : webhookUrlFor(instanceId, activeSlug, { showPlaceholder: true });
 
   return (
     <div className="edit-stack">
@@ -495,7 +639,7 @@ function TaskForm({ instanceId, taskName }) {
               <UrlField value={fullUrl} disabled={!urlReady}/>
               <small className="muted">
                 {urlReady
-                  ? 'Copy this into the provider. Configure the provider with the shared secret below.'
+                  ? 'Copy this into the provider. Configure the provider with the verifier below.'
                   : 'Enter a URL-safe webhook name below to unlock copy.'}
               </small>
             </label>
@@ -522,234 +666,94 @@ function TaskForm({ instanceId, taskName }) {
 
         <section className="page-section">
           <h2 className="section-title">verification</h2>
-          <div className="task-preset-strip" aria-label="webhook verifier presets">
-            {WEBHOOK_PRESETS.map(preset => (
-              <button
-                key={preset.label}
-                type="button"
-                className="btn btn-ghost btn-sm"
-                onClick={() => applyPreset(preset)}
+          <VerificationTabs
+            selectedTab={selectedTab}
+            onSelect={(id) => {
+              const preset = WEBHOOK_PRESETS.find(p => p.id === id);
+              if (preset) applyPreset(preset);
+              else selectCustom();
+            }}
+            disabled={submitting}
+          />
+          {selectedPreset ? (
+            <>
+              <VendorSummary preset={selectedPreset}/>
+              <SecretControl
+                secret={secret}
+                setSecret={setSecret}
+                hasSecret={hasSecret}
+                editing={secretEditing}
+                setEditing={setSecretEditing}
+                revealed={secretRevealed}
+                setRevealed={setSecretRevealed}
+                onGenerate={generateSecret}
                 disabled={submitting}
-              >
-                {preset.label}
-              </button>
-            ))}
-          </div>
-          <div className="task-scheme-grid">
-            {SCHEMES.map(s => (
-              <label key={s.value} className={`task-scheme ${scheme === s.value ? 'selected' : ''} ${s.value === 'none' ? 'danger' : ''}`}>
-                <input
-                  type="radio"
-                  name="auth-scheme"
-                  value={s.value}
-                  checked={scheme === s.value}
-                  onChange={() => { setScheme(s.value); setDanger(false); }}
-                  disabled={submitting}
-                />
-                <div className="task-scheme-body">
-                  <div className="task-scheme-label">{s.label}</div>
-                  <div className="task-scheme-hint muted small">{s.hint}</div>
-                </div>
-              </label>
-            ))}
-          </div>
-          {needsSecret ? (
-            <label className="field">
-              <span>{requireSecretOnSave ? 'shared secret' : 'rotate shared secret'}</span>
-              <input
-                type="password"
-                value={secret}
-                onChange={e => setSecret(e.target.value)}
-                placeholder={requireSecretOnSave ? 'paste or generate a strong random string' : 'leave blank to keep existing'}
-                disabled={submitting}
-                autoComplete="off"
+                error={secretTooShort ? 'secret is too short — vendors require ≥ 16 chars' : null}
               />
-              <small className="muted">
-                {scheme === 'hmac_sha256'
-                  ? `Use the same secret in the provider. It signs the body and sends ${signatureHeader || DEFAULT_SIGNATURE_HEADER}: sha256=<hex>.`
-                  : 'Use the same secret in the provider as Authorization: Bearer <secret>.'}
-              </small>
-            </label>
+            </>
           ) : (
-            <label className="field check">
-              <input
-                type="checkbox"
-                checked={danger}
-                onChange={e => setDanger(e.target.checked)}
-                disabled={submitting}
-              />
-              <span>
-                I understand this URL accepts any payload, signed or not.
-              </span>
-            </label>
-          )}
-          {usesHmac ? (
-            <label className="field">
-              <span>signature header</span>
-              <input
-                aria-label="signature header"
-                value={signatureHeader}
-                onChange={e => setSignatureHeader(e.target.value.toLowerCase())}
-                placeholder={DEFAULT_SIGNATURE_HEADER}
-                disabled={submitting}
-                autoComplete="off"
-              />
-              <small className="muted">
-                Use the provider's header name, for example x-hub-signature-256 or x-swarm-signature.
-              </small>
-            </label>
-          ) : null}
-          <div className="task-verifier-grid">
-            <label className="field">
-              <span>verifier mode</span>
-              <select
-                aria-label="verifier mode"
-                value={verifierMode}
-                onChange={e => setVerifierMode(e.target.value)}
-                disabled={submitting}
-              >
-                <option value="legacy_hmac">legacy_hmac</option>
-                <option value="legacy_bearer">legacy_bearer</option>
-                <option value="none">none</option>
-                <option value="hmac_v2">hmac_v2</option>
-                <option value="bearer_v2">bearer_v2</option>
-              </select>
-            </label>
-            <label className="field">
-              <span>algorithm</span>
-              <select
-                aria-label="signature algorithm"
-                value={signatureAlgo}
-                onChange={e => setSignatureAlgo(e.target.value)}
-                disabled={submitting}
-              >
-                <option value="sha256">sha256</option>
-                <option value="sha1">sha1</option>
-                <option value="sha512">sha512</option>
-              </select>
-            </label>
-            <label className="field">
-              <span>encoding</span>
-              <select
-                aria-label="signature encoding"
-                value={signatureEncoding}
-                onChange={e => setSignatureEncoding(e.target.value)}
-                disabled={submitting}
-              >
-                <option value="hex">hex</option>
-                <option value="base64">base64</option>
-              </select>
-            </label>
-            <label className="field">
-              <span>signature prefix</span>
-              <input
-                aria-label="signature prefix"
-                value={signaturePrefix}
-                onChange={e => setSignaturePrefix(e.target.value)}
-                placeholder="sha256="
-                disabled={submitting}
-                autoComplete="off"
-              />
-            </label>
-            <label className="field">
-              <span>signature separator</span>
-              <input
-                aria-label="signature separator"
-                value={signatureSeparator}
-                onChange={e => setSignatureSeparator(e.target.value)}
-                placeholder="space or comma for multi-sig headers"
-                disabled={submitting}
-                autoComplete="off"
-              />
-            </label>
-            <label className="field">
-              <span>value split</span>
-              <input
-                aria-label="signature value split"
-                value={signatureValueSplit}
-                onChange={e => setSignatureValueSplit(e.target.value)}
-                placeholder="= or ,"
-                disabled={submitting}
-                autoComplete="off"
-              />
-            </label>
-            <label className="field">
-              <span>timestamp header</span>
-              <input
-                aria-label="timestamp header"
-                value={timestampHeader}
-                onChange={e => setTimestampHeader(e.target.value.toLowerCase())}
-                placeholder="webhook-timestamp"
-                disabled={submitting}
-                autoComplete="off"
-              />
-            </label>
-            <label className="field">
-              <span>timestamp skew seconds</span>
-              <input
-                aria-label="timestamp skew seconds"
-                type="number"
-                min="0"
-                value={timestampSkewSecs}
-                onChange={e => setTimestampSkewSecs(e.target.value)}
-                disabled={submitting}
-              />
-            </label>
-            <label className="field">
-              <span>idempotency header</span>
-              <input
-                aria-label="idempotency header"
-                value={idempotencyHeader}
-                onChange={e => setIdempotencyHeader(e.target.value.toLowerCase())}
-                placeholder="webhook-id"
-                disabled={submitting}
-                autoComplete="off"
-              />
-            </label>
-          </div>
-          <label className="field">
-            <span>payload template</span>
-            <input
-              aria-label="payload template"
-              value={payloadTemplate}
-              onChange={e => setPayloadTemplate(e.target.value)}
-              placeholder="{{body}}"
+            <CustomVerificationFields
+              scheme={scheme}
+              selectScheme={selectScheme}
+              verifierMode={verifierMode}
+              setVerifierMode={setVerifierMode}
+              signatureHeader={signatureHeader}
+              setSignatureHeader={setSignatureHeader}
+              signatureAlgo={signatureAlgo}
+              setSignatureAlgo={setSignatureAlgo}
+              signatureEncoding={signatureEncoding}
+              setSignatureEncoding={setSignatureEncoding}
+              signaturePrefix={signaturePrefix}
+              setSignaturePrefix={setSignaturePrefix}
+              signatureSeparator={signatureSeparator}
+              setSignatureSeparator={setSignatureSeparator}
+              signatureValueSplit={signatureValueSplit}
+              setSignatureValueSplit={setSignatureValueSplit}
+              timestampHeader={timestampHeader}
+              setTimestampHeader={setTimestampHeader}
+              timestampSkewSecs={timestampSkewSecs}
+              setTimestampSkewSecs={setTimestampSkewSecs}
+              payloadTemplate={payloadTemplate}
+              setPayloadTemplate={setPayloadTemplate}
+              idempotencyHeader={idempotencyHeader}
+              setIdempotencyHeader={setIdempotencyHeader}
+              bearerPathToken={bearerPathToken}
+              setBearerPathToken={setBearerPathToken}
+              rotateBearerPath={rotateBearerPath}
+              secretProps={{
+                secret,
+                setSecret,
+                hasSecret,
+                editing: secretEditing,
+                setEditing: setSecretEditing,
+                revealed: secretRevealed,
+                setRevealed: setSecretRevealed,
+                onGenerate: generateSecret,
+                disabled: submitting,
+                error: secretTooShort ? 'secret is too short — vendors require ≥ 16 chars' : null,
+              }}
+              danger={danger}
+              setDanger={setDanger}
               disabled={submitting}
-              autoComplete="off"
             />
-            <small className="muted">
-              Placeholders: {'{{body}}'}, {'{{timestamp}}'}, {'{{id}}'}, {'{{version}}'}.
-            </small>
-          </label>
-          {editing ? (
-            <section className="task-verify-widget" aria-label="verify recorded delivery">
-              <label className="field">
-                <span>Paste a recorded delivery (headers + body)</span>
-                <textarea
-                  aria-label="recorded delivery"
-                  className="textarea"
-                  value={recordedDelivery}
-                  onChange={e => setRecordedDelivery(e.target.value)}
-                  rows={5}
-                  placeholder={'webhook-id: msg_123\nwebhook-timestamp: 1700000000\n\n{"event":"ping"}'}
-                  disabled={verifying}
-                />
-              </label>
-              <div className="panel-actions">
-                <button
-                  type="button"
-                  className="btn btn-ghost btn-sm"
-                  onClick={verifyRecorded}
-                  disabled={verifying || !recordedDelivery.trim()}
-                >
-                  {verifying ? 'verifying…' : 'verify'}
-                </button>
-              </div>
-              {verifyResult ? (
-                <VerifyResult result={verifyResult}/>
-              ) : null}
-            </section>
-          ) : null}
+          )}
+          {toast ? <div className="success small">{toast}</div> : null}
+          <VerifyWidget
+            editing={editing}
+            selectedLabel={selectedPreset?.label || 'custom provider'}
+            recordedDelivery={recordedDelivery}
+            setRecordedDelivery={setRecordedDelivery}
+            verifyRecorded={verifyRecorded}
+            verifyLastFailed={verifyLastFailed}
+            verifyResult={verifyResult}
+            verifying={verifying}
+          />
+          <ProviderUrlBlock
+            value={fullUrl}
+            disabled={!urlReady}
+            vendorLabel={selectedPreset?.label || 'provider'}
+            docsUrl={selectedPreset?.docs_url || ''}
+          />
         </section>
 
         <section className="page-section">
@@ -803,10 +807,11 @@ function TaskForm({ instanceId, taskName }) {
           type="submit"
           form="task-form"
           className="btn btn-primary btn-lg"
-          disabled={submitting}
+          disabled={submitting || !!saveDisabledReason}
         >
           {submitting ? 'saving…' : (editing ? 'save' : 'create webhook')}
         </button>
+        {saveDisabledReason ? <span className="muted small">{saveDisabledReason}</span> : null}
         <a className="btn btn-ghost" href={backHref}>cancel</a>
       </div>
     </div>
@@ -826,36 +831,452 @@ const TaskMarkdown = React.memo(function TaskMarkdown({ markdown }) {
   );
 });
 
+function VerificationTabs({ selectedTab, onSelect, disabled }) {
+  const refs = React.useRef([]);
+  const onKeyDown = (e, idx) => {
+    if (!['ArrowRight', 'ArrowLeft', 'Home', 'End'].includes(e.key)) return;
+    e.preventDefault();
+    let next = idx;
+    if (e.key === 'ArrowRight') next = (idx + 1) % VERIFICATION_TABS.length;
+    if (e.key === 'ArrowLeft') next = (idx - 1 + VERIFICATION_TABS.length) % VERIFICATION_TABS.length;
+    if (e.key === 'Home') next = 0;
+    if (e.key === 'End') next = VERIFICATION_TABS.length - 1;
+    refs.current[next]?.focus();
+    onSelect(VERIFICATION_TABS[next].id);
+  };
+  return (
+    <div className="task-verification-tabs" role="tablist" aria-label="verification presets">
+      {VERIFICATION_TABS.map((tab, idx) => (
+        <button
+          key={tab.id}
+          ref={el => { refs.current[idx] = el; }}
+          type="button"
+          role="tab"
+          aria-selected={selectedTab === tab.id}
+          tabIndex={selectedTab === tab.id ? 0 : -1}
+          className={`task-verification-tab ${selectedTab === tab.id ? 'selected' : ''} ${tab.id === CUSTOM_TAB_ID ? 'custom' : ''}`}
+          onClick={() => onSelect(tab.id)}
+          onKeyDown={e => onKeyDown(e, idx)}
+          disabled={disabled}
+        >
+          {tab.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function VendorSummary({ preset }) {
+  const rows = [
+    ['Algorithm', preset.signature_algo || 'sha256', 'Hash algorithm used by this vendor.'],
+    ['Encoding', preset.signature_encoding || 'hex', 'How the binary HMAC is encoded in the header.'],
+    ['Signature header', preset.signature_header, 'Header that carries one or more signatures.'],
+    ['Payload signed', preset.payload_template, 'Exact byte template verified before dispatch.'],
+  ];
+  if (preset.timestamp_header) {
+    rows.push([
+      'Timestamp header',
+      `${preset.timestamp_header} (${preset.timestamp_skew_secs || 300}s skew)`,
+      'Header used for replay-window checks.',
+    ]);
+  }
+  if (preset.idempotency_header) {
+    rows.push(['Idempotency', preset.idempotency_header, 'Header used to dedupe replayed deliveries.']);
+  }
+  rows.push(['Docs', preset.docs_url, 'Vendor verification documentation.']);
+  return (
+    <section className="task-vendor-summary" aria-label={`${preset.label} verification summary`}>
+      {rows.map(([label, value, title]) => (
+        <div key={label} className="task-summary-row" title={title}>
+          <dt>{label}</dt>
+          <dd>
+            {label === 'Docs' ? (
+              <a href={value} target="_blank" rel="noopener noreferrer">{value}</a>
+            ) : (
+              <code>{value}</code>
+            )}
+          </dd>
+        </div>
+      ))}
+    </section>
+  );
+}
+
+function SecretControl({
+  secret,
+  setSecret,
+  hasSecret,
+  editing,
+  setEditing,
+  revealed,
+  setRevealed,
+  onGenerate,
+  disabled,
+  error,
+}) {
+  if (hasSecret && !editing) {
+    return (
+      <div className="field task-secret-stored">
+        <span>shared secret</span>
+        <div className="task-secret-stored-row">
+          <code>••••••••</code>
+          <button type="button" className="btn btn-ghost btn-sm" onClick={() => setEditing(true)}>
+            Replace
+          </button>
+        </div>
+        <small className="muted">The existing secret is stored server-side and is never sent back to this page.</small>
+      </div>
+    );
+  }
+  return (
+    <label className="field">
+      <span>shared secret</span>
+      <div className="task-secret-row">
+        <input
+          aria-label="shared secret"
+          className="task-verification-input"
+          type={revealed ? 'text' : 'password'}
+          value={secret}
+          onChange={e => setSecret(e.target.value)}
+          placeholder="paste or generate a strong random string"
+          disabled={disabled}
+          autoComplete="off"
+        />
+        <button type="button" className="btn btn-ghost btn-sm" onClick={onGenerate} disabled={disabled}>
+          Generate
+        </button>
+        <button
+          type="button"
+          className="btn btn-ghost btn-sm"
+          onClick={() => setRevealed(!revealed)}
+          disabled={disabled}
+        >
+          {revealed ? 'Hide' : 'Reveal'}
+        </button>
+        <button
+          type="button"
+          className="btn btn-ghost btn-sm"
+          onClick={() => navigator.clipboard?.writeText(secret)}
+          disabled={!secret}
+        >
+          Copy
+        </button>
+      </div>
+      {error ? <small className="error small">{error}</small> : (
+        <small className="muted">Use the same secret in the vendor dashboard.</small>
+      )}
+    </label>
+  );
+}
+
+function CustomVerificationFields({
+  scheme,
+  selectScheme,
+  verifierMode,
+  setVerifierMode,
+  signatureHeader,
+  setSignatureHeader,
+  signatureAlgo,
+  setSignatureAlgo,
+  signatureEncoding,
+  setSignatureEncoding,
+  signaturePrefix,
+  setSignaturePrefix,
+  signatureSeparator,
+  setSignatureSeparator,
+  signatureValueSplit,
+  setSignatureValueSplit,
+  timestampHeader,
+  setTimestampHeader,
+  timestampSkewSecs,
+  setTimestampSkewSecs,
+  payloadTemplate,
+  setPayloadTemplate,
+  idempotencyHeader,
+  setIdempotencyHeader,
+  bearerPathToken,
+  setBearerPathToken,
+  rotateBearerPath,
+  secretProps,
+  danger,
+  setDanger,
+  disabled,
+}) {
+  return (
+    <>
+      <div className="task-scheme-grid">
+        {SCHEMES.map(s => (
+          <label key={s.value} className={`task-scheme ${scheme === s.value ? 'selected' : ''} ${s.value === 'none' ? 'danger' : ''}`}>
+            <input
+              type="radio"
+              name="auth-scheme"
+              value={s.value}
+              checked={scheme === s.value}
+              onChange={() => selectScheme(s.value)}
+              disabled={disabled}
+            />
+            <div className="task-scheme-body">
+              <div className="task-scheme-label">{s.label}</div>
+              <div className="task-scheme-hint muted small">{s.hint}</div>
+            </div>
+          </label>
+        ))}
+      </div>
+      {scheme === 'hmac_sha256' ? (
+        <>
+          <SecretControl {...secretProps}/>
+          <label className="field">
+            <span>signature header</span>
+            <input
+              aria-label="signature header"
+              className="task-verification-input"
+              value={signatureHeader}
+              onChange={e => setSignatureHeader(e.target.value.toLowerCase())}
+              placeholder={DEFAULT_SIGNATURE_HEADER}
+              disabled={disabled}
+              autoComplete="off"
+            />
+          </label>
+          <div className="task-verifier-grid">
+            <label className="field">
+              <span>verifier mode</span>
+              <select
+                aria-label="verifier mode"
+                className="task-verification-input"
+                value={verifierMode}
+                onChange={e => setVerifierMode(e.target.value)}
+                disabled={disabled}
+              >
+                <option value="legacy_hmac">legacy_hmac</option>
+                <option value="hmac_v2">hmac_v2</option>
+              </select>
+            </label>
+            <label className="field">
+              <span>algorithm</span>
+              <select
+                aria-label="signature algorithm"
+                className="task-verification-input"
+                value={signatureAlgo}
+                onChange={e => setSignatureAlgo(e.target.value)}
+                disabled={disabled}
+              >
+                <option value="sha256">sha256</option>
+                <option value="sha1">sha1</option>
+                <option value="sha512">sha512</option>
+              </select>
+            </label>
+            <label className="field">
+              <span>encoding</span>
+              <select
+                aria-label="signature encoding"
+                className="task-verification-input"
+                value={signatureEncoding}
+                onChange={e => setSignatureEncoding(e.target.value)}
+                disabled={disabled}
+              >
+                <option value="hex">hex</option>
+                <option value="base64">base64</option>
+              </select>
+            </label>
+            <TextInput label="signature prefix" value={signaturePrefix} setValue={setSignaturePrefix} disabled={disabled}/>
+            <TextInput label="signature separator" value={signatureSeparator} setValue={setSignatureSeparator} disabled={disabled}/>
+            <TextInput label="signature value split" value={signatureValueSplit} setValue={setSignatureValueSplit} disabled={disabled}/>
+            <TextInput label="timestamp header" value={timestampHeader} setValue={(v) => setTimestampHeader(v.toLowerCase())} disabled={disabled}/>
+            <label className="field">
+              <span>timestamp skew seconds</span>
+              <input
+                aria-label="timestamp skew seconds"
+                className="task-verification-input"
+                type="number"
+                min="0"
+                value={timestampSkewSecs}
+                onChange={e => setTimestampSkewSecs(e.target.value)}
+                disabled={disabled}
+              />
+            </label>
+            <TextInput label="idempotency header" value={idempotencyHeader} setValue={(v) => setIdempotencyHeader(v.toLowerCase())} disabled={disabled}/>
+          </div>
+          <label className="field">
+            <span>payload template</span>
+            <input
+              aria-label="payload template"
+              className="task-verification-input"
+              value={payloadTemplate}
+              onChange={e => setPayloadTemplate(e.target.value)}
+              placeholder="{{body}}"
+              disabled={disabled}
+              autoComplete="off"
+            />
+            <small className="muted">
+              Placeholders: {'{{body}}'}, {'{{timestamp}}'}, {'{{id}}'}, {'{{version}}'}.
+            </small>
+          </label>
+        </>
+      ) : null}
+      {scheme === 'bearer' ? (
+        <label className="field">
+          <span>path token</span>
+          <div className="task-secret-row">
+            <input
+              aria-label="path token"
+              className="task-verification-input"
+              value={bearerPathToken}
+              onChange={e => setBearerPathToken(e.target.value)}
+              disabled={disabled}
+              autoComplete="off"
+            />
+            <button type="button" className="btn btn-ghost btn-sm" onClick={rotateBearerPath}>
+              Rotate
+            </button>
+          </div>
+          <small className="muted">Caller sends Authorization: Bearer &lt;secret&gt;. No replay protection.</small>
+        </label>
+      ) : null}
+      {scheme === 'none' ? (
+        <label className="field check task-no-auth-warning">
+          <input
+            type="checkbox"
+            checked={danger}
+            onChange={e => setDanger(e.target.checked)}
+            disabled={disabled}
+          />
+          <span>I understand this URL accepts any payload, signed or not.</span>
+        </label>
+      ) : null}
+    </>
+  );
+}
+
+function TextInput({ label, value, setValue, disabled }) {
+  return (
+    <label className="field">
+      <span>{label}</span>
+      <input
+        aria-label={label}
+        className="task-verification-input"
+        value={value}
+        onChange={e => setValue(e.target.value)}
+        disabled={disabled}
+        autoComplete="off"
+      />
+    </label>
+  );
+}
+
+function VerifyWidget({
+  editing,
+  selectedLabel,
+  recordedDelivery,
+  setRecordedDelivery,
+  verifyRecorded,
+  verifyLastFailed,
+  verifyResult,
+  verifying,
+}) {
+  if (!editing) {
+    return (
+      <section className="task-verify-widget" aria-label="verify recorded delivery">
+        <div className="muted small">Save the webhook before testing recorded deliveries.</div>
+      </section>
+    );
+  }
+  return (
+    <section className="task-verify-widget" aria-label="verify recorded delivery">
+      <label className="field task-verify-input-cell">
+        <span>{`Paste a recorded delivery — copy from ${selectedLabel}'s dashboard recent deliveries`}</span>
+        <textarea
+          aria-label="recorded delivery"
+          className="textarea task-verification-input"
+          value={recordedDelivery}
+          onChange={e => setRecordedDelivery(e.target.value)}
+          rows={7}
+          placeholder={'webhook-id: msg_123\nwebhook-timestamp: 1700000000\n\n{"event":"ping"}'}
+          disabled={verifying}
+        />
+      </label>
+      <div className="task-verify-result-cell">
+        <div className="panel-actions">
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm"
+            onClick={verifyRecorded}
+            disabled={verifying || !recordedDelivery.trim()}
+          >
+            {verifying ? 'verifying…' : 'verify'}
+          </button>
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm"
+            onClick={verifyLastFailed}
+            disabled={verifying}
+          >
+            Use last failed delivery
+          </button>
+        </div>
+        {verifyResult ? <VerifyResult result={verifyResult}/> : (
+          <div className="muted small">Result appears here without writing a delivery row.</div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function ProviderUrlBlock({ value, disabled, vendorLabel, docsUrl }) {
+  return (
+    <div className={`task-provider-url-block ${disabled ? 'pending' : ''}`}>
+      <div className="muted small">Provider URL</div>
+      <UrlField value={value} disabled={disabled} label="provider url" copyLabel="copy provider url" disabledLabel="enter name"/>
+      <small className="muted">
+        {docsUrl ? (
+          <>Set this in {vendorLabel}'s dashboard at <a href={docsUrl} target="_blank" rel="noopener noreferrer">{docsUrl}</a>.</>
+        ) : (
+          'Set this in the provider dashboard.'
+        )}
+      </small>
+    </div>
+  );
+}
+
 function VerifyResult({ result }) {
   if (result?.ok) {
     const rendered = b64DecodeText(result.rendered_payload_b64 || '');
     return (
       <div className="success small">
-        <div>matched {result.matched_version || 'signature'}</div>
-        {rendered ? <pre className="audit-body">{rendered}</pre> : null}
+        <div>✓ matched {result.matched_version || 'signature'}</div>
+        {rendered ? <pre className="audit-body">{hexPreview(rendered)}</pre> : null}
       </div>
     );
   }
-  const reason = result?.type || result?.reason || 'verify failed';
-  return <div className="error small">{reason}</div>;
+  return (
+    <div className="error small">
+      <div>✕ {humanVerifyReason(result)}</div>
+      {result?.type ? <code>{result.type}</code> : null}
+    </div>
+  );
 }
 
-function UrlField({ value, disabled = false }) {
+function UrlField({
+  value,
+  disabled = false,
+  label = 'url',
+  copyLabel = 'copy',
+  disabledLabel = 'name first',
+}) {
   const [copied, setCopied] = React.useState(false);
   const copy = async (e) => {
     e.preventDefault();
     if (disabled) return;
     try {
-      await navigator.clipboard.writeText(value);
+      await navigator.clipboard.writeText(value || '');
       setCopied(true);
       setTimeout(() => setCopied(false), 1100);
     } catch { /* ignore */ }
   };
   return (
     <div className="task-url-field">
-      <input aria-label="url" value={value} readOnly className="mono-sm" aria-invalid={disabled ? 'true' : undefined}/>
+      <input aria-label={label} value={value || ''} readOnly className="mono-sm" aria-invalid={disabled ? 'true' : undefined}/>
       <button type="button" className="btn btn-ghost btn-sm" onClick={copy} disabled={disabled}>
-        {disabled ? 'name first' : (copied ? 'copied!' : 'copy')}
+        {disabled ? disabledLabel : (copied ? 'copied!' : copyLabel)}
       </button>
     </div>
   );

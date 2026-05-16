@@ -56,6 +56,7 @@ fn row_to_webhook(r: sqlx::postgres::PgRow) -> Result<WebhookRow, StoreError> {
         payload_template: r.try_get("payload_template").map_err(map_sqlx)?,
         idempotency_header: r.try_get("idempotency_header").map_err(map_sqlx)?,
         bearer_path_token: r.try_get("bearer_path_token").map_err(map_sqlx)?,
+        preset_id: r.try_get("preset_id").map_err(map_sqlx)?,
         secret_name: r.try_get("secret_name").map_err(map_sqlx)?,
         enabled: r.try_get::<i64, _>("enabled").map_err(map_sqlx)? != 0,
         created_at: r.try_get("created_at").map_err(map_sqlx)?,
@@ -71,8 +72,8 @@ impl WebhookStore for PgWebhookStore {
                 (instance_id, name, description, auth_scheme, signature_header, secret_name, \
                  enabled, created_at, updated_at, verifier_mode, signature_algo, signature_encoding, \
                  signature_prefix, signature_separator, signature_value_split, timestamp_header, \
-                 timestamp_skew_secs, payload_template, idempotency_header, bearer_path_token) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20) \
+                 timestamp_skew_secs, payload_template, idempotency_header, bearer_path_token, preset_id) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21) \
              ON CONFLICT(instance_id, name) DO UPDATE SET \
                 description = excluded.description, \
                 auth_scheme = excluded.auth_scheme, \
@@ -90,7 +91,8 @@ impl WebhookStore for PgWebhookStore {
                 timestamp_skew_secs = excluded.timestamp_skew_secs, \
                 payload_template = excluded.payload_template, \
                 idempotency_header = excluded.idempotency_header, \
-                bearer_path_token = excluded.bearer_path_token",
+                bearer_path_token = excluded.bearer_path_token, \
+                preset_id = excluded.preset_id",
         )
         .bind(&row.instance_id)
         .bind(&row.name)
@@ -112,6 +114,7 @@ impl WebhookStore for PgWebhookStore {
         .bind(&row.payload_template)
         .bind(&row.idempotency_header)
         .bind(&row.bearer_path_token)
+        .bind(&row.preset_id)
         .execute(&self.pool)
         .await
         .map_err(map_sqlx)?;
@@ -123,7 +126,7 @@ impl WebhookStore for PgWebhookStore {
             "SELECT instance_id, name, description, auth_scheme, signature_header, secret_name, \
                     enabled, created_at, updated_at, verifier_mode, signature_algo, signature_encoding, \
                     signature_prefix, signature_separator, signature_value_split, timestamp_header, \
-                    timestamp_skew_secs, payload_template, idempotency_header, bearer_path_token \
+                    timestamp_skew_secs, payload_template, idempotency_header, bearer_path_token, preset_id \
              FROM instance_webhooks \
              WHERE instance_id = $1 AND name = $2",
         )
@@ -143,7 +146,7 @@ impl WebhookStore for PgWebhookStore {
             "SELECT instance_id, name, description, auth_scheme, signature_header, secret_name, \
                     enabled, created_at, updated_at, verifier_mode, signature_algo, signature_encoding, \
                     signature_prefix, signature_separator, signature_value_split, timestamp_header, \
-                    timestamp_skew_secs, payload_template, idempotency_header, bearer_path_token \
+                    timestamp_skew_secs, payload_template, idempotency_header, bearer_path_token, preset_id \
              FROM instance_webhooks \
              WHERE instance_id = $1 \
              ORDER BY name",
@@ -221,6 +224,7 @@ impl WebhookStore for PgWebhookStore {
             payload_template: existing.payload_template,
             idempotency_header: existing.idempotency_header,
             bearer_path_token: existing.bearer_path_token,
+            preset_id: existing.preset_id,
             secret_name: match secret_name {
                 Some(v) => v.map(str::to_owned),
                 None => existing.secret_name,

@@ -624,6 +624,204 @@ async fn post_verify_only_returns_structured_verify_error() {
 }
 
 #[tokio::test]
+async fn webhook_with_preset_id_rejects_mismatched_verifier_config_on_save() {
+    let stack = build_stack("alice-webhook-preset-mismatch").await;
+    let client = reqwest::Client::new();
+    let user_id = create_user(
+        &client,
+        &stack.base,
+        "alice-webhook-preset-mismatch-user",
+        true,
+    )
+    .await;
+    let token = mint_api_key(&client, &stack.base, &user_id).await;
+    let instance_id = create_live_instance(&client, &stack.base, &token).await;
+
+    let r = client
+        .post(format!(
+            "{}/v1/instances/{}/webhooks",
+            stack.base, instance_id
+        ))
+        .bearer_auth(&token)
+        .json(&json!({
+            "name": "half-stripe",
+            "description": "bad preset",
+            "preset_id": "stripe",
+            "auth_scheme": "hmac_sha256",
+            "verifier_mode": "hmac_v2",
+            "signature_header": "x-hub-signature-256",
+            "signature_algo": "sha256",
+            "signature_encoding": "hex",
+            "signature_prefix": "sha256=",
+            "signature_separator": "",
+            "signature_value_split": "=",
+            "timestamp_header": "",
+            "timestamp_skew_secs": 300,
+            "payload_template": "{{body}}",
+            "idempotency_header": "x-github-delivery",
+            "secret": "top-secret",
+            "enabled": true
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 400);
+    let body = r.text().await.unwrap();
+    assert!(
+        body.contains("preset_id") && body.contains("stripe") && body.contains("verifier config"),
+        "bad preset response should name the mismatch, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn webhook_preset_id_null_when_custom() {
+    let stack = build_stack("alice-webhook-custom-preset").await;
+    let client = reqwest::Client::new();
+    let user_id = create_user(
+        &client,
+        &stack.base,
+        "alice-webhook-custom-preset-user",
+        true,
+    )
+    .await;
+    let token = mint_api_key(&client, &stack.base, &user_id).await;
+    let instance_id = create_live_instance(&client, &stack.base, &token).await;
+
+    let r = client
+        .post(format!(
+            "{}/v1/instances/{}/webhooks",
+            stack.base, instance_id
+        ))
+        .bearer_auth(&token)
+        .json(&json!({
+            "name": "custom-standard",
+            "description": "custom even if matching standard",
+            "auth_scheme": "hmac_sha256",
+            "verifier_mode": "hmac_v2",
+            "signature_header": "webhook-signature",
+            "signature_algo": "sha256",
+            "signature_encoding": "base64",
+            "signature_prefix": "v1,",
+            "signature_separator": " ",
+            "signature_value_split": ",",
+            "timestamp_header": "webhook-timestamp",
+            "timestamp_skew_secs": 300,
+            "payload_template": "{{id}}.{{timestamp}}.{{body}}",
+            "idempotency_header": "webhook-id",
+            "secret": "top-secret",
+            "enabled": true
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 201);
+    let body: serde_json::Value = r.json().await.unwrap();
+    assert!(body["preset_id"].is_null());
+}
+
+#[tokio::test]
+async fn get_webhook_presets_returns_stable_vendor_ids() {
+    let stack = build_stack("alice-webhook-presets").await;
+    let client = reqwest::Client::new();
+    let user_id = create_user(&client, &stack.base, "alice-webhook-presets-user", true).await;
+    let token = mint_api_key(&client, &stack.base, &user_id).await;
+
+    let r = client
+        .get(format!("{}/v1/webhook-presets", stack.base))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let body: serde_json::Value = r.json().await.unwrap();
+    let ids: Vec<&str> = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        ids,
+        vec![
+            "standard-webhooks",
+            "github",
+            "stripe",
+            "slack",
+            "shopify",
+            "agentmail",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn verify_only_from_last_failed_returns_404_when_no_failed_deliveries_exist() {
+    let stack = build_stack("alice-webhook-last-failed-empty").await;
+    let client = reqwest::Client::new();
+    let user_id = create_user(
+        &client,
+        &stack.base,
+        "alice-webhook-last-failed-empty-user",
+        true,
+    )
+    .await;
+    let token = mint_api_key(&client, &stack.base, &user_id).await;
+    let instance_id = create_live_instance(&client, &stack.base, &token).await;
+    create_standard_webhook(&client, &stack.base, &token, &instance_id, "standard").await;
+
+    let r = client
+        .post(format!(
+            "{}/v1/instances/{}/webhooks/standard/verify-only?from=last-failed",
+            stack.base, instance_id
+        ))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 404);
+}
+
+#[tokio::test]
+async fn verify_only_from_last_failed_replays_most_recent_failed_delivery() {
+    let stack = build_stack("alice-webhook-last-failed").await;
+    let client = reqwest::Client::new();
+    let user_id = create_user(&client, &stack.base, "alice-webhook-last-failed-user", true).await;
+    let token = mint_api_key(&client, &stack.base, &user_id).await;
+    let instance_id = create_live_instance(&client, &stack.base, &token).await;
+    create_standard_webhook(&client, &stack.base, &token, &instance_id, "standard").await;
+
+    let r = client
+        .post(format!("{}/webhooks/{}/standard", stack.base, instance_id))
+        .header("webhook-id", "msg_bad")
+        .header("webhook-timestamp", "1700000000")
+        .header(
+            "webhook-signature",
+            "v1,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        )
+        .body(
+            include_bytes!("../../core/tests/fixtures/webhooks/standard/request.txt")
+                .as_slice()
+                .to_vec(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 401);
+
+    let replay = client
+        .post(format!(
+            "{}/v1/instances/{}/webhooks/standard/verify-only?from=last-failed",
+            stack.base, instance_id
+        ))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(replay.status(), 200);
+    let body: serde_json::Value = replay.json().await.unwrap();
+    assert_eq!(body["type"], "all_signatures_mismatched");
+}
+
+#[tokio::test]
 async fn post_verify_only_does_not_write_delivery_row() {
     let stack = build_stack("alice-webhook-verify-row").await;
     let client = reqwest::Client::new();

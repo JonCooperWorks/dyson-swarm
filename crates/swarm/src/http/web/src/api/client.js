@@ -268,6 +268,10 @@ export class SwarmClient {
   // and the secret lives in owner-sealed infrastructure storage that is
   // not passed into the agent runtime.
 
+  listWebhookPresets() {
+    return this._json('/v1/webhook-presets', { headers: { Accept: 'application/json' } });
+  }
+
   listWebhooks(instanceId) {
     return this._json(
       `/v1/instances/${encodeURIComponent(instanceId)}/webhooks`,
@@ -332,13 +336,14 @@ export class SwarmClient {
     );
   }
 
-  verifyWebhookDelivery(instanceId, name, body) {
+  verifyWebhookDelivery(instanceId, name, body, { fromLastFailed = false } = {}) {
+    const qs = fromLastFailed ? '?from=last-failed' : '';
     return this._json(
-      `/v1/instances/${encodeURIComponent(instanceId)}/webhooks/${encodeURIComponent(name)}/verify-only`,
+      `/v1/instances/${encodeURIComponent(instanceId)}/webhooks/${encodeURIComponent(name)}/verify-only${qs}`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
+        body: fromLastFailed ? undefined : JSON.stringify(body),
       },
     );
   }

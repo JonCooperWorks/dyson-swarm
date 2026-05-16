@@ -68,24 +68,112 @@ describe('TasksListPage', () => {
 });
 
 describe('TaskFormPage', () => {
-  test.each([
-    ['Standard Webhooks', 'webhook-signature', 'hmac_v2'],
-    ['GitHub', 'x-hub-signature-256', 'hmac_v2'],
-    ['Stripe', 'stripe-signature', 'hmac_v2'],
-    ['Slack', 'x-slack-signature', 'hmac_v2'],
-    ['Shopify', 'x-shopify-hmac-sha256', 'hmac_v2'],
-    ['AgentMail', 'svix-signature', 'hmac_v2'],
-  ])('preset button %s populates the verifier form', async (label, header, mode) => {
+  test('vendor tabs hide auth-scheme radios entirely', () => {
     render(
       <ApiProvider client={{}} auth={{ mode: 'none' }}>
         <TaskFormPage instanceId="inst-a" taskName={null} embedded/>
       </ApiProvider>,
     );
 
-    fireEvent.click(screen.getByRole('button', { name: label }));
+    fireEvent.click(screen.getByRole('tab', { name: 'Stripe' }));
 
-    expect(screen.getByLabelText('verifier mode')).toHaveValue(mode);
-    expect(screen.getByLabelText('signature header')).toHaveValue(header);
+    expect(screen.queryByRole('radio', { name: /HMAC-SHA256/i })).toBeNull();
+    expect(screen.queryByRole('radio', { name: /Bearer/i })).toBeNull();
+    expect(screen.queryByRole('radio', { name: /no auth/i })).toBeNull();
+  });
+
+  test('Custom tab shows all three auth-scheme radios', () => {
+    render(
+      <ApiProvider client={{}} auth={{ mode: 'none' }}>
+        <TaskFormPage instanceId="inst-a" taskName={null} embedded/>
+      </ApiProvider>,
+    );
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Custom' }));
+
+    expect(screen.getByRole('radio', { name: /HMAC-SHA256/i })).toBeInTheDocument();
+    expect(screen.getByRole('radio', { name: /Bearer/i })).toBeInTheDocument();
+    expect(screen.getByRole('radio', { name: /no auth/i })).toBeInTheDocument();
+  });
+
+  test('selecting Stripe tab hides Bearer and no-auth modes from the form state', async () => {
+    const createWebhook = vi.fn().mockResolvedValue({
+      name: 'stripe',
+      description: '',
+      preset_id: 'stripe',
+      auth_scheme: 'hmac_sha256',
+      signature_header: 'stripe-signature',
+      enabled: true,
+      path: '/webhooks/inst-a/stripe',
+    });
+
+    render(
+      <ApiProvider client={{ createWebhook }} auth={{ mode: 'none' }}>
+        <TaskFormPage instanceId="inst-a" taskName={null} embedded/>
+      </ApiProvider>,
+    );
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Stripe' }));
+    expect(screen.queryByRole('radio', { name: /Bearer/i })).toBeNull();
+
+    fireEvent.change(screen.getByLabelText('name'), {
+      target: { value: 'stripe' },
+    });
+    fireEvent.change(screen.getByLabelText(/shared secret/i), {
+      target: { value: 'stripe-secret-with-enough-length' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'create webhook' }));
+
+    await waitFor(() => expect(createWebhook).toHaveBeenCalledTimes(1));
+    expect(createWebhook.mock.calls[0][1]).toMatchObject({
+      preset_id: 'stripe',
+      auth_scheme: 'hmac_sha256',
+      verifier_mode: 'hmac_v2',
+      signature_header: 'stripe-signature',
+    });
+    expect(createWebhook.mock.calls[0][1]).not.toMatchObject({
+      verifier_mode: 'bearer_v2',
+    });
+  });
+
+  test('vendor tab renders read-only summary card with algo, encoding, signature header, payload template', () => {
+    render(
+      <ApiProvider client={{}} auth={{ mode: 'none' }}>
+        <TaskFormPage instanceId="inst-a" taskName={null} embedded/>
+      </ApiProvider>,
+    );
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Stripe' }));
+
+    expect(screen.getByText('Algorithm')).toBeInTheDocument();
+    expect(screen.getByText('sha256')).toBeInTheDocument();
+    expect(screen.getByText('Encoding')).toBeInTheDocument();
+    expect(screen.getByText('hex')).toBeInTheDocument();
+    expect(screen.getByText('Signature header')).toBeInTheDocument();
+    expect(screen.getByText('stripe-signature')).toBeInTheDocument();
+    expect(screen.getByText('Payload signed')).toBeInTheDocument();
+    expect(screen.getByText('{{timestamp}}.{{body}}')).toBeInTheDocument();
+  });
+
+  test('vendor tab Generate button populates the secret field with 32 bytes of base64url', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    });
+
+    render(
+      <ApiProvider client={{}} auth={{ mode: 'none' }}>
+        <TaskFormPage instanceId="inst-a" taskName={null} embedded/>
+      </ApiProvider>,
+    );
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Standard Webhooks' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Generate' }));
+
+    const secret = screen.getByLabelText(/shared secret/i);
+    expect(secret.value).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(secret.value));
   });
 
   test('Verify widget renders structured error reason inline', async () => {
@@ -113,12 +201,105 @@ describe('TaskFormPage', () => {
 
     await screen.findByDisplayValue('standard');
     fireEvent.change(screen.getByLabelText('recorded delivery'), {
-      target: { value: 'webhook-id: msg_123\n\n{"event":"ping"}' },
+      target: { value: JSON.stringify({ headers: { 'webhook-id': 'msg_123' }, body: '{"event":"ping"}' }) },
     });
     fireEvent.click(screen.getByRole('button', { name: 'verify' }));
 
     await waitFor(() => expect(verifyWebhookDelivery).toHaveBeenCalledTimes(1));
-    expect(await screen.findByText(/all_signatures_mismatched/)).toBeInTheDocument();
+    expect(verifyWebhookDelivery.mock.calls[0][2]).toMatchObject({
+      headers: { 'webhook-id': 'msg_123' },
+      body_b64: btoa('{"event":"ping"}'),
+    });
+    expect(await screen.findByText(/signatures did not match/i)).toBeInTheDocument();
+  });
+
+  test('Use last failed delivery button calls verify-only from last-failed', async () => {
+    const verifyWebhookDelivery = vi.fn().mockResolvedValue({
+      type: 'all_signatures_mismatched',
+    });
+    const getWebhook = vi.fn().mockResolvedValue({
+      name: 'standard',
+      description: '',
+      preset_id: 'standard-webhooks',
+      auth_scheme: 'hmac_sha256',
+      verifier_mode: 'hmac_v2',
+      signature_header: 'webhook-signature',
+      enabled: true,
+      has_secret: true,
+    });
+
+    render(
+      <ApiProvider
+        client={{ getWebhook, verifyWebhookDelivery, listWebhookDeliveries: vi.fn().mockResolvedValue([]) }}
+        auth={{ mode: 'none' }}
+      >
+        <TaskFormPage instanceId="inst-a" taskName="standard" embedded/>
+      </ApiProvider>,
+    );
+
+    await screen.findByDisplayValue('standard');
+    fireEvent.click(screen.getByRole('button', { name: /use last failed delivery/i }));
+
+    await waitFor(() => expect(verifyWebhookDelivery).toHaveBeenCalledWith(
+      'inst-a',
+      'standard',
+      null,
+      { fromLastFailed: true },
+    ));
+  });
+
+  test('tab row uses role=tab and arrow-key navigation works', () => {
+    render(
+      <ApiProvider client={{}} auth={{ mode: 'none' }}>
+        <TaskFormPage instanceId="inst-a" taskName={null} embedded/>
+      </ApiProvider>,
+    );
+
+    const standard = screen.getByRole('tab', { name: 'Standard Webhooks' });
+    standard.focus();
+    fireEvent.keyDown(standard, { key: 'ArrowRight' });
+    expect(screen.getByRole('tab', { name: 'GitHub' })).toHaveFocus();
+    fireEvent.keyDown(screen.getByRole('tab', { name: 'GitHub' }), { key: 'ArrowLeft' });
+    expect(standard).toHaveFocus();
+  });
+
+  test('Replace flow on the secret field never echoes back from the server', async () => {
+    const getWebhook = vi.fn().mockResolvedValue({
+      name: 'stripe',
+      description: '',
+      preset_id: 'stripe',
+      auth_scheme: 'hmac_sha256',
+      verifier_mode: 'hmac_v2',
+      signature_header: 'stripe-signature',
+      signature_algo: 'sha256',
+      signature_encoding: 'hex',
+      signature_prefix: 'v1=',
+      signature_separator: ',',
+      signature_value_split: '=',
+      timestamp_header: 'stripe-signature',
+      timestamp_skew_secs: 300,
+      payload_template: '{{timestamp}}.{{body}}',
+      enabled: true,
+      has_secret: true,
+      secret: 'server-must-never-send-this',
+    });
+
+    render(
+      <ApiProvider
+        client={{ getWebhook, listWebhookDeliveries: vi.fn().mockResolvedValue([]) }}
+        auth={{ mode: 'none' }}
+      >
+        <TaskFormPage instanceId="inst-a" taskName="stripe" embedded/>
+      </ApiProvider>,
+    );
+
+    await screen.findByDisplayValue('stripe');
+    expect(screen.queryByDisplayValue('server-must-never-send-this')).toBeNull();
+    expect(screen.getByText('••••••••')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Replace' }));
+    const secret = screen.getByLabelText(/shared secret/i);
+    expect(secret).toHaveValue('');
   });
 
   test('Verify widget renders success with rendered payload preview', async () => {
@@ -153,7 +334,7 @@ describe('TaskFormPage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'verify' }));
 
     expect(await screen.findByText(/matched v1/)).toBeInTheDocument();
-    expect(screen.getByText(/msg_123\.1700000000/)).toBeInTheDocument();
+    expect(screen.getByText(/6d73675f313233/)).toBeInTheDocument();
   });
 
   test('starts setup with the provider URL visible before create', () => {
@@ -177,7 +358,7 @@ describe('TaskFormPage', () => {
     expect(screen.getByLabelText('url')).toHaveValue(
       `${window.location.origin}/webhooks/inst-a/mail-research`,
     );
-    expect(screen.getByRole('button', { name: 'copy' })).toBeEnabled();
+    expect(screen.getAllByRole('button', { name: 'copy' })[0]).toBeEnabled();
   });
 
   test('renders task instructions as markdown on the detail form', async () => {
@@ -228,8 +409,9 @@ describe('TaskFormPage', () => {
       target: { value: 'github' },
     });
     fireEvent.change(screen.getByPlaceholderText('paste or generate a strong random string'), {
-      target: { value: 'super-secret' },
+      target: { value: 'super-secret-with-enough-length' },
     });
+    fireEvent.click(screen.getByRole('tab', { name: 'Custom' }));
     fireEvent.change(screen.getByLabelText('signature header'), {
       target: { value: 'X-Hub-Signature-256' },
     });
@@ -240,7 +422,7 @@ describe('TaskFormPage', () => {
       name: 'github',
       auth_scheme: 'hmac_sha256',
       signature_header: 'x-hub-signature-256',
-      secret: 'super-secret',
+      secret: 'super-secret-with-enough-length',
     });
   });
 

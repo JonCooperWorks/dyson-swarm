@@ -767,6 +767,7 @@ pub struct WebhookRow {
     pub payload_template: Option<String>,
     pub idempotency_header: Option<String>,
     pub bearer_path_token: Option<String>,
+    pub preset_id: Option<String>,
     pub secret_name: Option<String>,
     pub enabled: bool,
     pub created_at: i64,

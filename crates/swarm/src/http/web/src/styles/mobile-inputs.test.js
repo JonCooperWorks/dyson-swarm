@@ -10,6 +10,7 @@ describe('mobile form controls', () => {
     expect(layoutCss).toMatch(/@media \(max-width: 760px\)[\s\S]*input:not\(\[type\]\)[\s\S]*textarea\s*\{[\s\S]*font-size:\s*16px\s*!important/);
     expect(mobileBlock(layoutCss)).not.toContain(':where(');
     expect(panelsCss).toMatch(/@media \(max-width: 760px\)[\s\S]*\.mcp-json-textarea[\s\S]*font-size:\s*16px\s*!important/);
+    expect(panelsCss).toMatch(/@media \(max-width: 760px\)[\s\S]*\.task-verification-input[\s\S]*font-size:\s*16px\s*!important/);
   });
 });
 

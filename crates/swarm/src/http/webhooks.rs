@@ -31,10 +31,12 @@ use crate::traits::{AdminAuditEntry, DeliveryRow, WebhookAuthScheme, WebhookRow}
 use crate::webhooks::{
     DEFAULT_DELIVERY_LIMIT, DispatchCtx, MAX_WEBHOOK_BODY, SignatureAlgorithm, SignatureEncoding,
     WebhookError, WebhookSpec, WebhookVerifierConfig, WebhookVerifierMode, validate_webhook_name,
+    webhook_presets,
 };
 
 pub fn router(state: AppState) -> Router {
     Router::new()
+        .route("/v1/webhook-presets", get(list_webhook_presets))
         .route(
             "/v1/instances/:id/webhooks",
             get(list_webhooks).post(create_webhook),
@@ -99,6 +101,7 @@ pub struct WebhookView {
     pub payload_template: Option<String>,
     pub idempotency_header: Option<String>,
     pub bearer_path_token: Option<String>,
+    pub preset_id: Option<String>,
     pub enabled: bool,
     pub created_at: i64,
     pub updated_at: i64,
@@ -136,6 +139,7 @@ impl WebhookView {
             payload_template: r.payload_template,
             idempotency_header: r.idempotency_header,
             bearer_path_token: r.bearer_path_token,
+            preset_id: r.preset_id,
             enabled: r.enabled,
             created_at: r.created_at,
             updated_at: r.updated_at,
@@ -317,6 +321,8 @@ pub struct CreateWebhookBody {
     pub name: String,
     #[serde(default)]
     pub description: String,
+    #[serde(default)]
+    pub preset_id: Option<String>,
     pub auth_scheme: String,
     #[serde(default)]
     pub signature_header: Option<String>,
@@ -353,6 +359,8 @@ pub struct CreateWebhookBody {
 pub struct UpdateWebhookBody {
     #[serde(default)]
     pub description: Option<String>,
+    #[serde(default)]
+    pub preset_id: Option<Option<String>>,
     #[serde(default)]
     pub auth_scheme: Option<String>,
     #[serde(default)]
@@ -479,6 +487,21 @@ fn err_to_status(e: &WebhookError) -> StatusCode {
     }
 }
 
+fn error_response(status: StatusCode, detail: impl Into<String>) -> Response {
+    (status, Json(serde_json::json!({ "error": detail.into() }))).into_response()
+}
+
+fn webhook_error_response(e: WebhookError) -> Response {
+    match &e {
+        WebhookError::BadRequest(m) => error_response(StatusCode::BAD_REQUEST, m.clone()),
+        _ => err_to_status(&e).into_response(),
+    }
+}
+
+async fn list_webhook_presets() -> Json<Vec<crate::webhooks::WebhookVerifierPreset>> {
+    Json(webhook_presets())
+}
+
 async fn list_webhooks(
     State(state): State<AppState>,
     Extension(caller): Extension<CallerIdentity>,
@@ -510,13 +533,16 @@ async fn create_webhook(
     Extension(caller): Extension<CallerIdentity>,
     Path(id): Path<String>,
     Json(body): Json<CreateWebhookBody>,
-) -> Result<(StatusCode, Json<WebhookView>), StatusCode> {
+) -> Response {
     if let Err(m) = validate_webhook_name(&body.name) {
         tracing::debug!(reason = %m, "webhook create: invalid name");
-        return Err(StatusCode::BAD_REQUEST);
+        return error_response(StatusCode::BAD_REQUEST, m);
     }
-    let scheme = parse_scheme(&body.auth_scheme)?;
-    let verifier = build_verifier_config(
+    let scheme = match parse_scheme(&body.auth_scheme) {
+        Ok(v) => v,
+        Err(status) => return status.into_response(),
+    };
+    let verifier = match build_verifier_config(
         body.verifier_mode.as_deref(),
         body.signature_header.clone(),
         body.signature_algo.as_deref(),
@@ -529,7 +555,10 @@ async fn create_webhook(
         body.payload_template.clone(),
         body.idempotency_header.clone(),
         body.bearer_path_token.clone(),
-    )?;
+    ) {
+        Ok(v) => v,
+        Err(status) => return status.into_response(),
+    };
     let secret_required = verifier.as_ref().is_none_or(|v| {
         !matches!(
             v.mode,
@@ -537,7 +566,10 @@ async fn create_webhook(
         )
     }) && scheme != WebhookAuthScheme::None;
     if secret_required && body.secret.as_deref().is_none_or(str::is_empty) {
-        return Err(StatusCode::BAD_REQUEST);
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "auth scheme requires a signing secret",
+        );
     }
     // 409 when a row with this name already exists — POST is create-only;
     // PATCH is the update verb.  Lets the SPA distinguish "name taken"
@@ -548,24 +580,23 @@ async fn create_webhook(
         .await
         .is_ok()
     {
-        return Err(StatusCode::CONFLICT);
+        return StatusCode::CONFLICT.into_response();
     }
     let spec = WebhookSpec {
         instance_id: id,
         name: body.name,
         description: body.description,
         auth_scheme: scheme,
+        preset_id: body.preset_id,
         verifier,
         signature_header: body.signature_header,
         secret_plaintext: body.secret.filter(|s| !s.is_empty()),
         enabled: body.enabled,
     };
-    let row = state
-        .webhooks
-        .put(&caller.user_id, spec)
-        .await
-        .map_err(|e| err_to_status(&e))?;
-    Ok((StatusCode::CREATED, Json(WebhookView::from_row(row))))
+    match state.webhooks.put(&caller.user_id, spec).await {
+        Ok(row) => (StatusCode::CREATED, Json(WebhookView::from_row(row))).into_response(),
+        Err(e) => webhook_error_response(e),
+    }
 }
 
 async fn update_webhook(
@@ -573,17 +604,19 @@ async fn update_webhook(
     Extension(caller): Extension<CallerIdentity>,
     Path((id, name)): Path<(String, String)>,
     Json(body): Json<UpdateWebhookBody>,
-) -> Result<Json<WebhookView>, StatusCode> {
-    let existing = state
-        .webhooks
-        .get(&caller.user_id, &id, &name)
-        .await
-        .map_err(|e| err_to_status(&e))?;
+) -> Response {
+    let existing = match state.webhooks.get(&caller.user_id, &id, &name).await {
+        Ok(row) => row,
+        Err(e) => return webhook_error_response(e),
+    };
     let scheme = match body.auth_scheme.as_deref() {
-        Some(s) => parse_scheme(s)?,
+        Some(s) => match parse_scheme(s) {
+            Ok(v) => v,
+            Err(status) => return status.into_response(),
+        },
         None => existing.auth_scheme,
     };
-    let verifier = build_verifier_config(
+    let verifier = match build_verifier_config(
         body.verifier_mode.as_deref(),
         body.signature_header.clone(),
         body.signature_algo.as_deref(),
@@ -596,7 +629,10 @@ async fn update_webhook(
         body.payload_template.clone(),
         body.idempotency_header.clone(),
         body.bearer_path_token.clone(),
-    )?;
+    ) {
+        Ok(v) => v,
+        Err(status) => return status.into_response(),
+    };
     let secret_plaintext = body.secret.filter(|s| !s.is_empty());
     if scheme != WebhookAuthScheme::None
         && existing.auth_scheme != scheme
@@ -610,24 +646,30 @@ async fn update_webhook(
     {
         // Switching scheme requires a fresh key (the old one was sized
         // for a different verb — bearer tokens vs HMAC keys, etc.).
-        return Err(StatusCode::BAD_REQUEST);
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "switching auth scheme requires a fresh signing secret",
+        );
     }
+    let preset_id = match body.preset_id {
+        Some(v) => v,
+        None => existing.preset_id.clone(),
+    };
     let spec = WebhookSpec {
         instance_id: id,
         name: existing.name.clone(),
         description: body.description.unwrap_or(existing.description.clone()),
         auth_scheme: scheme,
+        preset_id,
         verifier,
         signature_header: body.signature_header,
         secret_plaintext,
         enabled: body.enabled.unwrap_or(existing.enabled),
     };
-    let row = state
-        .webhooks
-        .put(&caller.user_id, spec)
-        .await
-        .map_err(|e| err_to_status(&e))?;
-    Ok(Json(WebhookView::from_row(row)))
+    match state.webhooks.put(&caller.user_id, spec).await {
+        Ok(row) => Json(WebhookView::from_row(row)).into_response(),
+        Err(e) => webhook_error_response(e),
+    }
 }
 
 async fn delete_webhook(
@@ -668,25 +710,35 @@ async fn verify_only(
     State(state): State<AppState>,
     Extension(caller): Extension<CallerIdentity>,
     Path((id, name)): Path<(String, String)>,
-    Json(body): Json<VerifyOnlyBody>,
+    uri: Uri,
+    body: Bytes,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let raw_body = B64
-        .decode(body.body_b64.as_bytes())
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
-    let headers = json_headers_to_pairs(&body.headers)?;
-    match state
-        .webhooks
-        .verify_only(
-            &caller.user_id,
-            &id,
-            &name,
-            &headers,
-            header_value(&headers, "authorization"),
-            None,
-            &raw_body,
-        )
-        .await
-    {
+    let result = if query_param(uri.query(), "from").as_deref() == Some("last-failed") {
+        state
+            .webhooks
+            .verify_only_last_failed(&caller.user_id, &id, &name)
+            .await
+    } else {
+        let body: VerifyOnlyBody =
+            serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
+        let raw_body = B64
+            .decode(body.body_b64.as_bytes())
+            .map_err(|_| StatusCode::BAD_REQUEST)?;
+        let headers = json_headers_to_pairs(&body.headers)?;
+        state
+            .webhooks
+            .verify_only(
+                &caller.user_id,
+                &id,
+                &name,
+                &headers,
+                header_value(&headers, "authorization"),
+                None,
+                &raw_body,
+            )
+            .await
+    };
+    match result {
         Ok(outcome) => Ok(Json(serde_json::json!({
             "ok": true,
             "rendered_payload_b64": outcome.rendered_payload.as_deref().map(|b| B64.encode(b)),
@@ -697,6 +749,14 @@ async fn verify_only(
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR),
         Err(e) => Err(err_to_status(&e)),
     }
+}
+
+fn query_param(query: Option<&str>, key: &str) -> Option<String> {
+    query?
+        .split('&')
+        .filter_map(|p| p.split_once('='))
+        .find(|(k, _)| *k == key)
+        .map(|(_, v)| v.to_owned())
 }
 
 async fn replay_delivery(

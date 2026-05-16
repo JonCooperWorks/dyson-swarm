@@ -295,8 +295,119 @@ impl VerifyError {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct WebhookVerifierPreset {
-    pub name: String,
+    pub id: String,
+    pub label: String,
+    pub docs_url: String,
     pub verifier: WebhookVerifierConfig,
+}
+
+fn hmac_preset(
+    id: &str,
+    label: &str,
+    docs_url: &str,
+    signature_header: &str,
+    encoding: SignatureEncoding,
+    signature_prefix: Option<&str>,
+    signature_separator: Option<&str>,
+    signature_value_split: Option<&str>,
+    timestamp_header: Option<&str>,
+    payload_template: &str,
+    idempotency_header: Option<&str>,
+) -> WebhookVerifierPreset {
+    WebhookVerifierPreset {
+        id: id.to_owned(),
+        label: label.to_owned(),
+        docs_url: docs_url.to_owned(),
+        verifier: WebhookVerifierConfig {
+            mode: WebhookVerifierMode::HmacV2,
+            signature_header: signature_header.to_owned(),
+            signature_algo: Some(SignatureAlgorithm::Sha256),
+            signature_encoding: Some(encoding),
+            signature_prefix: signature_prefix.map(str::to_owned),
+            signature_separator: signature_separator.map(str::to_owned),
+            signature_value_split: signature_value_split.map(str::to_owned),
+            timestamp_header: timestamp_header.map(str::to_owned),
+            timestamp_skew_secs: Some(300),
+            payload_template: Some(payload_template.to_owned()),
+            idempotency_header: idempotency_header.map(str::to_owned),
+            bearer_path_token: None,
+        },
+    }
+}
+
+pub fn webhook_presets() -> Vec<WebhookVerifierPreset> {
+    vec![
+        hmac_preset(
+            "standard-webhooks",
+            "Standard Webhooks",
+            "https://github.com/standard-webhooks/standard-webhooks/blob/main/spec/standard-webhooks.md",
+            "webhook-signature",
+            SignatureEncoding::Base64,
+            Some("v1,"),
+            Some(" "),
+            Some(","),
+            Some("webhook-timestamp"),
+            "{{id}}.{{timestamp}}.{{body}}",
+            Some("webhook-id"),
+        ),
+        hmac_preset(
+            "github",
+            "GitHub",
+            "https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries",
+            "x-hub-signature-256",
+            SignatureEncoding::Hex,
+            Some("sha256="),
+            None,
+            Some("="),
+            None,
+            "{{body}}",
+            Some("x-github-delivery"),
+        ),
+        hmac_preset(
+            "stripe",
+            "Stripe",
+            "https://docs.stripe.com/webhooks/signature",
+            "stripe-signature",
+            SignatureEncoding::Hex,
+            Some("v1="),
+            Some(","),
+            Some("="),
+            Some("stripe-signature"),
+            "{{timestamp}}.{{body}}",
+            None,
+        ),
+        hmac_preset(
+            "slack",
+            "Slack",
+            "https://api.slack.com/authentication/verifying-requests-from-slack",
+            "x-slack-signature",
+            SignatureEncoding::Hex,
+            Some("v0="),
+            None,
+            Some("="),
+            Some("x-slack-request-timestamp"),
+            "v0:{{timestamp}}:{{body}}",
+            None,
+        ),
+        hmac_preset(
+            "shopify",
+            "Shopify",
+            "https://shopify.dev/docs/apps/build/webhooks/subscribe/https#step-2-validate-the-origin-of-your-webhook-to-ensure-its-coming-from-shopify",
+            "x-shopify-hmac-sha256",
+            SignatureEncoding::Base64,
+            None,
+            None,
+            None,
+            None,
+            "{{body}}",
+            Some("x-shopify-webhook-id"),
+        ),
+        agentmail_preset(),
+    ]
+}
+
+pub fn webhook_preset(id: &str) -> Option<WebhookVerifierPreset> {
+    webhook_presets().into_iter().find(|p| p.id == id)
 }
 
 pub fn agentmail_preset() -> WebhookVerifierPreset {
@@ -305,23 +416,19 @@ pub fn agentmail_preset() -> WebhookVerifierPreset {
     // the signed content as "<id>.<timestamp>.<raw body>" and the
     // space-delimited "v1,<base64>" signature format at
     // https://www.svix.com/guides/receiving/receive-webhooks-with-svix-cli/.
-    WebhookVerifierPreset {
-        name: "AgentMail".to_owned(),
-        verifier: WebhookVerifierConfig {
-            mode: WebhookVerifierMode::HmacV2,
-            signature_header: "svix-signature".to_owned(),
-            signature_algo: Some(SignatureAlgorithm::Sha256),
-            signature_encoding: Some(SignatureEncoding::Base64),
-            signature_prefix: Some("v1,".to_owned()),
-            signature_separator: Some(" ".to_owned()),
-            signature_value_split: Some(",".to_owned()),
-            timestamp_header: Some("svix-timestamp".to_owned()),
-            timestamp_skew_secs: Some(300),
-            payload_template: Some("{{id}}.{{timestamp}}.{{body}}".to_owned()),
-            idempotency_header: Some("svix-id".to_owned()),
-            bearer_path_token: None,
-        },
-    }
+    hmac_preset(
+        "agentmail",
+        "AgentMail",
+        "https://docs.agentmail.to/webhook-verification",
+        "svix-signature",
+        SignatureEncoding::Base64,
+        Some("v1,"),
+        Some(" "),
+        Some(","),
+        Some("svix-timestamp"),
+        "{{id}}.{{timestamp}}.{{body}}",
+        Some("svix-id"),
+    )
 }
 
 /// One ready-to-write spec.  `secret` is plaintext on the way in; the
@@ -334,6 +441,7 @@ pub struct WebhookSpec {
     pub name: String,
     pub description: String,
     pub auth_scheme: WebhookAuthScheme,
+    pub preset_id: Option<String>,
     pub verifier: Option<WebhookVerifierConfig>,
     /// Header to read for HMAC signatures. `None` keeps the existing
     /// value on update, or defaults to `x-swarm-signature` on create.
@@ -686,6 +794,17 @@ impl WebhookService {
                 }),
         };
         validate_verifier_config(&verifier).map_err(|e| WebhookError::BadRequest(e.to_string()))?;
+        if let Some(preset_id) = spec.preset_id.as_deref() {
+            let preset = webhook_preset(preset_id).ok_or_else(|| {
+                WebhookError::BadRequest(format!("unknown preset_id {preset_id}"))
+            })?;
+            if verifier != preset.verifier {
+                return Err(WebhookError::BadRequest(format!(
+                    "preset_id {preset_id} verifier config does not match the {label} preset",
+                    label = preset.label
+                )));
+            }
+        }
 
         // Resolve the secret pointer.  When the scheme needs a key,
         // we either (a) reuse the existing secret_name when no new
@@ -738,6 +857,7 @@ impl WebhookService {
             bearer_path_token: verifier.bearer_path_token.clone().or_else(|| {
                 (verifier.mode == WebhookVerifierMode::BearerV2).then(random_path_token)
             }),
+            preset_id: spec.preset_id,
             secret_name,
             enabled: spec.enabled,
             created_at: existing.as_ref().map(|r| r.created_at).unwrap_or(now),
@@ -888,6 +1008,35 @@ impl WebhookService {
             crate::now_secs(),
         )
         .map_err(WebhookError::Verify)
+    }
+
+    pub async fn verify_only_last_failed(
+        &self,
+        owner_id: &str,
+        instance_id: &str,
+        name: &str,
+    ) -> Result<VerifyOutcome, WebhookError> {
+        self.ensure_owner(owner_id, instance_id).await?;
+        let failed = self
+            .deliveries
+            .list_for_webhook(instance_id, name, DEFAULT_DELIVERY_LIMIT)
+            .await?
+            .into_iter()
+            .find(|row| !row.signature_ok || row.status_code >= 400 || row.verify_error.is_some())
+            .ok_or(WebhookError::NotFound)?;
+        let detail = self.get_delivery(owner_id, instance_id, &failed.id).await?;
+        let headers = delivery_request_headers(detail.request_headers.as_deref());
+        let body = detail.body.unwrap_or_default();
+        self.verify_only(
+            owner_id,
+            instance_id,
+            name,
+            &headers,
+            header_value_from_pairs(&headers, "authorization"),
+            None,
+            &body,
+        )
+        .await
     }
 
     pub async fn replay_delivery(
@@ -1063,7 +1212,7 @@ impl WebhookService {
                     Err(WebhookError::Verify(e)) => Some(e.code().to_owned()),
                     _ => None,
                 },
-                request_headers: serde_json::to_string(&forward_headers).ok(),
+                request_headers: serde_json::to_string(&signature_headers).ok(),
                 replayed_from_delivery_id: None,
                 replayed_by_user_id: None,
                 // Audit storage: keep the body for every delivery we
@@ -1241,6 +1390,35 @@ fn signature_header_value<'a>(headers: &'a [(String, String)], wanted: &str) -> 
         .iter()
         .find(|(name, _)| name.eq_ignore_ascii_case(wanted))
         .map(|(_, value)| value.as_str())
+}
+
+fn header_value_from_pairs<'a>(headers: &'a [(String, String)], wanted: &str) -> Option<&'a str> {
+    signature_header_value(headers, wanted)
+}
+
+fn delivery_request_headers(raw: Option<&str>) -> Vec<(String, String)> {
+    let Some(raw) = raw else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return Vec::new();
+    };
+    match value {
+        serde_json::Value::Array(rows) => rows
+            .into_iter()
+            .filter_map(|row| {
+                let pair = row.as_array()?;
+                let name = pair.first()?.as_str()?.to_owned();
+                let value = pair.get(1)?.as_str()?.to_owned();
+                Some((name, value))
+            })
+            .collect(),
+        serde_json::Value::Object(map) => map
+            .into_iter()
+            .filter_map(|(k, v)| v.as_str().map(|s| (k, s.to_owned())))
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 fn ct_eq(a: &[u8], b: &[u8]) -> bool {
@@ -2422,6 +2600,7 @@ mod tests {
                     name: "ping".into(),
                     description: "verify me".into(),
                     auth_scheme: WebhookAuthScheme::HmacSha256,
+                    preset_id: None,
                     verifier: None,
                     signature_header: None,
                     secret_plaintext: Some("super-secret".into()),
@@ -2524,6 +2703,7 @@ mod tests {
                     name: "github".into(),
                     description: "handle github".into(),
                     auth_scheme: WebhookAuthScheme::HmacSha256,
+                    preset_id: None,
                     verifier: None,
                     signature_header: Some("X-Hub-Signature-256".into()),
                     secret_plaintext: Some("super-secret".into()),

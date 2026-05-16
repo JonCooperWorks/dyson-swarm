@@ -3,7 +3,9 @@
 // https://www.svix.com/guides/receiving/receive-webhooks-with-svix-cli/
 export const WEBHOOK_PRESETS = [
   {
+    id: 'standard-webhooks',
     label: 'Standard Webhooks',
+    docs_url: 'https://github.com/standard-webhooks/standard-webhooks/blob/main/spec/standard-webhooks.md',
     auth_scheme: 'hmac_sha256',
     verifier_mode: 'hmac_v2',
     signature_header: 'webhook-signature',
@@ -18,7 +20,9 @@ export const WEBHOOK_PRESETS = [
     idempotency_header: 'webhook-id',
   },
   {
+    id: 'github',
     label: 'GitHub',
+    docs_url: 'https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries',
     auth_scheme: 'hmac_sha256',
     verifier_mode: 'hmac_v2',
     signature_header: 'x-hub-signature-256',
@@ -33,7 +37,9 @@ export const WEBHOOK_PRESETS = [
     idempotency_header: 'x-github-delivery',
   },
   {
+    id: 'stripe',
     label: 'Stripe',
+    docs_url: 'https://docs.stripe.com/webhooks/signature',
     auth_scheme: 'hmac_sha256',
     verifier_mode: 'hmac_v2',
     signature_header: 'stripe-signature',
@@ -48,7 +54,9 @@ export const WEBHOOK_PRESETS = [
     idempotency_header: '',
   },
   {
+    id: 'slack',
     label: 'Slack',
+    docs_url: 'https://api.slack.com/authentication/verifying-requests-from-slack',
     auth_scheme: 'hmac_sha256',
     verifier_mode: 'hmac_v2',
     signature_header: 'x-slack-signature',
@@ -63,7 +71,9 @@ export const WEBHOOK_PRESETS = [
     idempotency_header: '',
   },
   {
+    id: 'shopify',
     label: 'Shopify',
+    docs_url: 'https://shopify.dev/docs/apps/build/webhooks/subscribe/https#step-2-validate-the-origin-of-your-webhook-to-ensure-its-coming-from-shopify',
     auth_scheme: 'hmac_sha256',
     verifier_mode: 'hmac_v2',
     signature_header: 'x-shopify-hmac-sha256',
@@ -78,7 +88,9 @@ export const WEBHOOK_PRESETS = [
     idempotency_header: 'x-shopify-webhook-id',
   },
   {
+    id: 'agentmail',
     label: 'AgentMail',
+    docs_url: 'https://docs.agentmail.to/webhook-verification',
     auth_scheme: 'hmac_sha256',
     verifier_mode: 'hmac_v2',
     signature_header: 'svix-signature',

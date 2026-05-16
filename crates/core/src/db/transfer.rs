@@ -234,6 +234,7 @@ const INSTANCE_WEBHOOKS: &[ColumnSpec] = &[
     col("payload_template", ColumnKind::Text),
     col("idempotency_header", ColumnKind::Text),
     col("bearer_path_token", ColumnKind::Text),
+    col("preset_id", ColumnKind::Text),
 ];
 
 const WEBHOOK_DELIVERIES: &[ColumnSpec] = &[
@@ -1155,9 +1156,9 @@ mod tests {
             "INSERT INTO instance_webhooks \
              (instance_id, name, description, auth_scheme, secret_name, enabled, created_at, updated_at, signature_header, \
               verifier_mode, signature_algo, signature_encoding, signature_prefix, signature_separator, signature_value_split, \
-              timestamp_header, timestamp_skew_secs, payload_template, idempotency_header, bearer_path_token) \
+              timestamp_header, timestamp_skew_secs, payload_template, idempotency_header, bearer_path_token, preset_id) \
              VALUES ('i1', 'hook', 'desc', 'hmac-sha256', 'user.secret', 1, 290, 291, 'X-Signature', \
-              'hmac_v2', 'sha256', 'hex', 'sha256=', NULL, '=', NULL, 300, '{{body}}', 'x-delivery-id', NULL)",
+              'hmac_v2', 'sha256', 'hex', 'sha256=', NULL, '=', NULL, 300, '{{body}}', 'x-delivery-id', NULL, NULL)",
         )
         .execute(pool)
         .await

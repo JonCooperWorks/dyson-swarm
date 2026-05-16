@@ -2944,7 +2944,6 @@ function ChannelsSection({ instance }) {
             </span>
             <span className="btn btn-sm">Connect</span>
           </button>
-          <p className="muted small">Discord / Slack / SMS — coming.</p>
         </div>
       ) : null}
       {!telegram && wizard ? (

@@ -67,10 +67,10 @@ fn normalize_telegram_allowed_sender(raw: &str) -> ChannelsResult<Option<String>
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_')
     {
-        return Ok(Some(format!("@{}", username.to_ascii_lowercase())));
+        return Ok(Some(username.to_ascii_lowercase()));
     }
     Err(ChannelsError::BadRequest(
-        "Allowed Telegram users must be numeric user IDs or @usernames".into(),
+        "Allowed Telegram users must be numeric user IDs or usernames".into(),
     ))
 }
 
@@ -539,7 +539,10 @@ pub fn telegram_update_allowed_by_sender(allowed_senders: &[String], body: &[u8]
     let Ok(json) = serde_json::from_slice::<serde_json::Value>(body) else {
         return false;
     };
-    let allowed = allowed_senders.iter().collect::<HashSet<_>>();
+    let allowed = allowed_senders
+        .iter()
+        .filter_map(|entry| normalize_telegram_allowed_sender(entry).ok().flatten())
+        .collect::<HashSet<_>>();
     telegram_sender_candidates(&json)
         .into_iter()
         .any(|candidate| allowed.contains(&candidate))
@@ -595,7 +598,7 @@ mod tests {
             "".into(),
         ])
         .unwrap();
-        assert_eq!(entries, vec!["123456", "@topman"]);
+        assert_eq!(entries, vec!["123456", "topman"]);
     }
 
     #[test]
@@ -609,9 +612,10 @@ mod tests {
             }
         }"#;
         assert!(telegram_update_allowed_by_sender(&["42".into()], body));
+        assert!(telegram_update_allowed_by_sender(&["topman".into()], body));
         assert!(telegram_update_allowed_by_sender(&["@topman".into()], body));
         assert!(!telegram_update_allowed_by_sender(
-            &["@someoneelse".into()],
+            &["someoneelse".into()],
             body
         ));
     }

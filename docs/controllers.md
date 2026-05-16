@@ -53,7 +53,8 @@ The durable channel row lives in `instance_channels`:
 - `webhook_secret_name` points to the sealed Telegram webhook secret token.
 - `enabled` controls pause/resume.
 - `allowed_senders` stores a JSON array of normalized Telegram user IDs and
-  `@usernames` allowed to drive the bot. Empty means anyone who can message the
+  usernames allowed to drive the bot. Leading `@` is accepted in the UI/API but
+  stripped before storage. Empty means anyone who can message the
   bot is allowed.
 - `last_inbound_at` updates on webhook delivery.
 
@@ -89,8 +90,9 @@ channel is paused, swarm returns 200 and records a dropped delivery without
 forwarding to the cube.
 
 After the secret check, swarm applies the optional sender allowlist. The
-allowlist accepts numeric Telegram user IDs and `@usernames`; entries are
-normalized and deduplicated when saved. When the list is non-empty, swarm
+allowlist accepts numeric Telegram user IDs and usernames; a leading `@` is
+stripped, entries are lowercased and deduplicated when saved. When the list is
+non-empty, swarm
 extracts `message.from`, `edited_message.from`, `callback_query.from`, or
 `channel_post.from` from the update JSON and compares only the sender ID and
 username. Non-matching updates are acknowledged with 200 so Telegram does not

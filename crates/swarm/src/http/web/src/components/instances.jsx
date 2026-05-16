@@ -3038,7 +3038,7 @@ function ChannelsSection({ instance }) {
                   className="textarea telegram-allowlist-input"
                   value={allowedDraft}
                   onChange={e => setAllowedDraft(e.target.value)}
-                  placeholder="@username or numeric user id, one per line"
+                  placeholder="username or numeric user id, one per line"
                   rows={4}
                   disabled={busy}
                 />
@@ -3080,7 +3080,7 @@ function ChannelsSection({ instance }) {
                 className="textarea telegram-allowlist-input"
                 value={allowedDraft}
                 onChange={e => setAllowedDraft(e.target.value)}
-                placeholder="@username or numeric user id, one per line"
+                placeholder="username or numeric user id, one per line"
                 rows={4}
                 disabled={allowedSaving}
               />
@@ -3140,11 +3140,11 @@ function parseTelegramAllowedSenders(text) {
     } else {
       const username = trimmed.startsWith('@') ? trimmed.slice(1) : trimmed;
       if (/^[A-Za-z0-9_]{5,32}$/.test(username)) {
-        normalized = `@${username.toLowerCase()}`;
+        normalized = username.toLowerCase();
       }
     }
     if (!normalized) {
-      throw new Error('Allowed Telegram users must be numeric user IDs or @usernames');
+      throw new Error('Allowed Telegram users must be numeric user IDs or usernames');
     }
     if (!seen.has(normalized)) {
       seen.add(normalized);

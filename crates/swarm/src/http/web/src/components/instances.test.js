@@ -205,14 +205,14 @@ describe('instance section rail routing', () => {
       kind: 'telegram',
       handle: '@alpha_bot',
       enabled: true,
-      allowed_senders: ['@topman'],
+      allowed_senders: ['topman'],
       last_inbound_at: null,
       created_at: 1,
       health: 'green',
     };
     const patchTelegramChannel = vi.fn().mockResolvedValue({
       ...channel,
-      allowed_senders: ['@topman', '12345'],
+      allowed_senders: ['topman', '12345'],
     });
     setInstances([row]);
     const client = {
@@ -238,7 +238,7 @@ describe('instance section rail routing', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Save allowlist' }));
 
     await waitFor(() => expect(patchTelegramChannel).toHaveBeenCalledWith('a', {
-      allowed_senders: ['@topman', '12345'],
+      allowed_senders: ['topman', '12345'],
     }));
   });
 
@@ -258,7 +258,7 @@ describe('instance section rail routing', () => {
       kind: 'telegram',
       handle: '@alpha_bot',
       enabled: true,
-      allowed_senders: ['@topman'],
+      allowed_senders: ['topman'],
       last_inbound_at: null,
       created_at: 1,
       health: 'green',

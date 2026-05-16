@@ -11,7 +11,8 @@ use subtle::ConstantTimeEq;
 
 use crate::auth::CallerIdentity;
 use crate::channels::{
-    ChannelsError, TELEGRAM_KIND, delivery_preview, telegram_update_allowed_by_sender,
+    ChannelsError, TELEGRAM_KIND, delivery_preview, normalize_telegram_allowed_senders,
+    telegram_update_allowed_by_sender,
 };
 use crate::http::AppState;
 use crate::traits::{ChannelDeliveryRow, InstanceChannelRow, InstanceStatus};
@@ -54,11 +55,13 @@ struct ChannelView {
 
 impl From<InstanceChannelRow> for ChannelView {
     fn from(row: InstanceChannelRow) -> Self {
+        let allowed_senders =
+            normalize_telegram_allowed_senders(row.allowed_senders.clone()).unwrap_or(row.allowed_senders);
         Self {
             kind: row.kind,
             handle: row.handle,
             enabled: row.enabled,
-            allowed_senders: row.allowed_senders,
+            allowed_senders,
             last_inbound_at: row.last_inbound_at,
             created_at: row.created_at,
             health: if row.enabled { "green" } else { "paused" }.to_owned(),

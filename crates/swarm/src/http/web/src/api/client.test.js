@@ -310,23 +310,23 @@ describe('SwarmClient', () => {
   test('patchTelegramChannel forwards allowlist updates as JSON', async () => {
     const fetchImpl = vi.fn().mockResolvedValue(jsonResponse({ ok: true }));
     const client = new SwarmClient({ fetch: fetchImpl, getToken: () => null });
-    await client.patchTelegramChannel('i1', { allowed_senders: ['@topman', '12345'] });
+    await client.patchTelegramChannel('i1', { allowed_senders: ['topman', '12345'] });
     const [url, init] = fetchImpl.mock.calls[0];
     expect(url).toBe('/v1/instances/i1/channels/telegram');
     expect(init.method).toBe('PATCH');
-    expect(JSON.parse(init.body)).toEqual({ allowed_senders: ['@topman', '12345'] });
+    expect(JSON.parse(init.body)).toEqual({ allowed_senders: ['topman', '12345'] });
   });
 
   test('connectTelegramChannel sends the initial allowlist', async () => {
     const fetchImpl = vi.fn().mockResolvedValue(jsonResponse({ handle: '@bot' }));
     const client = new SwarmClient({ fetch: fetchImpl, getToken: () => null });
-    await client.connectTelegramChannel('i1', '123456:secret', ['@topman']);
+    await client.connectTelegramChannel('i1', '123456:secret', ['topman']);
     const [url, init] = fetchImpl.mock.calls[0];
     expect(url).toBe('/v1/instances/i1/channels/telegram');
     expect(init.method).toBe('POST');
     expect(JSON.parse(init.body)).toEqual({
       token: '123456:secret',
-      allowed_senders: ['@topman'],
+      allowed_senders: ['topman'],
     });
   });
 

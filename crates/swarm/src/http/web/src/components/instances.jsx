@@ -85,6 +85,7 @@ export function instanceSectionFromView(view) {
     case 'instance-tools': return 'tools';
     case 'instance-channels': return 'channels';
     case 'instance-mcp': return 'mcp';
+    case 'instance-agent-secrets': return 'agent-secrets';
     case 'instance-snapshots': return 'snapshots';
     case 'instance-runtime': return 'runtime';
     case 'instance-skills': return 'skills';
@@ -115,6 +116,7 @@ export function sectionHref(id, section) {
     case 'tools': return `#/i/${enc}/tools`;
     case 'channels': return `#/i/${enc}/channels`;
     case 'mcp': return `#/i/${enc}/mcp`;
+    case 'agent-secrets': return `#/i/${enc}/agent-secrets`;
     case 'snapshots': return `#/i/${enc}/snapshots`;
     case 'runtime': return `#/i/${enc}/runtime`;
     case 'skills': return `#/i/${enc}/skills`;
@@ -2431,6 +2433,7 @@ const DETAIL_SECTIONS = [
   { key: 'tools', label: 'tools' },
   { key: 'channels', label: 'channels' },
   { key: 'mcp', label: 'mcp' },
+  { key: 'agent-secrets', label: 'agent secrets' },
   { key: 'snapshots', label: 'snapshots' },
   { key: 'runtime', label: 'runtime' },
   { key: 'skills', label: 'skills' },
@@ -2770,6 +2773,8 @@ function DetailSectionBody({ view, instance, activeSection }) {
           disabled={instance.status === 'destroyed'}
         />
       );
+    case 'agent-secrets':
+      return <AgentSecretsPanel instanceId={instance.id} disabled={instance.status === 'destroyed'}/>;
     case 'snapshots':
       return <SnapshotsPanel instanceId={instance.id} disabled={instance.status === 'destroyed'}/>;
     case 'runtime':
@@ -3760,6 +3765,161 @@ function SnapshotsPanel({ instanceId, disabled }) {
                     onClick={() => remove(r)}
                     disabled={busy}
                     title="permanently delete this snapshot"
+                  >
+                    delete
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </section>
+  );
+}
+
+export function AgentSecretsPanel({ instanceId, disabled }) {
+  const { client } = useApi();
+  const [rows, setRows] = React.useState(null);
+  const [name, setName] = React.useState('');
+  const [value, setValue] = React.useState('');
+  const [revealed, setRevealed] = React.useState({});
+  const [busy, setBusy] = React.useState(false);
+  const [err, setErr] = React.useState(null);
+
+  const refresh = React.useCallback(async () => {
+    try {
+      const list = await client.listAgentSecrets(instanceId);
+      setRows(Array.isArray(list) ? list : []);
+    } catch (e) {
+      setErr(e?.message || 'list agent secrets failed');
+    }
+  }, [client, instanceId]);
+
+  React.useEffect(() => { refresh(); }, [refresh]);
+
+  const save = async (e) => {
+    e.preventDefault();
+    const trimmedName = name.trim();
+    if (!trimmedName) {
+      setErr('name is required');
+      return;
+    }
+    setBusy(true); setErr(null);
+    try {
+      await client.putAgentSecret(instanceId, trimmedName, value);
+      setName('');
+      setValue('');
+      setRevealed(r => {
+        const next = { ...r };
+        delete next[trimmedName];
+        return next;
+      });
+      await refresh();
+    } catch (e2) {
+      setErr(e2?.detail || e2?.message || 'save agent secret failed');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const reveal = async (secretName) => {
+    setBusy(true); setErr(null);
+    try {
+      const result = await client.revealAgentSecret(instanceId, secretName);
+      setRevealed(r => ({ ...r, [secretName]: result?.value ?? '' }));
+    } catch (e) {
+      setErr(e?.detail || e?.message || 'reveal agent secret failed');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async (secretName) => {
+    if (!confirm(`Delete agent secret ${secretName}?`)) return;
+    const prev = rows;
+    setRows(rs => (rs ? rs.filter(r => r.name !== secretName) : rs));
+    setRevealed(r => {
+      const next = { ...r };
+      delete next[secretName];
+      return next;
+    });
+    setBusy(true); setErr(null);
+    try {
+      await client.deleteAgentSecret(instanceId, secretName);
+    } catch (e) {
+      setRows(prev);
+      setErr(e?.detail || e?.message || 'delete agent secret failed');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="panel">
+      <div className="panel-header">
+        <div>
+          <div className="panel-title">agent secrets</div>
+          <p className="muted small">
+            Stored in Swarm and visible to this agent through the agent_secrets tool.
+          </p>
+        </div>
+      </div>
+      {err ? <div className="error">{err}</div> : null}
+      <form className="inline-form" onSubmit={save}>
+        <label>
+          name
+          <input
+            value={name}
+            onChange={e => setName(e.target.value)}
+            placeholder="api.token"
+            autoComplete="off"
+            disabled={disabled || busy}
+          />
+        </label>
+        <label>
+          value
+          <input
+            value={value}
+            onChange={e => setValue(e.target.value)}
+            placeholder="secret value"
+            autoComplete="off"
+            disabled={disabled || busy}
+          />
+        </label>
+        <button className="btn btn-sm" disabled={disabled || busy || !name.trim()}>
+          save
+        </button>
+      </form>
+      {rows === null ? (
+        <p className="muted small">loading…</p>
+      ) : rows.length === 0 ? (
+        <p className="muted small">no agent secrets yet.</p>
+      ) : (
+        <table className="rows">
+          <thead><tr>
+            <th>name</th><th>created</th><th>updated</th><th>last read</th><th></th>
+          </tr></thead>
+          <tbody>
+            {rows.map(r => (
+              <tr key={r.name}>
+                <td data-label="name">
+                  <code className="mono-sm agent-secret-name" title={r.name}>{r.name}</code>
+                  {Object.prototype.hasOwnProperty.call(revealed, r.name) ? (
+                    <div className="secret-reveal"><code>{revealed[r.name]}</code></div>
+                  ) : null}
+                </td>
+                <td data-label="created" className="muted">{fmtTime(r.created_at)}</td>
+                <td data-label="updated" className="muted">{fmtTime(r.updated_at)}</td>
+                <td data-label="last read" className="muted">{fmtTime(r.last_read_at)}</td>
+                <td className="row-actions">
+                  <button className="btn btn-ghost btn-sm" onClick={() => reveal(r.name)} disabled={busy}>
+                    reveal
+                  </button>
+                  <button
+                    className="btn btn-ghost btn-sm btn-danger"
+                    onClick={() => remove(r.name)}
+                    disabled={busy || disabled}
                   >
                     delete
                   </button>

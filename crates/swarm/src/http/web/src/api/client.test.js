@@ -82,6 +82,23 @@ describe('SwarmClient', () => {
     });
   });
 
+  test('agent secret methods use instance-scoped routes', async () => {
+    const fetchImpl = vi.fn(() => Promise.resolve(jsonResponse({ ok: true })));
+    const client = new SwarmClient({ fetch: fetchImpl, getToken: () => null });
+    await client.listAgentSecrets('inst/1');
+    await client.putAgentSecret('inst/1', 'api token', 'secret');
+    await client.revealAgentSecret('inst/1', 'api token');
+    await client.deleteAgentSecret('inst/1', 'api token');
+
+    expect(fetchImpl.mock.calls[0][0]).toBe('/v1/instances/inst%2F1/agent-secrets');
+    expect(fetchImpl.mock.calls[1][0]).toBe('/v1/instances/inst%2F1/agent-secrets/api%20token');
+    expect(fetchImpl.mock.calls[1][1].method).toBe('PUT');
+    expect(JSON.parse(fetchImpl.mock.calls[1][1].body)).toEqual({ value: 'secret' });
+    expect(fetchImpl.mock.calls[2][0]).toBe('/v1/instances/inst%2F1/agent-secrets/api%20token/reveal');
+    expect(fetchImpl.mock.calls[3][0]).toBe('/v1/instances/inst%2F1/agent-secrets/api%20token');
+    expect(fetchImpl.mock.calls[3][1].method).toBe('DELETE');
+  });
+
   test('Docker MCP JSON uses only the single-server config API path', async () => {
     const fetchImpl = vi.fn().mockResolvedValue(jsonResponse({ ok: true }));
     const client = new SwarmClient({ fetch: fetchImpl, getToken: () => null });

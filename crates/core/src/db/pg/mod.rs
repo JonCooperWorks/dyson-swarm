@@ -4,6 +4,7 @@ use sqlx::postgres::PgPoolOptions;
 
 use crate::error::StoreError;
 
+pub mod agent_secrets;
 pub mod agent_skill_publications;
 pub mod artefacts;
 pub mod audit;

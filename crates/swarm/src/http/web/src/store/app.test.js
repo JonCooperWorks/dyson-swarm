@@ -84,6 +84,7 @@ describe('parseHashView', () => {
       tools: 'instance-tools',
       channels: 'instance-channels',
       mcp: 'instance-mcp',
+      'agent-secrets': 'instance-agent-secrets',
       snapshots: 'instance-snapshots',
       runtime: 'instance-runtime',
     };

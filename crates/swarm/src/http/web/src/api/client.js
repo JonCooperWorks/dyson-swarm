@@ -128,6 +128,37 @@ export class SwarmClient {
     });
   }
 
+  listAgentSecrets(id) {
+    return this._json(`/v1/instances/${encodeURIComponent(id)}/agent-secrets`, {
+      headers: { Accept: 'application/json' },
+    });
+  }
+
+  putAgentSecret(id, name, value) {
+    return this._json(
+      `/v1/instances/${encodeURIComponent(id)}/agent-secrets/${encodeURIComponent(name)}`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ value }),
+      },
+    );
+  }
+
+  revealAgentSecret(id, name) {
+    return this._json(
+      `/v1/instances/${encodeURIComponent(id)}/agent-secrets/${encodeURIComponent(name)}/reveal`,
+      { headers: { Accept: 'application/json' } },
+    );
+  }
+
+  deleteAgentSecret(id, name) {
+    return this._json(
+      `/v1/instances/${encodeURIComponent(id)}/agent-secrets/${encodeURIComponent(name)}`,
+      { method: 'DELETE' },
+    );
+  }
+
   connectTelegramChannel(id, token, allowed_senders = []) {
     return this._json(`/v1/instances/${encodeURIComponent(id)}/channels/telegram`, {
       method: 'POST',

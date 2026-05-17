@@ -236,6 +236,7 @@ export function setMarketplaceCatalog(catalog) {
 //   #/i/<id>/network            → network policy editor
 //   #/i/<id>/tools              → built-in tools picker
 //   #/i/<id>/mcp                → MCP servers panel
+//   #/i/<id>/agent-secrets      → agent-visible secrets
 //   #/i/<id>/snapshots          → snapshots panel
 //   #/i/<id>/runtime            → runtime KV block
 //   #/i/<id>/tasks…             → webhooks (legacy slug)
@@ -377,6 +378,8 @@ function sectionViewName(slug) {
       return 'instance-channels';
     case 'mcp':
       return 'instance-mcp';
+    case 'agent-secrets':
+      return 'instance-agent-secrets';
     case 'snapshots':
       return 'instance-snapshots';
     case 'runtime':

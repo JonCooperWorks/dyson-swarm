@@ -17,13 +17,14 @@ use crate::config::{Config, DatabaseBackend};
 use crate::envelope::{CipherDirectory, EnvelopeCipher};
 use crate::error::StoreError;
 use crate::traits::{
-    AdminAuditStore, AgentSkillPublicationStore, ArtefactCacheStore, AuditStore, DeliveryStore,
-    InstanceChannelStore, InstanceStore, LlmToolCallStore, McpAuditStore, McpDockerCatalogStore,
-    PolicyStore, SecretAccessAuditStore, SessionStore, ShareStore, SkillMarketplaceSourceStore,
-    SnapshotStore, StateFileStore, SystemSecretStore, TokenStore, UserSecretStore, UserStore,
-    WebhookStore,
+    AdminAuditStore, AgentSecretStore, AgentSkillPublicationStore, ArtefactCacheStore, AuditStore,
+    DeliveryStore, InstanceChannelStore, InstanceStore, LlmToolCallStore, McpAuditStore,
+    McpDockerCatalogStore, PolicyStore, SecretAccessAuditStore, SessionStore, ShareStore,
+    SkillMarketplaceSourceStore, SnapshotStore, StateFileStore, SystemSecretStore, TokenStore,
+    UserSecretStore, UserStore, WebhookStore,
 };
 
+pub mod agent_secrets;
 pub mod agent_skill_publications;
 pub mod artefacts;
 pub mod audit;
@@ -127,6 +128,10 @@ pub fn token_store(
 
 pub fn user_secret_store(pool: SqlitePool) -> Arc<dyn UserSecretStore> {
     Arc::new(secrets::SqlxUserSecretStore::new(pool))
+}
+
+pub fn agent_secret_store(pool: SqlitePool) -> Arc<dyn AgentSecretStore> {
+    Arc::new(agent_secrets::SqlxAgentSecretStore::new(pool))
 }
 
 pub fn system_secret_store(pool: SqlitePool) -> Arc<dyn SystemSecretStore> {

@@ -136,6 +136,16 @@ const USER_SECRETS: &[ColumnSpec] = &[
     col("updated_at", ColumnKind::I64),
 ];
 
+const AGENT_SECRETS: &[ColumnSpec] = &[
+    col("owner_user_id", ColumnKind::Text),
+    col("instance_id", ColumnKind::Text),
+    col("name", ColumnKind::Text),
+    col("ciphertext", ColumnKind::Text),
+    col("created_at", ColumnKind::I64),
+    col("updated_at", ColumnKind::I64),
+    col("last_read_at", ColumnKind::I64),
+];
+
 const PROXY_TOKENS: &[ColumnSpec] = &[
     col("token", ColumnKind::Text),
     col("instance_id", ColumnKind::Text),
@@ -395,6 +405,12 @@ const TABLES: &[TableSpec] = &[
         serial_column: None,
     },
     TableSpec {
+        name: "agent_secrets",
+        columns: AGENT_SECRETS,
+        order_by: "owner_user_id, instance_id, name",
+        serial_column: None,
+    },
+    TableSpec {
         name: "proxy_tokens",
         columns: PROXY_TOKENS,
         order_by: "created_at, token",
@@ -543,6 +559,7 @@ pub const fn table_names() -> &'static [&'static str] {
         "user_policies",
         "system_secrets",
         "user_secrets",
+        "agent_secrets",
         "proxy_tokens",
         "snapshots",
         "llm_audit",
@@ -1209,6 +1226,14 @@ mod tests {
             "INSERT INTO agent_skill_publications \
              (instance_id, owner_id, skill, published_by, published_at, revoked_at) \
              VALUES ('i1', 'u1', 'debug-logs', 'u1', 324, NULL)",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO agent_secrets \
+             (owner_user_id, instance_id, name, ciphertext, created_at, updated_at, last_read_at) \
+             VALUES ('u1', 'i1', 'api.token', 'sealed-agent-secret', 325, 326, 327)",
         )
         .execute(pool)
         .await

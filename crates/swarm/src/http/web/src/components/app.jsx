@@ -50,6 +50,7 @@ export function renderView(view) {
     case 'instance-tools':
     case 'instance-channels':
     case 'instance-mcp':
+    case 'instance-agent-secrets':
     case 'instance-snapshots':
     case 'instance-runtime':
     case 'instance-skills':

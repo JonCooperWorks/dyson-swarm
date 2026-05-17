@@ -12,11 +12,11 @@ use crate::config::{Config, DatabaseBackend};
 use crate::envelope::{CipherDirectory, EnvelopeCipher};
 use crate::error::StoreError;
 use crate::traits::{
-    AdminAuditStore, AgentSkillPublicationStore, ArtefactCacheStore, AuditStore, DeliveryStore,
-    InstanceChannelStore, InstanceStore, LlmToolCallStore, McpAuditStore, McpDockerCatalogStore,
-    PolicyStore, SecretAccessAuditStore, SessionStore, ShareStore, SkillMarketplaceSourceStore,
-    SnapshotStore, StateFileStore, SystemSecretStore, TokenStore, UserSecretStore, UserStore,
-    WebhookStore,
+    AdminAuditStore, AgentSecretStore, AgentSkillPublicationStore, ArtefactCacheStore, AuditStore,
+    DeliveryStore, InstanceChannelStore, InstanceStore, LlmToolCallStore, McpAuditStore,
+    McpDockerCatalogStore, PolicyStore, SecretAccessAuditStore, SessionStore, ShareStore,
+    SkillMarketplaceSourceStore, SnapshotStore, StateFileStore, SystemSecretStore, TokenStore,
+    UserSecretStore, UserStore, WebhookStore,
 };
 
 #[cfg(feature = "postgres")]
@@ -49,6 +49,7 @@ pub struct BackendStores {
     pub instances: Arc<dyn InstanceStore>,
     pub tokens: Arc<dyn TokenStore>,
     pub user_secrets: Arc<dyn UserSecretStore>,
+    pub agent_secrets: Arc<dyn AgentSecretStore>,
     pub system_secrets: Arc<dyn SystemSecretStore>,
     pub users: Arc<dyn UserStore>,
     pub snapshots: Arc<dyn SnapshotStore>,
@@ -81,6 +82,7 @@ impl BackendStores {
             instances: sqlite::instance_store(pool.clone(), system_cipher.clone(), ciphers.clone()),
             tokens: sqlite::token_store(pool.clone(), system_cipher, ciphers.clone()),
             user_secrets: sqlite::user_secret_store(pool.clone()),
+            agent_secrets: sqlite::agent_secret_store(pool.clone()),
             system_secrets: sqlite::system_secret_store(pool.clone()),
             users: sqlite::user_store(pool.clone(), ciphers),
             snapshots: sqlite::snapshot_store(pool.clone()),
@@ -123,6 +125,7 @@ impl BackendStores {
                 Arc::new(pg::audit::PgSecretAccessAuditStore::new(pool.clone())),
             )),
             user_secrets: Arc::new(pg::secrets::PgUserSecretStore::new(pool.clone())),
+            agent_secrets: Arc::new(pg::agent_secrets::PgAgentSecretStore::new(pool.clone())),
             system_secrets: Arc::new(pg::secrets::PgSystemSecretStore::new(pool.clone())),
             users: Arc::new(pg::users::PgUserStore::new(pool.clone(), ciphers)),
             snapshots: Arc::new(pg::snapshots::PgSnapshotStore::new(pool.clone())),

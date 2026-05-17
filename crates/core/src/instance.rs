@@ -27,8 +27,9 @@ use crate::now_secs;
 use crate::sandbox_backend::CubeSandboxBackend;
 use crate::secrets::UserSecretsService;
 use crate::traits::{
-    CreateSandboxArgs, CubeClient, HealthProber, InstanceChannelStore, InstanceRow, InstanceStatus,
-    InstanceStore, ListFilter, ProbeResult, SandboxBackend, SandboxInfo, TokenStore,
+    AgentSecretStore, CreateSandboxArgs, CubeClient, HealthProber, InstanceChannelStore,
+    InstanceRow, InstanceStatus, InstanceStore, ListFilter, ProbeResult, SandboxBackend,
+    SandboxInfo, TokenStore,
 };
 
 mod env;
@@ -223,6 +224,9 @@ pub struct InstanceService {
     /// into dyson's runtime configure body. Bot tokens themselves
     /// remain sealed in `UserSecretsService`.
     channels: Option<Arc<dyn InstanceChannelStore>>,
+    /// Agent-visible instance secrets. Destroy wipes these so
+    /// credentials do not outlive the instance that could read them.
+    agent_secrets: Option<Arc<dyn AgentSecretStore>>,
     /// Swarm-side sealed workspace/chat state.  Rebuild paths replay
     /// this into the fresh sandbox before granting that sandbox write
     /// authority, so redeploys do not surface empty state or accept
@@ -362,6 +366,7 @@ impl InstanceService {
             mcp_upstream_policy: OutboundUrlPolicy::default(),
             mcp_secrets: None,
             channels: None,
+            agent_secrets: None,
             state_files: None,
             egress_sync: Arc::new(NoopEgressPolicySync::new()),
             network_config: crate::config::NetworkConfig::default(),
@@ -420,6 +425,13 @@ impl InstanceService {
     /// push Telegram proxy settings into the running dyson.
     pub fn with_channels(mut self, channels: Arc<dyn InstanceChannelStore>) -> Self {
         self.channels = Some(channels);
+        self
+    }
+
+    /// Builder-style: plug in agent-visible secret storage so destroy
+    /// can clean up rows for the instance.
+    pub fn with_agent_secrets(mut self, secrets: Arc<dyn AgentSecretStore>) -> Self {
+        self.agent_secrets = Some(secrets);
         self
     }
 
@@ -3915,6 +3927,15 @@ impl InstanceService {
                     "destroy: mcp forget_all failed; sealed plaintext lingers"
                 );
             }
+        }
+        if let Some(secrets) = self.agent_secrets.as_ref()
+            && let Err(err) = secrets.delete_for_instance(id).await
+        {
+            tracing::warn!(
+                error = %err,
+                instance = %id,
+                "destroy: agent secret cleanup failed; sealed plaintext lingers"
+            );
         }
         self.instances
             .update_status(id, InstanceStatus::Destroyed)

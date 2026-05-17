@@ -13,6 +13,7 @@
 //! which auth layer wraps which subtree.
 
 pub mod admin_users;
+pub mod agent_secrets;
 pub mod assets;
 pub mod auth_config;
 pub mod auth_session;
@@ -57,6 +58,9 @@ pub struct AppState {
     /// Stages 3 + 6 use this for OpenRouter keys and (in future) any
     /// other per-user secret material.
     pub user_secrets: Arc<crate::secrets::UserSecretsService>,
+    /// Agent-visible per-instance secrets. Values are encrypted under
+    /// the owning user's envelope key and scoped to one instance.
+    pub agent_secrets: Arc<crate::agent_secrets::AgentSecretsService>,
     /// Global blobs (provider api_keys, OpenRouter provisioning key),
     /// encrypted with the system-scope cipher.
     pub system_secrets: Arc<crate::secrets::SystemSecretsService>,
@@ -220,6 +224,7 @@ pub fn router(
         .merge(models::router(state.clone()))
         .merge(webhooks::router(state.clone()))
         .merge(channels::router(state.clone()))
+        .merge(agent_secrets::router(state.clone()))
         .merge(shares::router(state.clone()))
         .merge(instance_artefacts::router(state.clone()))
         .merge(skill_marketplace::router(state.clone()))
@@ -248,6 +253,7 @@ pub fn router(
         .merge(auth_session::router(state.clone(), user_auth.clone()))
         .merge(instances::internal_router(state.clone()))
         .merge(internal_ingest::router(state.clone()))
+        .merge(agent_secrets::internal_router(state.clone()))
         .merge(internal_state::router(state.clone()))
         .merge(skill_marketplace::internal_router(state.clone()))
         .merge(webhooks::public_router(state.clone()))
@@ -360,6 +366,12 @@ mod tests {
             user_secrets_store,
             cipher_dir.clone(),
         ));
+        let agent_secret_store = crate::db::sqlite::agent_secret_store(pool.clone());
+        let agent_secrets = Arc::new(crate::agent_secrets::AgentSecretsService::new(
+            agent_secret_store.clone(),
+            cipher_dir.clone(),
+            crate::db::sqlite::secret_access_audit_store(pool.clone()),
+        ));
         let system_secrets = Arc::new(crate::secrets::SystemSecretsService::new(
             system_secrets_store,
             cipher_dir.clone(),
@@ -372,12 +384,15 @@ mod tests {
         );
         let sessions_store: Arc<dyn crate::traits::SessionStore> =
             crate::db::sqlite::session_store(pool.clone());
-        let instance_svc = Arc::new(InstanceService::new(
-            cube.clone(),
-            instances_store.clone(),
-            tokens_store.clone(),
-            "http://test/llm",
-        ));
+        let instance_svc = Arc::new(
+            InstanceService::new(
+                cube.clone(),
+                instances_store.clone(),
+                tokens_store.clone(),
+                "http://test/llm",
+            )
+            .with_agent_secrets(agent_secret_store),
+        );
         let backup: Arc<dyn BackupSink> = Arc::new(LocalDiskBackupSink::new(cube.clone()));
         let snapshots_store: Arc<dyn SnapshotStore> =
             crate::db::sqlite::snapshot_store(pool.clone());
@@ -420,6 +435,7 @@ mod tests {
         ));
         let state = AppState {
             user_secrets: user_secrets.clone(),
+            agent_secrets,
             system_secrets,
             ciphers: cipher_dir,
             instances: instance_svc,
@@ -695,6 +711,162 @@ mod tests {
         .await;
         let r = reqwest::get(format!("{base}/v1/instances")).await.unwrap();
         assert_eq!(r.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn agent_secrets_user_routes_list_without_values_and_reveal() {
+        let (state, users, instances) = build_state_with_instances().await;
+        let (user_auth, owner_id) = token_bound_user_auth(users, "alice", "alice-token").await;
+        seed_owned_instance(&instances, &owner_id, "inst-a").await;
+        let base = spawn(
+            state,
+            AuthState::enforced(crate::config::OidcRoles {
+                claim: "https://test/roles".into(),
+                admin: "rol_admin".into(),
+            }),
+            user_auth,
+        )
+        .await;
+        let client = reqwest::Client::new();
+
+        let put = client
+            .put(format!("{base}/v1/instances/inst-a/agent-secrets/api_key"))
+            .bearer_auth("alice-token")
+            .json(&serde_json::json!({ "value": "super-secret" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(put.status(), 200);
+
+        let list_body = client
+            .get(format!("{base}/v1/instances/inst-a/agent-secrets"))
+            .bearer_auth("alice-token")
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(list_body.contains("api_key"));
+        assert!(!list_body.contains("super-secret"));
+
+        let reveal: serde_json::Value = client
+            .get(format!(
+                "{base}/v1/instances/inst-a/agent-secrets/api_key/reveal"
+            ))
+            .bearer_auth("alice-token")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(reveal["value"], "super-secret");
+    }
+
+    #[tokio::test]
+    async fn agent_secrets_user_cannot_access_another_owner_instance() {
+        let (state, users, instances) = build_state_with_instances().await;
+        let (user_auth, alice_id) =
+            token_bound_user_auth(users.clone(), "alice", "alice-token").await;
+        let (_bob_auth, bob_id) = token_bound_user_auth(users, "bob", "bob-token").await;
+        seed_owned_instance(&instances, &alice_id, "inst-a").await;
+        seed_owned_instance(&instances, &bob_id, "inst-b").await;
+        let base = spawn(
+            state,
+            AuthState::enforced(crate::config::OidcRoles {
+                claim: "https://test/roles".into(),
+                admin: "rol_admin".into(),
+            }),
+            user_auth,
+        )
+        .await;
+
+        let r = reqwest::Client::new()
+            .get(format!("{base}/v1/instances/inst-b/agent-secrets"))
+            .bearer_auth("alice-token")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 404);
+    }
+
+    #[tokio::test]
+    async fn agent_secrets_internal_token_is_scoped_to_its_instance() {
+        let (state, users, instances) = build_state_with_instances().await;
+        let (user_auth, owner_id) = token_bound_user_auth(users, "alice", "alice-token").await;
+        seed_owned_instance(&instances, &owner_id, "inst-a").await;
+        seed_owned_instance(&instances, &owner_id, "inst-b").await;
+        state
+            .agent_secrets
+            .put(
+                &owner_id,
+                "inst-b",
+                "api_key",
+                b"other-secret",
+                crate::agent_secrets::AgentSecretActor::user(&owner_id),
+            )
+            .await
+            .unwrap();
+        let token = state.tokens.mint("inst-a", "*").await.unwrap();
+        let base = spawn(
+            state,
+            AuthState::enforced(crate::config::OidcRoles {
+                claim: "https://test/roles".into(),
+                admin: "rol_admin".into(),
+            }),
+            user_auth,
+        )
+        .await;
+        let client = reqwest::Client::new();
+
+        let missing = client
+            .get(format!("{base}/v1/internal/agent-secrets/api_key"))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), 404);
+
+        let put = client
+            .put(format!("{base}/v1/internal/agent-secrets/api_key"))
+            .bearer_auth(&token)
+            .json(&serde_json::json!({ "value": "own-secret" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(put.status(), 200);
+
+        let got: serde_json::Value = client
+            .get(format!("{base}/v1/internal/agent-secrets/api_key"))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(got["value"], "own-secret");
+
+        let list_body = client
+            .get(format!("{base}/v1/internal/agent-secrets"))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(list_body.contains("api_key"));
+        assert!(!list_body.contains("own-secret"));
+
+        let deleted = client
+            .delete(format!("{base}/v1/internal/agent-secrets/api_key"))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(deleted.status(), 200);
     }
 
     #[tokio::test]

@@ -1,6 +1,8 @@
 pub mod network_policy;
 
 #[cfg(feature = "full")]
+pub mod agent_secrets;
+#[cfg(feature = "full")]
 pub mod api_client;
 #[cfg(feature = "full")]
 pub mod artefacts;

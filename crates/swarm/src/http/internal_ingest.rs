@@ -378,6 +378,11 @@ mod tests {
 
         let state = AppState {
             user_secrets: user_secrets_svc.clone(),
+            agent_secrets: Arc::new(crate::agent_secrets::AgentSecretsService::new(
+                crate::db::sqlite::agent_secret_store(pool.clone()),
+                cipher_dir.clone(),
+                crate::db::sqlite::secret_access_audit_store(pool.clone()),
+            )),
             system_secrets: system_secrets_svc,
             ciphers: cipher_dir,
             instances: instance_svc,

@@ -84,6 +84,7 @@ pub enum KmsScope {
     Artefact,
     WebhookDelivery,
     LlmToolCall,
+    AgentSecret,
 }
 
 impl KmsScope {
@@ -99,6 +100,7 @@ impl KmsScope {
             Self::Artefact => "artefact",
             Self::WebhookDelivery => "webhook_delivery",
             Self::LlmToolCall => "llm_tool_call",
+            Self::AgentSecret => "agent_secret",
         }
     }
 
@@ -114,6 +116,7 @@ impl KmsScope {
             "artefact" => Some(Self::Artefact),
             "webhook_delivery" => Some(Self::WebhookDelivery),
             "llm_tool_call" => Some(Self::LlmToolCall),
+            "agent_secret" => Some(Self::AgentSecret),
             _ => None,
         }
     }
@@ -136,6 +139,8 @@ pub enum SecretAccessReason {
     OperatorCli,
     StateReplay,
     ArtefactRead,
+    AgentSecretTool,
+    AgentSecretUser,
     Migration,
     Test,
 }
@@ -151,6 +156,8 @@ impl SecretAccessReason {
             Self::OperatorCli => "OperatorCli",
             Self::StateReplay => "StateReplay",
             Self::ArtefactRead => "ArtefactRead",
+            Self::AgentSecretTool => "AgentSecretTool",
+            Self::AgentSecretUser => "AgentSecretUser",
             Self::Migration => "Migration",
             Self::Test => "Test",
         }
@@ -166,6 +173,8 @@ impl SecretAccessReason {
             "OperatorCli" => Some(Self::OperatorCli),
             "StateReplay" => Some(Self::StateReplay),
             "ArtefactRead" => Some(Self::ArtefactRead),
+            "AgentSecretTool" => Some(Self::AgentSecretTool),
+            "AgentSecretUser" => Some(Self::AgentSecretUser),
             "Migration" => Some(Self::Migration),
             "Test" => Some(Self::Test),
             _ => None,
@@ -187,6 +196,7 @@ pub enum SecretAccessOperation {
     Rewrap,
     Rotate,
     Delete,
+    List,
 }
 
 impl SecretAccessOperation {
@@ -197,6 +207,7 @@ impl SecretAccessOperation {
             Self::Rewrap => "rewrap",
             Self::Rotate => "rotate",
             Self::Delete => "delete",
+            Self::List => "list",
         }
     }
 
@@ -207,6 +218,7 @@ impl SecretAccessOperation {
             "rewrap" => Some(Self::Rewrap),
             "rotate" => Some(Self::Rotate),
             "delete" => Some(Self::Delete),
+            "list" => Some(Self::List),
             _ => None,
         }
     }
@@ -1006,6 +1018,7 @@ pub fn scoped_key_id(context: &KmsContext) -> Result<String, EnvelopeError> {
             format!("users/{}/webhook_delivery", required_owner(context)?)
         }
         KmsScope::LlmToolCall => format!("users/{}/tool_calls", required_owner(context)?),
+        KmsScope::AgentSecret => format!("users/{}/agent_secret", required_owner(context)?),
         KmsScope::UserSecret => {
             let segment = match context.name.as_deref() {
                 Some(name) if name.starts_with("mcp.") => "mcp",

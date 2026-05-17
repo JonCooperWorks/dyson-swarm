@@ -302,6 +302,11 @@ async fn full_walkthrough() {
     ));
     let app_state = http::AppState {
         user_secrets: user_secrets_svc.clone(),
+        agent_secrets: Arc::new(dyson_swarm::agent_secrets::AgentSecretsService::new(
+            dyson_swarm::db::sqlite::agent_secret_store(pool.clone()),
+            cipher_dir.clone(),
+            dyson_swarm::db::sqlite::secret_access_audit_store(pool.clone()),
+        )),
         system_secrets: system_secrets_svc,
         ciphers: cipher_dir.clone(),
         instances: instance_svc.clone(),

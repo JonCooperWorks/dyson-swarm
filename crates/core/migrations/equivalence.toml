@@ -20,6 +20,11 @@ sqlite = "f6a6cc5274ea2bed5164656cfde9d21732d50b1ceefc417c5b1cf1ab32cd6d79"
 postgres = "d63a3949fcd11eb2621148823c9c52b163215acd9b053a3843e5c8567880346a"
 reason = "dialect syntax differs; logical schema matches sqlite"
 
+[equivalence.agent_secrets]
+sqlite = "8436712b8f2fd391ea1aca7a1e7eadafd2dfbd1e6577f8727366a9e4221b0a44"
+postgres = "44aee6bc6a3d58a473038f748aa52ff75cc43455aa94fbd874f4ec467ae24d9f"
+reason = "postgres uses BIGINT for epoch timestamps and inline FK syntax; logical schema matches sqlite"
+
 [equivalence.apikey_envelope]
 sqlite = "2def1811ac0e7275677b0b82eea3fc787eda881356b5c1d12c34dd45b343c229"
 postgres = "7d8e05f99f2f816a68e3a3cf2559627b9d0c317a90e83ee029c7e093e52ab85e"

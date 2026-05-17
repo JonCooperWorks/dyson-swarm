@@ -25,6 +25,7 @@ import {
   POLICY_OPTIONS,
   CubeProfilePicker,
   McpServersPanel,
+  AgentSecretsPanel,
   NewInstanceForm,
   parseMcpCliJsonConfig,
   findCubeProfile,
@@ -35,6 +36,7 @@ import {
 
 afterEach(() => {
   cleanup();
+  vi.unstubAllGlobals();
   window.history.pushState(null, '', '/');
   setInstances([]);
   setWebhooksFor('a', []);
@@ -54,6 +56,8 @@ describe('instance section rail routing', () => {
       .toBe('#/i/next-id/network');
     expect(instanceRailHref('next-id', { name: 'instance-mcp', id: 'current' }))
       .toBe('#/i/next-id/mcp');
+    expect(instanceRailHref('next-id', { name: 'instance-agent-secrets', id: 'current' }))
+      .toBe('#/i/next-id/agent-secrets');
     expect(instanceRailHref('next-id', { name: 'instance-channels', id: 'current' }))
       .toBe('#/i/next-id/channels');
   });
@@ -73,6 +77,7 @@ describe('instance section rail routing', () => {
     expect(instanceSectionFromView({ name: 'instance-tools', id: 'a' })).toBe('tools');
     expect(instanceSectionFromView({ name: 'instance-channels', id: 'a' })).toBe('channels');
     expect(instanceSectionFromView({ name: 'instance-mcp', id: 'a' })).toBe('mcp');
+    expect(instanceSectionFromView({ name: 'instance-agent-secrets', id: 'a' })).toBe('agent-secrets');
     expect(instanceSectionFromView({ name: 'instance-snapshots', id: 'a' })).toBe('snapshots');
     expect(instanceSectionFromView({ name: 'instance-runtime', id: 'a' })).toBe('runtime');
   });
@@ -1065,6 +1070,61 @@ describe('McpServersPanel', () => {
     expect(await screen.findByText(/Use the remote MCP form/)).toBeInTheDocument();
     expect(client.putMcpJsonConfig).not.toHaveBeenCalled();
     expect(client.putMcpServer).not.toHaveBeenCalled();
+  });
+});
+
+describe('AgentSecretsPanel', () => {
+  const h = React.createElement;
+
+  function renderPanel(client, props = {}) {
+    return render(
+      h(ApiProvider, { client, auth: { config: { cube_profiles: [] } } },
+        h(AgentSecretsPanel, {
+          instanceId: 'inst-1',
+          disabled: false,
+          ...props,
+        }),
+      ),
+    );
+  }
+
+  test('lists metadata and supports add, reveal, and delete', async () => {
+    vi.stubGlobal('confirm', vi.fn(() => true));
+    const client = {
+      listAgentSecrets: vi.fn()
+        .mockResolvedValueOnce([
+          { name: 'api.token', created_at: 100, updated_at: 101, last_read_at: null },
+        ])
+        .mockResolvedValueOnce([
+          { name: 'api.token', created_at: 100, updated_at: 101, last_read_at: null },
+          { name: 'new.secret', created_at: 102, updated_at: 102, last_read_at: null },
+        ]),
+      putAgentSecret: vi.fn().mockResolvedValue({ name: 'new.secret' }),
+      revealAgentSecret: vi.fn().mockResolvedValue({ name: 'api.token', value: 'shh-value' }),
+      deleteAgentSecret: vi.fn().mockResolvedValue(null),
+    };
+    renderPanel(client);
+
+    await screen.findByText('api.token');
+    expect(screen.queryByText('shh-value')).toBeNull();
+
+    fireEvent.change(screen.getByLabelText('name'), { target: { value: 'new.secret' } });
+    fireEvent.change(screen.getByLabelText('value'), { target: { value: 'stored-value' } });
+    fireEvent.click(screen.getByRole('button', { name: 'save' }));
+
+    await waitFor(() => expect(client.putAgentSecret).toHaveBeenCalledWith(
+      'inst-1',
+      'new.secret',
+      'stored-value',
+    ));
+    await screen.findByText('new.secret');
+
+    fireEvent.click(screen.getAllByRole('button', { name: 'reveal' })[0]);
+    await screen.findByText('shh-value');
+    expect(client.revealAgentSecret).toHaveBeenCalledWith('inst-1', 'api.token');
+
+    fireEvent.click(screen.getAllByRole('button', { name: 'delete' })[0]);
+    await waitFor(() => expect(client.deleteAgentSecret).toHaveBeenCalledWith('inst-1', 'api.token'));
   });
 });
 

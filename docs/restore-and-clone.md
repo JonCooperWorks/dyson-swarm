@@ -35,6 +35,8 @@ Default clone:
 - copies name, task, models, tools, network policy, per-instance secrets, and
   MCP server records
 - preserves MCP OAuth token records under the new instance id
+- does not copy `agent_secrets`; agent-visible credentials stay scoped to the
+  source instance unless a future explicit copy flow is added
 - leaves the source instance running
 
 `empty=true` clone:
@@ -42,6 +44,7 @@ Default clone:
 - skips the snapshot
 - boots a clean cube from the target template
 - still copies Swarm-owned config, secrets, policy, tools, and MCP records
+- does not copy `agent_secrets`
 - does not carry VM workspace files, chat files, kb files, or skills from the
   source disk
 
@@ -51,9 +54,9 @@ intentionally wants a clean workspace with the same Swarm-side setup.
 ## Reset, Recreate, Rotate, Change Network
 
 Tenant reset keeps the same Swarm id and DNS name but swaps in a clean sandbox.
-Swarm-owned config, secrets, MCP records, network policy, bearer token, webhook
-URLs, and mirrored state survive. Local files that never reached the state
-mirror can be lost.
+Swarm-owned config, secrets, agent secrets, MCP records, network policy, bearer
+token, webhook URLs, and mirrored state survive. Local files that never reached
+the state mirror can be lost.
 
 Operator recreate is the same kind of snapshot-less in-place swap and is meant
 as an escape hatch when the snapshot path is broken.

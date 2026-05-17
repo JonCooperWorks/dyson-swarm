@@ -282,6 +282,11 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         user_secrets_store,
         cipher_dir.clone(),
     ));
+    let agent_secrets_svc = Arc::new(dyson_swarm::agent_secrets::AgentSecretsService::new(
+        stores.agent_secrets.clone(),
+        cipher_dir.clone(),
+        stores.secret_access_audit.clone(),
+    ));
     let system_secrets_svc = Arc::new(dyson_swarm::secrets::SystemSecretsService::new(
         system_secrets_store,
         cipher_dir.clone(),
@@ -313,6 +318,7 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     // posture as the OpenRouter BYOK path.
     instance_svc = instance_svc.with_mcp_secrets(user_secrets_svc.clone());
     instance_svc = instance_svc.with_channels(stores.channels.clone());
+    instance_svc = instance_svc.with_agent_secrets(stores.agent_secrets.clone());
     instance_svc = instance_svc.with_state_files(state_files.clone());
     let instance_svc = Arc::new(instance_svc);
     if let Err(err) = instance_svc
@@ -763,6 +769,7 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
 
     let app_state = http::AppState {
         user_secrets: user_secrets_svc,
+        agent_secrets: agent_secrets_svc,
         system_secrets: system_secrets_svc,
         ciphers: cipher_dir.clone(),
         instances: instance_svc,

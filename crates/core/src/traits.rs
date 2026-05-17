@@ -734,6 +734,62 @@ pub trait UserSecretStore: Send + Sync {
     async fn list(&self, user_id: &str) -> Result<Vec<(String, String)>, StoreError>;
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentSecretMetadata {
+    pub owner_user_id: String,
+    pub instance_id: String,
+    pub name: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub last_read_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentSecretRow {
+    pub owner_user_id: String,
+    pub instance_id: String,
+    pub name: String,
+    pub ciphertext: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub last_read_at: Option<i64>,
+}
+
+#[async_trait]
+pub trait AgentSecretStore: Send + Sync {
+    async fn put(
+        &self,
+        owner_user_id: &str,
+        instance_id: &str,
+        name: &str,
+        ciphertext: &str,
+    ) -> Result<AgentSecretMetadata, StoreError>;
+    async fn get(
+        &self,
+        owner_user_id: &str,
+        instance_id: &str,
+        name: &str,
+    ) -> Result<Option<AgentSecretRow>, StoreError>;
+    async fn list_metadata(
+        &self,
+        owner_user_id: &str,
+        instance_id: &str,
+    ) -> Result<Vec<AgentSecretMetadata>, StoreError>;
+    async fn touch_last_read(
+        &self,
+        owner_user_id: &str,
+        instance_id: &str,
+        name: &str,
+    ) -> Result<(), StoreError>;
+    async fn delete(
+        &self,
+        owner_user_id: &str,
+        instance_id: &str,
+        name: &str,
+    ) -> Result<(), StoreError>;
+    async fn delete_for_instance(&self, instance_id: &str) -> Result<(), StoreError>;
+}
+
 /// Global opaque ciphertexts (one row per `name`).  Used for provider
 /// API keys, the OpenRouter provisioning key, and anything else not
 /// owned by a real user.  Encrypted with the system-scope cipher

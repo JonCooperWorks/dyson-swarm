@@ -94,6 +94,20 @@ environment as per-instance secrets; external tool/service credentials should
 be attached through MCP so swarm can proxy and refresh them without exposing
 the upstream secret to the agent.
 
+### Agent secrets
+
+Agent secrets are instance-scoped credentials intentionally visible to the
+owning agent through Dyson's `agent_secrets` built-in tool. They are not human
+vault secrets and are not implemented as MCP. Swarm stores the encrypted value
+in `agent_secrets` under `(owner_user_id, instance_id, name)` and exposes
+metadata without decrypting values. User API/UI reveal and agent tool `get`
+are the only routes that return plaintext values.
+
+Same-id recreate, reset, and template rotation preserve agent secrets because
+the Swarm instance id stays stable. Snapshot restore and clone create a fresh
+instance id and do not copy agent secrets by default. Destroying an instance
+deletes its agent secrets with the instance cleanup.
+
 ### Per-user secrets
 
 Encrypted under the user’s own age key:
@@ -132,6 +146,7 @@ Representative scoped paths:
 - `keys/users/<user_id>/state/v1.age` for mirrored state-file bodies
 - `keys/users/<user_id>/artefact/v1.age` for cached artefact bodies
 - `keys/users/<user_id>/tool_calls/v1.age` for sealed LLM tool-call audit
+- `keys/users/<user_id>/agent_secret/v1.age` for agent-visible instance secrets
 
 This layout provides cryptographic separation by scope. Logical names are still
 stored in plaintext where the surrounding table already stores them; KMS v2 does

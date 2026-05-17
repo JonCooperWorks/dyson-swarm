@@ -3906,6 +3906,27 @@ const MCP_JSON_CONFIG_EXAMPLE = `{
 const MCP_TEMPLATE_PLACEHOLDER_RE = /{{\s*placeholders?\.([A-Za-z0-9_-]+)\s*}}/g;
 const MCP_CATALOG_REQUEST_ID_RE = /^[A-Za-z0-9_-]+$/;
 const DOCKER_REQUEST_OPTION_LABEL = 'Request Docker image';
+const MCP_AUTO_CHECK_INTERVAL_MS = 2500;
+const MCP_AUTO_CHECK_MAX_ATTEMPTS = 12;
+
+function delay(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function mcpAutoCheckNameFromHash(instanceId) {
+  if (typeof window === 'undefined') return null;
+  const hash = window.location.hash || '';
+  const match = hash.match(/^#\/i\/([^/?#]+)\/mcp(?:\?([^#]*))?/);
+  if (!match) return null;
+  let hashInstanceId = match[1];
+  try {
+    hashInstanceId = decodeURIComponent(hashInstanceId);
+  } catch {
+    // Leave the raw id in place; a malformed hash just won't match.
+  }
+  if (hashInstanceId !== instanceId) return null;
+  return new URLSearchParams(match[2] || '').get('mcp_check') || null;
+}
 
 // ─── MCP servers panel (instance detail) ──────────────────────────
 //
@@ -3925,6 +3946,9 @@ export function McpServersPanel({ instanceId, policyKind, disabled }) {
   const [err, setErr] = React.useState(null);
   const [notice, setNotice] = React.useState(null);
   const [busy, setBusy] = React.useState(false);
+  const [autoChecking, setAutoChecking] = React.useState(null);
+  const autoCheckRunRef = React.useRef(0);
+  const hashAutoCheckRef = React.useRef(null);
   // editing: null | { mode: 'new' } | { mode: 'edit', row }
   // Edit-button path fetches the full URL before opening the modal.
   const [editing, setEditing] = React.useState(null);
@@ -3950,6 +3974,67 @@ export function McpServersPanel({ instanceId, policyKind, disabled }) {
     }
   }, [client, instanceId]);
   React.useEffect(() => { refresh(); }, [refresh]);
+  React.useEffect(() => () => {
+    autoCheckRunRef.current += 1;
+  }, []);
+
+  const autoCheckServer = React.useCallback(async (name, { waitForConnected = false } = {}) => {
+    if (!name) return;
+    const runId = autoCheckRunRef.current + 1;
+    autoCheckRunRef.current = runId;
+    setAutoChecking({ name });
+    setErr(null);
+    setNotice(`Checking MCP server "${name}"…`);
+
+    try {
+      for (let attempt = 0; attempt < MCP_AUTO_CHECK_MAX_ATTEMPTS; attempt += 1) {
+        if (attempt > 0) {
+          await delay(MCP_AUTO_CHECK_INTERVAL_MS);
+          if (autoCheckRunRef.current !== runId) return;
+        }
+
+        try {
+          if (waitForConnected) {
+            const list = await client.listMcpServers(instanceId);
+            if (autoCheckRunRef.current !== runId) return;
+            const nextRows = Array.isArray(list) ? list : [];
+            setRows(nextRows);
+            const row = nextRows.find(r => r.name === name);
+            if (!row || (row.auth_kind === 'oauth' && !row.connected)) {
+              continue;
+            }
+          }
+
+          const result = await client.checkMcpServer(instanceId, name);
+          if (autoCheckRunRef.current !== runId) return;
+          await refresh();
+          if (autoCheckRunRef.current !== runId) return;
+          const toolCount = Array.isArray(result?.tools) ? result.tools.length : 0;
+          setNotice(`MCP server "${name}" checked · ${toolCount} tools`);
+          return;
+        } catch (e) {
+          console.warn('[swarm] mcp auto-check failed', e);
+        }
+      }
+
+      if (autoCheckRunRef.current !== runId) return;
+      await refresh().catch(() => {});
+      setNotice(`MCP server "${name}" was not ready after auto-check. Use check to retry.`);
+    } finally {
+      if (autoCheckRunRef.current === runId) {
+        setAutoChecking(null);
+      }
+    }
+  }, [client, instanceId, refresh]);
+
+  React.useEffect(() => {
+    const name = mcpAutoCheckNameFromHash(instanceId);
+    if (!name) return;
+    const key = `${instanceId}:${name}`;
+    if (hashAutoCheckRef.current === key) return;
+    hashAutoCheckRef.current = key;
+    autoCheckServer(name, { waitForConnected: true });
+  }, [autoCheckServer, instanceId]);
 
   const remove = async name => {
     if (!confirm(`remove MCP server ${name}? the agent will stop seeing this tool set.`)) return;
@@ -3980,11 +4065,12 @@ export function McpServersPanel({ instanceId, policyKind, disabled }) {
   const connect = async name => {
     setBusy(true); setErr(null);
     try {
-      const ret = `${window.location.origin}/#/i/${encodeURIComponent(instanceId)}`;
+      const ret = `${window.location.origin}/#/i/${encodeURIComponent(instanceId)}/mcp?mcp_check=${encodeURIComponent(name)}`;
       const { authorization_url } = await client.startMcpOAuth(instanceId, name, { return_to: ret });
       // Open in a new tab so the user keeps their place; the callback
       // page lands them somewhere they can close.
       window.open(authorization_url, '_blank', 'noopener,noreferrer');
+      autoCheckServer(name, { waitForConnected: true });
     } catch (e) {
       setErr(formatMcpPanelError(e, 'connect'));
     } finally {
@@ -3998,6 +4084,11 @@ export function McpServersPanel({ instanceId, policyKind, disabled }) {
       await client.putMcpServer(instanceId, spec.name, { url: spec.url, auth: spec.auth });
       await refresh();
       setEditing(null);
+      if (spec.auth?.kind === 'oauth') {
+        setNotice(`Saved "${spec.name}". Connect OAuth to finish setup.`);
+      } else {
+        autoCheckServer(spec.name);
+      }
     } catch (e) {
       setErr(formatMcpPanelError(e, 'save'));
     } finally {
@@ -4008,9 +4099,11 @@ export function McpServersPanel({ instanceId, policyKind, disabled }) {
   const submitCliJson = async (config) => {
     setBusy(true); setErr(null);
     try {
+      const serverName = mcpServerNameFromConfig(config);
       await client.putMcpJsonConfig(instanceId, config);
       await refresh();
       setEditing(null);
+      autoCheckServer(serverName);
     } catch (e) {
       setErr(formatMcpPanelError(e, 'save'));
     } finally {
@@ -4021,9 +4114,10 @@ export function McpServersPanel({ instanceId, policyKind, disabled }) {
   const submitDockerCatalog = async ({ catalogId, placeholders }) => {
     setBusy(true); setErr(null);
     try {
-      await client.putMcpDockerCatalogServer(instanceId, catalogId, placeholders);
+      const result = await client.putMcpDockerCatalogServer(instanceId, catalogId, placeholders);
       await refresh();
       setEditing(null);
+      if (result?.name) autoCheckServer(result.name);
     } catch (e) {
       setErr(formatMcpPanelError(e, 'save'));
     } finally {
@@ -4126,6 +4220,7 @@ export function McpServersPanel({ instanceId, policyKind, disabled }) {
                 instanceId={instanceId}
                 policyKind={policyKind}
                 busy={busy || disabled}
+                autoChecking={autoChecking?.name === r.name}
                 onEdit={canEdit ? () => openEdit(r) : null}
                 onConnect={() => connect(r.name)}
                 onDisconnect={() => disconnect(r.name)}
@@ -4158,6 +4253,7 @@ function McpServerRow({
   instanceId,
   policyKind,
   busy,
+  autoChecking,
   onEdit,
   onConnect,
   onDisconnect,
@@ -4248,7 +4344,7 @@ function McpServerRow({
   };
 
   const statusBadge = (() => {
-    if (checking) return <span className="mcp-row-status small muted">checking…</span>;
+    if (checking || autoChecking) return <span className="mcp-row-status small muted">checking…</span>;
     if (checkErr) return <span className="mcp-row-status small mcp-row-warning">last check failed</span>;
     if (catalog) return (
       <span className="mcp-row-status small muted">
@@ -4293,7 +4389,7 @@ function McpServerRow({
         <button
           className="btn btn-ghost btn-sm"
           onClick={runCheck}
-          disabled={busy || checking || (isOauth && !row.connected)}
+          disabled={busy || checking || autoChecking || (isOauth && !row.connected)}
           title={isOauth && !row.connected ? 'authenticate before checking' : undefined}
         >
           {catalog ? 're-check' : 'check'}

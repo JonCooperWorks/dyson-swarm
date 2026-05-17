@@ -35,6 +35,7 @@ import {
 
 afterEach(() => {
   cleanup();
+  vi.restoreAllMocks();
   window.history.pushState(null, '', '/');
   setInstances([]);
   setWebhooksFor('a', []);
@@ -639,6 +640,7 @@ describe('McpServersPanel', () => {
     const fullClient = {
       listMcpDockerCatalog: vi.fn().mockResolvedValue({ allow_raw_json: true, servers: [] }),
       requestMcpDockerCatalogServer: vi.fn().mockResolvedValue({ status: 'pending' }),
+      checkMcpServer: vi.fn().mockResolvedValue({ tools: [], last_checked_at: 0 }),
       ...client,
     };
     return render(
@@ -683,6 +685,96 @@ describe('McpServersPanel', () => {
       },
     ]);
     expect(client.putMcpJsonConfig).not.toHaveBeenCalled();
+  });
+
+  test('remote add flow automatically checks the saved server', async () => {
+    let rows = [];
+    const client = {
+      listMcpServers: vi.fn(async () => rows),
+      putMcpServer: vi.fn(async () => {
+        rows = [{
+          name: 'linear',
+          url: 'https://api.linear.app/mcp',
+          auth_kind: 'none',
+          connected: true,
+        }];
+        return { ok: true };
+      }),
+      checkMcpServer: vi.fn().mockResolvedValue({
+        tools: [{ name: 'issue_list' }],
+        last_checked_at: 123,
+      }),
+      putMcpJsonConfig: vi.fn(),
+    };
+    renderPanel(client);
+
+    await screen.findByText('no MCP servers attached.');
+    fireEvent.click(screen.getByRole('button', { name: 'add' }));
+    fireEvent.change(screen.getByLabelText('name'), { target: { value: 'linear' } });
+    fireEvent.change(screen.getByLabelText('URL'), { target: { value: 'https://api.linear.app/mcp' } });
+    fireEvent.click(screen.getByRole('button', { name: 'save' }));
+
+    await waitFor(() => expect(client.putMcpServer).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(client.checkMcpServer).toHaveBeenCalledWith('inst-1', 'linear'));
+  });
+
+  test('OAuth connect returns to the MCP tab and automatically checks after auth', async () => {
+    let connected = false;
+    const openSpy = vi.spyOn(window, 'open').mockImplementation(() => null);
+    const client = {
+      listMcpServers: vi.fn(async () => [{
+        name: 'linear',
+        url: 'https://api.linear.app/mcp',
+        auth_kind: 'oauth',
+        connected,
+      }]),
+      startMcpOAuth: vi.fn(async () => {
+        connected = true;
+        return { authorization_url: 'https://auth.example/start' };
+      }),
+      checkMcpServer: vi.fn().mockResolvedValue({
+        tools: [{ name: 'issue_list' }],
+        last_checked_at: 123,
+      }),
+      putMcpServer: vi.fn(),
+      putMcpJsonConfig: vi.fn(),
+    };
+    renderPanel(client);
+
+    await screen.findByText('OAuth sign-in needed');
+    fireEvent.click(screen.getByRole('button', { name: 'connect' }));
+
+    await waitFor(() => expect(client.startMcpOAuth).toHaveBeenCalledTimes(1));
+    expect(client.startMcpOAuth.mock.calls[0][2].return_to)
+      .toContain('/#/i/inst-1/mcp?mcp_check=linear');
+    expect(openSpy).toHaveBeenCalledWith(
+      'https://auth.example/start',
+      '_blank',
+      'noopener,noreferrer',
+    );
+    await waitFor(() => expect(client.checkMcpServer).toHaveBeenCalledWith('inst-1', 'linear'));
+  });
+
+  test('OAuth callback hash automatically checks the connected server', async () => {
+    window.location.hash = '#/i/inst-1/mcp?mcp_check=linear';
+    const client = {
+      listMcpServers: vi.fn().mockResolvedValue([{
+        name: 'linear',
+        url: 'https://api.linear.app/mcp',
+        auth_kind: 'oauth',
+        connected: true,
+      }]),
+      checkMcpServer: vi.fn().mockResolvedValue({
+        tools: [{ name: 'issue_list' }],
+        last_checked_at: 123,
+      }),
+      putMcpServer: vi.fn(),
+      putMcpJsonConfig: vi.fn(),
+    };
+    renderPanel(client);
+
+    await screen.findByText('linear');
+    await waitFor(() => expect(client.checkMcpServer).toHaveBeenCalledWith('inst-1', 'linear'));
   });
 
   test('Docker JSON add path is hidden when the catalog disallows raw JSON', async () => {

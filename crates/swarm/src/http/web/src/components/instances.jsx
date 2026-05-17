@@ -396,6 +396,7 @@ const TOOL_CATALOGUE = [
   { name: 'kb_status',                  group: 'knowledge' },
   { name: 'memory_search',              group: 'knowledge' },
   { name: 'workspace',                  group: 'knowledge' },
+  { name: 'agent_secrets',              group: 'knowledge' },
   { name: 'dependency_scan',            group: 'security', requiresNetwork: true },
   { name: 'ast_describe',               group: 'security' },
   { name: 'ast_query',                  group: 'security' },

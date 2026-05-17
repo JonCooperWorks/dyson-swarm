@@ -1744,6 +1744,7 @@ describe('initialTools', () => {
     const got = initialTools(null, 'open');
     expect(got.length).toBeGreaterThan(20);
     expect(got).toContain('bash');
+    expect(got).toContain('agent_secrets');
   });
 });
 

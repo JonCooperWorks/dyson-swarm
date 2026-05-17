@@ -146,8 +146,17 @@
   min-width: 0;
   padding: 14px 16px;
   border-right: 1px solid var(--border);
+  color: inherit;
+  text-decoration: none;
 }
 .admin-overview-summary-item:last-child { border-right: 0; }
+.admin-overview-summary-item:hover {
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+.admin-overview-summary-item:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
 
 .admin-overview-summary-value {
   display: block;
@@ -399,8 +408,7 @@
 }
 
 .admin-record-panel .panel-header,
-.admin-kms-audit-panel .panel-header,
-.admin-proxy-token-panel .panel-header {
+.admin-kms-audit-panel .panel-header {
   margin-bottom: 0;
 }
 
@@ -434,8 +442,7 @@
   overflow-wrap: anywhere;
 }
 
-.admin-record-id,
-.admin-user-subject {
+.admin-record-id {
   color: var(--fg);
 }
 
@@ -473,10 +480,6 @@
   margin-left: 0;
 }
 
-.admin-user-action-group {
-  min-width: 220px;
-}
-
 .admin-catalog-table th:nth-child(1) { width: 130px; }
 .admin-catalog-table th:nth-child(3) { width: 130px; }
 .admin-catalog-table th:nth-child(4) { width: 96px; }
@@ -495,62 +498,8 @@
 .virtual-catalog-table th:nth-child(5) { width: 116px; }
 .virtual-catalog-table th:nth-child(6) { width: 172px; }
 
-.admin-users-table th:nth-child(1) { width: 250px; }
-.admin-users-table th:nth-child(2) { width: 260px; }
-.admin-users-table th:nth-child(3) { width: 84px; }
-.admin-users-table th:nth-child(4) { width: 92px; }
-.admin-users-table th:nth-child(5) { width: 92px; }
-.admin-users-table th:nth-child(6) { width: 92px; }
-.admin-users-table th:nth-child(7) { width: 144px; }
-.admin-users-table th:nth-child(8) { width: 240px; }
-
 .admin-danger-panel {
   border-color: color-mix(in srgb, var(--danger) 35%, var(--border));
-}
-
-.admin-section-page-proxy-tokens > .admin-proxy-token-panel {
-  width: min(100%, 920px);
-}
-
-.admin-proxy-token-panel {
-  padding: 16px;
-}
-
-.admin-proxy-token-layout {
-  display: grid;
-  grid-template-columns: minmax(180px, 260px) minmax(0, 1fr);
-  gap: 18px;
-  align-items: end;
-}
-
-.admin-proxy-token-copy {
-  display: grid;
-  gap: 8px;
-  align-self: stretch;
-  align-content: start;
-  padding: 12px;
-  border: 1px solid color-mix(in srgb, var(--danger) 32%, var(--border));
-  border-radius: var(--radius);
-  background: color-mix(in srgb, var(--danger) 6%, var(--bg));
-}
-
-.admin-proxy-token-copy p {
-  margin: 0;
-}
-
-.admin-token-revoke-form {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: end;
-  gap: 10px;
-}
-
-.admin-token-field {
-  min-width: 0;
-}
-
-.admin-token-revoke-button {
-  min-height: var(--control-height);
 }
 
 .admin-kms-audit-panel {
@@ -682,9 +631,6 @@
   .admin-kms-audit-table tr {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
-  .admin-proxy-token-layout {
-    grid-template-columns: 1fr;
-  }
 }
 
 @media (max-width: 620px) {
@@ -721,15 +667,8 @@
     min-height: 0;
   }
   .admin-record-panel,
-  .admin-kms-audit-panel,
-  .admin-proxy-token-panel {
+  .admin-kms-audit-panel {
     padding: 12px;
-  }
-  .admin-token-revoke-form {
-    grid-template-columns: 1fr;
-  }
-  .admin-token-revoke-button {
-    width: 100%;
   }
   .admin-kms-audit-meta {
     margin-top: -2px;
@@ -2957,9 +2896,6 @@
   }
   .admin-row-action-group {
     justify-content: flex-start;
-  }
-  .admin-user-action-group {
-    min-width: 0;
   }
 }
 

@@ -100,17 +100,6 @@ describe('admin KMS audit layout', () => {
     expect(mobileRule).toContain('border: 0');
     expect(mobileRule).toContain('background: transparent');
   });
-
-  test('keeps proxy token revocation form compact and mobile stackable', () => {
-    const panelRule = ruleBody(panelsCss, '.admin-section-page-proxy-tokens > .admin-proxy-token-panel');
-    const formRule = ruleBody(panelsCss, '.admin-token-revoke-form');
-    const mobileRule = mediaRuleBody(panelsCss, '@media (max-width: 620px)', '.admin-token-revoke-form');
-
-    expect(panelRule).toContain('width: min(100%, 920px)');
-    expect(formRule).toContain('grid-template-columns: minmax(0, 1fr) auto');
-    expect(formRule).toContain('align-items: end');
-    expect(mobileRule).toContain('grid-template-columns: 1fr');
-  });
 });
 
 function mobileBlock(css) {

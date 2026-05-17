@@ -56,6 +56,11 @@ describe('AdminView Docker MCP catalog', () => {
     expect(client.adminRevokeProxyToken).not.toHaveBeenCalled();
     expect(screen.getByText('agent catalogs')).toBeInTheDocument();
     expect(screen.getByText('pending review')).toBeInTheDocument();
+    const summary = screen.getByLabelText('admin overview summary');
+    expect(within(summary).getByRole('link', { name: /2 users/i }))
+      .toHaveAttribute('href', '#/admin/users');
+    expect(within(summary).getByRole('link', { name: /1 pending review/i }))
+      .toHaveAttribute('href', '#/admin/mcp-catalog');
     expect(screen.queryByText('paged')).not.toBeInTheDocument();
     expect(screen.queryByText('revoke')).not.toBeInTheDocument();
   });
@@ -74,6 +79,7 @@ describe('AdminView Docker MCP catalog', () => {
 
     expect(await screen.findByRole('heading', { name: 'Users' })).toBeInTheDocument();
     expect(await screen.findByText('no users.')).toBeInTheDocument();
+    expect(screen.getByText('no users.').closest('section')).not.toHaveClass('admin-record-panel');
     expect(screen.getByRole('link', { name: 'overview' })).toHaveAttribute('href', '#/admin');
     expect(screen.getByRole('link', { name: 'Users' })).toHaveClass('active');
 
@@ -85,6 +91,8 @@ describe('AdminView Docker MCP catalog', () => {
 
     expect(await screen.findByRole('heading', { name: 'Proxy tokens' })).toBeInTheDocument();
     expect(screen.getByLabelText('proxy token')).toBeInTheDocument();
+    expect(screen.getByLabelText('proxy token').closest('section')).not.toHaveClass('admin-proxy-token-panel');
+    expect(screen.getByText(/Subsequent/)).toBeInTheDocument();
   });
 
   test('KMS audit section paginates without showing secret material', async () => {

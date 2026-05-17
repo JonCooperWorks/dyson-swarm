@@ -164,10 +164,15 @@ function AdminLandingPage({ client }) {
       <AdminPageHeader title="Admin console" subtitle="Operator controls for the Swarm control plane"/>
       <section className="admin-overview-summary" aria-label="admin overview summary">
         {overviewSummaryItems(overview).map(item => (
-          <div className="admin-overview-summary-item" key={item.label}>
+          <a
+            className="admin-overview-summary-item"
+            href={item.href}
+            aria-label={`${item.value} ${item.label}`}
+            key={item.label}
+          >
             <span className="admin-overview-summary-value">{item.value}</span>
             <span className="admin-overview-summary-label">{item.label}</span>
-          </div>
+          </a>
         ))}
       </section>
       <div className="admin-overview-grid">
@@ -358,17 +363,17 @@ function overviewMetrics(key, overview) {
 function overviewSummaryItems(overview) {
   if (overview.state !== 'ready') {
     return [
-      { label: 'users', value: '...' },
-      { label: 'templates', value: '...' },
-      { label: 'skill sources', value: '...' },
-      { label: 'pending review', value: '...' },
+      { label: 'users', value: '...', href: '#/admin/users' },
+      { label: 'templates', value: '...', href: '#/admin/mcp-catalog' },
+      { label: 'skill sources', value: '...', href: '#/admin/skill-marketplaces' },
+      { label: 'pending review', value: '...', href: '#/admin/mcp-catalog' },
     ];
   }
   return [
-    { label: 'users', value: overview.users.total },
-    { label: 'templates', value: overview.docker.total },
-    { label: 'skill sources', value: overview.marketplaces.total + overview.marketplaces.virtual },
-    { label: 'pending review', value: overview.docker.pending },
+    { label: 'users', value: overview.users.total, href: '#/admin/users' },
+    { label: 'templates', value: overview.docker.total, href: '#/admin/mcp-catalog' },
+    { label: 'skill sources', value: overview.marketplaces.total + overview.marketplaces.virtual, href: '#/admin/skill-marketplaces' },
+    { label: 'pending review', value: overview.docker.pending, href: '#/admin/mcp-catalog' },
   ];
 }
 
@@ -1707,12 +1712,9 @@ function UsersPanel({ client }) {
   };
 
   return (
-    <section className="panel admin-record-panel admin-users-panel">
+    <section className="panel">
       <div className="panel-header">
-        <div className="panel-title-stack">
-          <div className="panel-title">users</div>
-          <p className="muted small panel-subtitle">Account status, API keys, and OpenRouter limits.</p>
-        </div>
+        <div className="panel-title">users</div>
         <div className="panel-actions">
           <button className="btn btn-ghost btn-sm" onClick={refresh}>refresh</button>
         </div>
@@ -1731,7 +1733,7 @@ function UsersPanel({ client }) {
       ) : rows.length === 0 ? (
         <p className="muted small">no users.</p>
       ) : (
-        <table className="rows admin-record-table admin-users-table">
+        <table className="rows">
           <thead><tr>
             <th>id</th><th>subject</th><th>email</th><th>status</th>
             <th>OR key</th><th>OR limit</th>
@@ -1740,8 +1742,8 @@ function UsersPanel({ client }) {
           <tbody>
             {rows.map(u => (
               <tr key={u.id}>
-                <td data-label="id"><code className="mono-sm admin-record-id">{u.id}</code></td>
-                <td data-label="subject"><code className="mono-sm admin-user-subject">{u.subject}</code></td>
+                <td data-label="id"><code className="mono-sm">{u.id}</code></td>
+                <td data-label="subject"><code className="mono-sm">{u.subject}</code></td>
                 <td data-label="email" className="muted small">{u.email || '—'}</td>
                 <td data-label="status"><UserStatusBadge status={u.status}/></td>
                 <td data-label="OR key">
@@ -1754,36 +1756,34 @@ function UsersPanel({ client }) {
                 <td data-label="OR limit" className="muted small">${(u.openrouter_key_limit_usd ?? 0).toFixed(2)}</td>
                 <td data-label="created" className="muted small">{fmtTime(u.created_at)}</td>
                 <td className="row-actions">
-                  <div className="admin-row-action-group admin-user-action-group">
-                    {u.status !== 'active' ? (
-                      <button className="btn btn-ghost btn-sm" onClick={() => setStatus(u.id, 'activate')} disabled={busy}>
-                        activate
-                      </button>
-                    ) : (
-                      <button className="btn btn-ghost btn-sm" onClick={() => setStatus(u.id, 'suspend')} disabled={busy}>
-                        suspend
-                      </button>
-                    )}
-                    <button className="btn btn-ghost btn-sm" onClick={() => mint(u.id)} disabled={busy}>
-                      mint api key
+                  {u.status !== 'active' ? (
+                    <button className="btn btn-ghost btn-sm" onClick={() => setStatus(u.id, 'activate')} disabled={busy}>
+                      activate
                     </button>
-                    <button
-                      className="btn btn-ghost btn-sm"
-                      onClick={() => setOrLimit(u.id, u.openrouter_key_limit_usd)}
-                      disabled={busy}
-                      title="set the user's OpenRouter USD spend cap"
-                    >
-                      OR limit
+                  ) : (
+                    <button className="btn btn-ghost btn-sm" onClick={() => setStatus(u.id, 'suspend')} disabled={busy}>
+                      suspend
                     </button>
-                    <button
-                      className="btn btn-ghost btn-sm"
-                      onClick={() => forceMintOr(u.id)}
-                      disabled={busy}
-                      title="rotate (or first-time mint) the user's OpenRouter key"
-                    >
-                      {u.openrouter_key_present ? 'rotate OR' : 'mint OR'}
-                    </button>
-                  </div>
+                  )}
+                  <button className="btn btn-ghost btn-sm" onClick={() => mint(u.id)} disabled={busy}>
+                    mint api key
+                  </button>
+                  <button
+                    className="btn btn-ghost btn-sm"
+                    onClick={() => setOrLimit(u.id, u.openrouter_key_limit_usd)}
+                    disabled={busy}
+                    title="set the user's OpenRouter USD spend cap"
+                  >
+                    OR limit
+                  </button>
+                  <button
+                    className="btn btn-ghost btn-sm"
+                    onClick={() => forceMintOr(u.id)}
+                    disabled={busy}
+                    title="rotate (or first-time mint) the user's OpenRouter key"
+                  >
+                    {u.openrouter_key_present ? 'rotate OR' : 'mint OR'}
+                  </button>
                 </td>
               </tr>
             ))}
@@ -2014,35 +2014,30 @@ function ProxyTokensPanel({ client }) {
   };
 
   return (
-    <section className="panel admin-danger-panel admin-proxy-token-panel">
+    <section className="panel admin-danger-panel">
       <div className="panel-header">
-        <div className="panel-title-stack">
-          <div className="panel-title">proxy token revocation</div>
-          <p className="muted small panel-subtitle">Emergency control for leaked per-instance LLM proxy tokens.</p>
-        </div>
+        <div className="panel-title">proxy token revocation</div>
       </div>
-      <div className="admin-proxy-token-layout">
-        <div className="admin-proxy-token-copy">
-          <span className="badge badge-warn">emergency</span>
-          <p className="muted small">
-            Calls to <code>/llm/*</code> bearing a revoked token return 401 immediately.
-          </p>
-        </div>
-        <form onSubmit={submit} className="form admin-token-revoke-form">
-          <label className="field admin-token-field">
-            <span>proxy token</span>
-            <input
-              type="password"
-              value={token}
-              onChange={e => setToken(e.target.value)}
-              placeholder="paste the leaked token"
-            />
-          </label>
-          <button type="submit" className="btn btn-danger admin-token-revoke-button" disabled={submitting || !token.trim()}>
+      <p className="muted small">
+        Emergency revoke for a leaked per-instance LLM proxy token.
+        Subsequent <code>/llm/*</code> calls bearing this token return 401.
+      </p>
+      <form onSubmit={submit} className="form">
+        <label className="field">
+          <span>proxy token</span>
+          <input
+            type="password"
+            value={token}
+            onChange={e => setToken(e.target.value)}
+            placeholder="paste the leaked token"
+          />
+        </label>
+        <div className="modal-actions">
+          <button type="submit" className="btn btn-danger" disabled={submitting || !token.trim()}>
             {submitting ? 'revoking…' : 'revoke'}
           </button>
-        </form>
-      </div>
+        </div>
+      </form>
       {outcome ? (
         <div className={outcome.ok ? 'banner banner-info' : 'error'}>{outcome.msg}</div>
       ) : null}

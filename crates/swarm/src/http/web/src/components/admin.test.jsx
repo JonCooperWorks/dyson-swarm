@@ -37,7 +37,9 @@ describe('AdminView Docker MCP catalog', () => {
       </ApiProvider>,
     );
 
-    expect(await screen.findByRole('heading', { name: 'admin' })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: 'Admin console' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Manage' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Security operations' })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: /MCP catalog/ }))
       .toHaveAttribute('href', '#/admin/mcp-catalog');
     expect(screen.getByRole('link', { name: /Skill marketplaces/ }))
@@ -53,6 +55,9 @@ describe('AdminView Docker MCP catalog', () => {
     expect(client.listMarketplaceSkills).toHaveBeenCalled();
     expect(client.adminRevokeProxyToken).not.toHaveBeenCalled();
     expect(screen.getByText('agent catalogs')).toBeInTheDocument();
+    expect(screen.getByText('pending review')).toBeInTheDocument();
+    expect(screen.queryByText('paged')).not.toBeInTheDocument();
+    expect(screen.queryByText('revoke')).not.toBeInTheDocument();
   });
 
   test('admin users and proxy token section pages render independently', async () => {

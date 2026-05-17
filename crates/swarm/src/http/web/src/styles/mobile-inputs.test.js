@@ -32,6 +32,17 @@ describe('activity controls', () => {
 });
 
 describe('admin KMS audit layout', () => {
+  test('admin overview uses a bounded dashboard grid', () => {
+    const summaryRule = ruleBody(panelsCss, '.admin-overview-summary');
+    const gridRule = ruleBody(panelsCss, '.admin-overview-grid');
+    const linksRule = ruleBody(panelsCss, '.admin-section-links');
+
+    expect(summaryRule).toContain('width: min(100%, 1180px)');
+    expect(gridRule).toContain('grid-template-columns: minmax(0, 1fr) minmax(280px, 340px)');
+    expect(gridRule).toContain('width: min(100%, 1180px)');
+    expect(linksRule).toContain('grid-template-columns: repeat(3, minmax(0, 1fr))');
+  });
+
   test('caps normal admin section panels so forms do not stretch across wide screens', () => {
     const sectionPageRule = ruleBody(panelsCss, '.admin-section-page');
     const sectionPanelRule = ruleBody(panelsCss, '.admin-section-page > .panel');
@@ -76,6 +87,30 @@ describe('admin KMS audit layout', () => {
     expect(scrollRule).toContain('max-width: 100%');
     expect(scrollRule).toContain('overflow-x: auto');
   });
+
+  test('uses record tables with grouped actions on admin section pages', () => {
+    const tableRule = ruleBody(panelsCss, '.admin-record-table');
+    const actionRule = ruleBody(panelsCss, '.admin-row-action-group');
+    const mobileRule = mediaRuleBody(panelsCss, '@media (max-width: 640px)', '.admin-record-table');
+
+    expect(tableRule).toContain('table-layout: fixed');
+    expect(tableRule).toContain('border-radius: var(--radius)');
+    expect(actionRule).toContain('display: flex');
+    expect(actionRule).toContain('flex-wrap: wrap');
+    expect(mobileRule).toContain('border: 0');
+    expect(mobileRule).toContain('background: transparent');
+  });
+
+  test('keeps proxy token revocation form compact and mobile stackable', () => {
+    const panelRule = ruleBody(panelsCss, '.admin-section-page-proxy-tokens > .admin-proxy-token-panel');
+    const formRule = ruleBody(panelsCss, '.admin-token-revoke-form');
+    const mobileRule = mediaRuleBody(panelsCss, '@media (max-width: 620px)', '.admin-token-revoke-form');
+
+    expect(panelRule).toContain('width: min(100%, 920px)');
+    expect(formRule).toContain('grid-template-columns: minmax(0, 1fr) auto');
+    expect(formRule).toContain('align-items: end');
+    expect(mobileRule).toContain('grid-template-columns: 1fr');
+  });
 });
 
 function mobileBlock(css) {
@@ -87,6 +122,16 @@ function ruleBody(css, selector) {
   const match = new RegExp(`(?:^|\\n)${escapeRegExp(selector)}\\s*\\{`).exec(css);
   if (!match) return '';
   const bodyStart = css.indexOf('{', match.index) + 1;
+  const bodyEnd = css.indexOf('}', bodyStart);
+  return css.slice(bodyStart, bodyEnd);
+}
+
+function mediaRuleBody(css, mediaSelector, selector) {
+  const mediaStart = css.indexOf(mediaSelector);
+  if (mediaStart === -1) return '';
+  const ruleStart = css.indexOf(selector, mediaStart);
+  if (ruleStart === -1) return '';
+  const bodyStart = css.indexOf('{', ruleStart) + 1;
   const bodyEnd = css.indexOf('}', bodyStart);
   return css.slice(bodyStart, bodyEnd);
 }

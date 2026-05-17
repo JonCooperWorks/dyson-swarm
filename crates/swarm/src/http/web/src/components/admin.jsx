@@ -33,30 +33,40 @@ const ADMIN_SECTIONS = [
     href: '#/admin/mcp-catalog',
     label: 'MCP catalog',
     summary: 'Docker MCP templates',
+    description: 'Review operator-curated MCP servers before they appear in user workflows.',
+    cta: 'manage templates',
   },
   {
     key: 'skill-marketplaces',
     href: '#/admin/skill-marketplaces',
     label: 'Skill marketplaces',
     summary: 'Skill source indexes',
+    description: 'Control configured skill sources and agent-published catalogs.',
+    cta: 'manage sources',
   },
   {
     key: 'users',
     href: '#/admin/users',
     label: 'Users',
     summary: 'Accounts and limits',
+    description: 'Inspect account status and operator-visible user limits.',
+    cta: 'review users',
   },
   {
     key: 'proxy-tokens',
     href: '#/admin/proxy-tokens',
     label: 'Proxy tokens',
     summary: 'Emergency revocation',
+    description: 'Paste a compromised runtime proxy token and revoke it immediately.',
+    cta: 'revoke token',
   },
   {
     key: 'kms-audit',
     href: '#/admin/kms-audit',
     label: 'KMS audit',
     summary: 'Secret access events',
+    description: 'Trace secret decrypt activity without exposing secret material.',
+    cta: 'open audit log',
   },
 ];
 
@@ -147,18 +157,52 @@ export function AdminView({ view = { name: 'admin' } }) {
 
 function AdminLandingPage({ client }) {
   const overview = useAdminOverview(client);
+  const primarySections = ADMIN_SECTIONS.filter(section => !['proxy-tokens', 'kms-audit'].includes(section.key));
+  const securitySections = ADMIN_SECTIONS.filter(section => ['proxy-tokens', 'kms-audit'].includes(section.key));
   return (
     <main className="admin-pane admin-overview-page">
-      <AdminPageHeader title="admin" subtitle="Operator controls"/>
-      <nav className="admin-section-links" aria-label="admin sections">
-        {ADMIN_SECTIONS.map(section => (
-          <AdminSectionCard
-            key={section.key}
-            section={section}
-            overview={overview}
-          />
+      <AdminPageHeader title="Admin console" subtitle="Operator controls for the Swarm control plane"/>
+      <section className="admin-overview-summary" aria-label="admin overview summary">
+        {overviewSummaryItems(overview).map(item => (
+          <div className="admin-overview-summary-item" key={item.label}>
+            <span className="admin-overview-summary-value">{item.value}</span>
+            <span className="admin-overview-summary-label">{item.label}</span>
+          </div>
         ))}
-      </nav>
+      </section>
+      <div className="admin-overview-grid">
+        <section className="admin-overview-main" aria-labelledby="admin-overview-manage">
+          <div className="admin-overview-section-heading">
+            <h3 id="admin-overview-manage">Manage</h3>
+            <p className="muted small">Catalogs, users, and the account surface.</p>
+          </div>
+          <nav className="admin-section-links" aria-label="admin sections">
+            {primarySections.map(section => (
+              <AdminSectionCard
+                key={section.key}
+                section={section}
+                overview={overview}
+              />
+            ))}
+          </nav>
+        </section>
+        <aside className="admin-overview-security" aria-labelledby="admin-overview-security">
+          <div className="admin-overview-section-heading">
+            <h3 id="admin-overview-security">Security operations</h3>
+            <p className="muted small">Fast paths for revocation and traceability.</p>
+          </div>
+          <nav className="admin-security-actions" aria-label="security admin sections">
+            {securitySections.map(section => (
+              <AdminSectionCard
+                key={section.key}
+                section={section}
+                overview={overview}
+                compact
+              />
+            ))}
+          </nav>
+        </aside>
+      </div>
     </main>
   );
 }
@@ -204,21 +248,28 @@ function AdminSectionTabs({ active }) {
   );
 }
 
-function AdminSectionCard({ section, overview }) {
+function AdminSectionCard({ section, overview, compact = false }) {
   const metrics = overviewMetrics(section.key, overview);
   return (
-    <a className="admin-section-link" href={section.href}>
+    <a className={`admin-section-link${compact ? ' compact' : ''}`} href={section.href}>
       <span className="admin-section-link-main">
+        <span className="admin-section-link-kicker">{section.summary}</span>
         <span className="admin-section-link-title">{section.label}</span>
-        <span className="admin-section-link-summary">{section.summary}</span>
+        <span className="admin-section-link-summary">{section.description}</span>
       </span>
-      <span className="admin-section-link-metrics" aria-label={`${section.label} summary`}>
-        {metrics.map(item => (
-          <span className="admin-section-link-metric" key={item.label}>
-            <strong>{item.value}</strong>
-            <span>{item.label}</span>
-          </span>
-        ))}
+      {metrics.length > 0 ? (
+        <span className="admin-section-link-metrics" aria-label={`${section.label} summary`}>
+          {metrics.map(item => (
+            <span className="admin-section-link-metric" key={item.label}>
+              <strong>{item.value}</strong>
+              <span>{item.label}</span>
+            </span>
+          ))}
+        </span>
+      ) : null}
+      <span className="admin-section-link-cta">
+        {section.cta}
+        <span aria-hidden="true">-&gt;</span>
       </span>
     </a>
   );
@@ -281,7 +332,7 @@ async function callOverview(fn) {
 
 function overviewMetrics(key, overview) {
   if (overview.state !== 'ready') {
-    return [{ label: 'status', value: '...' }];
+    return [];
   }
   switch (key) {
     case 'mcp-catalog':
@@ -299,13 +350,26 @@ function overviewMetrics(key, overview) {
         { label: 'users', value: overview.users.total },
         { label: 'active', value: overview.users.active },
       ];
-    case 'proxy-tokens':
-      return [{ label: 'mode', value: 'revoke' }];
-    case 'kms-audit':
-      return [{ label: 'events', value: 'paged' }];
     default:
       return [];
   }
+}
+
+function overviewSummaryItems(overview) {
+  if (overview.state !== 'ready') {
+    return [
+      { label: 'users', value: '...' },
+      { label: 'templates', value: '...' },
+      { label: 'skill sources', value: '...' },
+      { label: 'pending review', value: '...' },
+    ];
+  }
+  return [
+    { label: 'users', value: overview.users.total },
+    { label: 'templates', value: overview.docker.total },
+    { label: 'skill sources', value: overview.marketplaces.total + overview.marketplaces.virtual },
+    { label: 'pending review', value: overview.docker.pending },
+  ];
 }
 
 function AdminStatsRow({ items }) {
@@ -369,9 +433,12 @@ function DockerCatalogPanel({ client }) {
   };
 
   return (
-    <section className="panel">
+    <section className="panel admin-record-panel admin-mcp-catalog-panel">
       <div className="panel-header">
-        <div className="panel-title">docker mcp templates</div>
+        <div className="panel-title-stack">
+          <div className="panel-title">docker mcp templates</div>
+          <p className="muted small panel-subtitle">Curated Docker-backed MCP servers available to Dyson instances.</p>
+        </div>
         <div className="panel-actions">
           <a className={`btn btn-sm ${busy ? 'disabled' : ''}`} href="#/admin/mcp-catalog/new">
             add template
@@ -394,16 +461,16 @@ function DockerCatalogPanel({ client }) {
       ) : rows.length === 0 ? (
         <p className="muted small">no Docker MCP templates.</p>
       ) : (
-        <table className="rows">
+        <table className="rows admin-record-table admin-catalog-table">
           <thead><tr>
             <th>id</th><th>label</th><th>status</th><th>source</th><th>placeholders</th><th>updated</th><th></th>
           </tr></thead>
           <tbody>
             {rows.map(row => (
               <tr key={row.id}>
-                <td data-label="id"><code className="mono-sm">{row.id}</code></td>
-                <td data-label="label">
-                  <div>{row.label || row.id}</div>
+                <td data-label="id"><code className="mono-sm admin-record-id">{row.id}</code></td>
+                <td data-label="label" className="admin-record-main-cell">
+                  <div className="admin-record-title">{row.label || row.id}</div>
                   {row.description ? (
                     <MarkdownBody markdown={row.description} className="md-body md-body-compact mcp-description-markdown"/>
                   ) : null}
@@ -428,19 +495,21 @@ function DockerCatalogPanel({ client }) {
                 </td>
                 <td data-label="updated" className="muted small">{fmtTime(row.updated_at)}</td>
                 <td className="row-actions">
-                  <a
-                    className={`btn btn-ghost btn-sm ${busy ? 'disabled' : ''}`}
-                    href={`#/admin/mcp-catalog/${encodeURIComponent(row.id)}`}
-                  >
-                    edit
-                  </a>
-                  <button
-                    className="btn btn-ghost btn-sm"
-                    onClick={() => remove(row)}
-                    disabled={busy}
-                  >
-                    delete
-                  </button>
+                  <div className="admin-row-action-group">
+                    <a
+                      className={`btn btn-ghost btn-sm ${busy ? 'disabled' : ''}`}
+                      href={`#/admin/mcp-catalog/${encodeURIComponent(row.id)}`}
+                    >
+                      edit
+                    </a>
+                    <button
+                      className="btn btn-ghost btn-sm"
+                      onClick={() => remove(row)}
+                      disabled={busy}
+                    >
+                      delete
+                    </button>
+                  </div>
                 </td>
               </tr>
             ))}
@@ -510,7 +579,10 @@ function SkillMarketplaceSourcesPanel({ client }) {
   return (
     <section className="panel admin-skill-marketplaces-panel">
       <div className="panel-header">
-        <div className="panel-title">skill marketplaces</div>
+        <div className="panel-title-stack">
+          <div className="panel-title">skill marketplaces</div>
+          <p className="muted small panel-subtitle">Configured skill indexes plus live agent-published catalogs.</p>
+        </div>
         <div className="panel-actions">
           <a className={`btn btn-sm ${busy ? 'disabled' : ''}`} href="#/admin/skill-marketplaces/new">
             add marketplace
@@ -547,14 +619,14 @@ function SkillMarketplaceSourcesPanel({ client }) {
               <a className="btn btn-primary btn-sm" href="#/admin/skill-marketplaces/new">add marketplace</a>
             </div>
           ) : (
-            <table className="rows">
+            <table className="rows admin-record-table admin-marketplace-table">
               <thead><tr>
                 <th>id</th><th>type</th><th>status</th><th>location</th><th>last fetch</th><th></th>
               </tr></thead>
               <tbody>
                 {rows.map(row => (
                   <tr key={row.id}>
-                    <td data-label="id"><code className="mono-sm">{row.id}</code></td>
+                    <td data-label="id"><code className="mono-sm admin-record-id">{row.id}</code></td>
                     <td data-label="type">{row.source_type}</td>
                     <td data-label="status">
                       <span className={`badge badge-${row.enabled === false ? 'faint' : 'ok'}`}>
@@ -569,19 +641,21 @@ function SkillMarketplaceSourcesPanel({ client }) {
                     </td>
                     <td data-label="last fetch" className="muted small">{fmtTime(row.last_fetch_at)}</td>
                     <td className="row-actions">
-                      <a
-                        className="btn btn-ghost btn-sm"
-                        href={`#/admin/skill-marketplaces/${encodeURIComponent(row.id)}`}
-                      >
-                        edit
-                      </a>
-                      <button
-                        className="btn btn-ghost btn-sm"
-                        onClick={() => remove(row)}
-                        disabled={busy}
-                      >
-                        delete
-                      </button>
+                      <div className="admin-row-action-group">
+                        <a
+                          className="btn btn-ghost btn-sm"
+                          href={`#/admin/skill-marketplaces/${encodeURIComponent(row.id)}`}
+                        >
+                          edit
+                        </a>
+                        <button
+                          className="btn btn-ghost btn-sm"
+                          onClick={() => remove(row)}
+                          disabled={busy}
+                        >
+                          delete
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -603,7 +677,7 @@ function SkillMarketplaceSourcesPanel({ client }) {
           ) : virtualRows.length === 0 ? (
             <p className="muted small admin-marketplace-empty-line">No live agent skill catalogs found</p>
           ) : (
-            <table className="rows virtual-catalog-table">
+            <table className="rows admin-record-table virtual-catalog-table">
               <thead><tr>
                 <th>catalog</th><th>marketplace id</th><th>live instance</th><th>skills</th><th>status</th><th></th>
               </tr></thead>
@@ -630,8 +704,10 @@ function SkillMarketplaceSourcesPanel({ client }) {
                       <div className="muted small">from agent inventory</div>
                     </td>
                     <td className="row-actions virtual-catalog-actions">
-                      <a className="btn btn-ghost btn-sm" href={row.browseHref}>browse</a>
-                      <a className="btn btn-ghost btn-sm" href={row.agentHref}>agent skills</a>
+                      <div className="admin-row-action-group">
+                        <a className="btn btn-ghost btn-sm" href={row.browseHref}>browse</a>
+                        <a className="btn btn-ghost btn-sm" href={row.agentHref}>agent skills</a>
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -1631,9 +1707,12 @@ function UsersPanel({ client }) {
   };
 
   return (
-    <section className="panel">
+    <section className="panel admin-record-panel admin-users-panel">
       <div className="panel-header">
-        <div className="panel-title">users</div>
+        <div className="panel-title-stack">
+          <div className="panel-title">users</div>
+          <p className="muted small panel-subtitle">Account status, API keys, and OpenRouter limits.</p>
+        </div>
         <div className="panel-actions">
           <button className="btn btn-ghost btn-sm" onClick={refresh}>refresh</button>
         </div>
@@ -1652,7 +1731,7 @@ function UsersPanel({ client }) {
       ) : rows.length === 0 ? (
         <p className="muted small">no users.</p>
       ) : (
-        <table className="rows">
+        <table className="rows admin-record-table admin-users-table">
           <thead><tr>
             <th>id</th><th>subject</th><th>email</th><th>status</th>
             <th>OR key</th><th>OR limit</th>
@@ -1661,8 +1740,8 @@ function UsersPanel({ client }) {
           <tbody>
             {rows.map(u => (
               <tr key={u.id}>
-                <td data-label="id"><code className="mono-sm">{u.id}</code></td>
-                <td data-label="subject"><code className="mono-sm">{u.subject}</code></td>
+                <td data-label="id"><code className="mono-sm admin-record-id">{u.id}</code></td>
+                <td data-label="subject"><code className="mono-sm admin-user-subject">{u.subject}</code></td>
                 <td data-label="email" className="muted small">{u.email || '—'}</td>
                 <td data-label="status"><UserStatusBadge status={u.status}/></td>
                 <td data-label="OR key">
@@ -1675,34 +1754,36 @@ function UsersPanel({ client }) {
                 <td data-label="OR limit" className="muted small">${(u.openrouter_key_limit_usd ?? 0).toFixed(2)}</td>
                 <td data-label="created" className="muted small">{fmtTime(u.created_at)}</td>
                 <td className="row-actions">
-                  {u.status !== 'active' ? (
-                    <button className="btn btn-ghost btn-sm" onClick={() => setStatus(u.id, 'activate')} disabled={busy}>
-                      activate
+                  <div className="admin-row-action-group admin-user-action-group">
+                    {u.status !== 'active' ? (
+                      <button className="btn btn-ghost btn-sm" onClick={() => setStatus(u.id, 'activate')} disabled={busy}>
+                        activate
+                      </button>
+                    ) : (
+                      <button className="btn btn-ghost btn-sm" onClick={() => setStatus(u.id, 'suspend')} disabled={busy}>
+                        suspend
+                      </button>
+                    )}
+                    <button className="btn btn-ghost btn-sm" onClick={() => mint(u.id)} disabled={busy}>
+                      mint api key
                     </button>
-                  ) : (
-                    <button className="btn btn-ghost btn-sm" onClick={() => setStatus(u.id, 'suspend')} disabled={busy}>
-                      suspend
+                    <button
+                      className="btn btn-ghost btn-sm"
+                      onClick={() => setOrLimit(u.id, u.openrouter_key_limit_usd)}
+                      disabled={busy}
+                      title="set the user's OpenRouter USD spend cap"
+                    >
+                      OR limit
                     </button>
-                  )}
-                  <button className="btn btn-ghost btn-sm" onClick={() => mint(u.id)} disabled={busy}>
-                    mint api key
-                  </button>
-                  <button
-                    className="btn btn-ghost btn-sm"
-                    onClick={() => setOrLimit(u.id, u.openrouter_key_limit_usd)}
-                    disabled={busy}
-                    title="set the user's OpenRouter USD spend cap"
-                  >
-                    OR limit
-                  </button>
-                  <button
-                    className="btn btn-ghost btn-sm"
-                    onClick={() => forceMintOr(u.id)}
-                    disabled={busy}
-                    title="rotate (or first-time mint) the user's OpenRouter key"
-                  >
-                    {u.openrouter_key_present ? 'rotate OR' : 'mint OR'}
-                  </button>
+                    <button
+                      className="btn btn-ghost btn-sm"
+                      onClick={() => forceMintOr(u.id)}
+                      disabled={busy}
+                      title="rotate (or first-time mint) the user's OpenRouter key"
+                    >
+                      {u.openrouter_key_present ? 'rotate OR' : 'mint OR'}
+                    </button>
+                  </div>
                 </td>
               </tr>
             ))}
@@ -1796,9 +1877,12 @@ function KmsAuditPanel({ client }) {
   return (
     <section className="panel admin-kms-audit-panel">
       <div className="panel-header">
-        <div className="panel-title">KMS audit events</div>
+        <div className="panel-title-stack">
+          <div className="panel-title">KMS audit events</div>
+          <p className="muted small panel-subtitle">Recent secret-access events with filterable actor and resource fields.</p>
+        </div>
         <div className="panel-actions">
-          <button className="btn btn-sm" type="button" onClick={() => setOffset(0)}>refresh</button>
+          <button className="btn btn-ghost btn-sm" type="button" onClick={() => setOffset(0)}>refresh</button>
         </div>
       </div>
       <div className="admin-kms-audit-filters">
@@ -1847,6 +1931,12 @@ function KmsAuditPanel({ client }) {
         <input value={filters.instance_id} onChange={e => updateFilter('instance_id', e.target.value)} placeholder="instance_id"/>
         <input value={filters.secret_name} onChange={e => updateFilter('secret_name', e.target.value)} placeholder="secret_name"/>
       </div>
+      {page.state === 'ready' ? (
+        <div className="admin-kms-audit-meta" aria-label="audit result count">
+          <span>{page.items.length} events</span>
+          <span>offset {offset}</span>
+        </div>
+      ) : null}
       {page.state === 'loading' ? <p className="muted small">loading audit events...</p> : null}
       {page.state === 'error' ? <div className="error">{page.message}</div> : null}
       {page.state === 'ready' && page.items.length === 0 ? (
@@ -1890,7 +1980,7 @@ function KmsAuditPanel({ client }) {
           </table>
         </div>
       ) : null}
-      <div className="modal-actions">
+      <div className="modal-actions admin-pagination-actions">
         <button className="btn btn-sm" type="button" disabled={offset === 0 || page.state === 'loading'} onClick={() => setOffset(Math.max(0, offset - limit))}>
           previous
         </button>
@@ -1924,30 +2014,35 @@ function ProxyTokensPanel({ client }) {
   };
 
   return (
-    <section className="panel admin-danger-panel">
+    <section className="panel admin-danger-panel admin-proxy-token-panel">
       <div className="panel-header">
-        <div className="panel-title">proxy token revocation</div>
+        <div className="panel-title-stack">
+          <div className="panel-title">proxy token revocation</div>
+          <p className="muted small panel-subtitle">Emergency control for leaked per-instance LLM proxy tokens.</p>
+        </div>
       </div>
-      <p className="muted small">
-        Emergency revoke for a leaked per-instance LLM proxy token.
-        Subsequent <code>/llm/*</code> calls bearing this token return 401.
-      </p>
-      <form onSubmit={submit} className="form">
-        <label className="field">
-          <span>proxy token</span>
-          <input
-            type="password"
-            value={token}
-            onChange={e => setToken(e.target.value)}
-            placeholder="paste the leaked token"
-          />
-        </label>
-        <div className="modal-actions">
-          <button type="submit" className="btn btn-danger" disabled={submitting || !token.trim()}>
+      <div className="admin-proxy-token-layout">
+        <div className="admin-proxy-token-copy">
+          <span className="badge badge-warn">emergency</span>
+          <p className="muted small">
+            Calls to <code>/llm/*</code> bearing a revoked token return 401 immediately.
+          </p>
+        </div>
+        <form onSubmit={submit} className="form admin-token-revoke-form">
+          <label className="field admin-token-field">
+            <span>proxy token</span>
+            <input
+              type="password"
+              value={token}
+              onChange={e => setToken(e.target.value)}
+              placeholder="paste the leaked token"
+            />
+          </label>
+          <button type="submit" className="btn btn-danger admin-token-revoke-button" disabled={submitting || !token.trim()}>
             {submitting ? 'revoking…' : 'revoke'}
           </button>
-        </div>
-      </form>
+        </form>
+      </div>
       {outcome ? (
         <div className={outcome.ok ? 'banner banner-info' : 'error'}>{outcome.msg}</div>
       ) : null}

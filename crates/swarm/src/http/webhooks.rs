@@ -456,6 +456,10 @@ fn build_verifier_config(
         return Ok(None);
     };
     let mode = parse_verifier_mode(mode_raw)?;
+    let timestamp_skew_secs = timestamp_skew_secs
+        .map(u64::try_from)
+        .transpose()
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
     Ok(Some(WebhookVerifierConfig {
         mode,
         signature_header: signature_header
@@ -467,7 +471,7 @@ fn build_verifier_config(
         signature_separator,
         signature_value_split,
         timestamp_header: timestamp_header.map(|s| s.trim().to_ascii_lowercase()),
-        timestamp_skew_secs: timestamp_skew_secs.map(|v| v as u64),
+        timestamp_skew_secs,
         payload_template,
         idempotency_header: idempotency_header.map(|s| s.trim().to_ascii_lowercase()),
         bearer_path_token,

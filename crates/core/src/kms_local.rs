@@ -814,7 +814,7 @@ fn check_keys_dir(keys_dir: &Path) -> KmsDoctorCheck {
         match std::fs::metadata(keys_dir) {
             Ok(meta) => {
                 let mode = meta.permissions().mode() & 0o777;
-                ok = mode & 0o077 == 0;
+                ok = mode.trailing_zeros() >= 6;
                 message = format!("mode {mode:03o}");
             }
             Err(err) => {

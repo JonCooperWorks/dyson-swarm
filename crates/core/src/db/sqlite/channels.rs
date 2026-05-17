@@ -64,7 +64,7 @@ impl InstanceChannelStore for SqlxInstanceChannelStore {
         .bind(row.handle)
         .bind(row.secret_name)
         .bind(row.webhook_secret_name)
-        .bind(if row.enabled { 1_i64 } else { 0_i64 })
+        .bind(i64::from(row.enabled))
         .bind(
             serde_json::to_string(&row.allowed_senders)
                 .map_err(|e| StoreError::Malformed(format!("allowed_senders: {e}")))?,
@@ -137,7 +137,7 @@ impl InstanceChannelStore for SqlxInstanceChannelStore {
              RETURNING id, instance_id, kind, handle, secret_name, webhook_secret_name,
                        enabled, allowed_senders, last_inbound_at, created_at",
         )
-        .bind(if enabled { 1_i64 } else { 0_i64 })
+        .bind(i64::from(enabled))
         .bind(instance_id)
         .bind(kind)
         .fetch_optional(&self.pool)
@@ -153,7 +153,7 @@ impl InstanceChannelStore for SqlxInstanceChannelStore {
         enabled: Option<bool>,
         allowed_senders: Option<&[String]>,
     ) -> Result<Option<InstanceChannelRow>, StoreError> {
-        let enabled_value = enabled.map(|v| if v { 1_i64 } else { 0_i64 });
+        let enabled_value = enabled.map(i64::from);
         let allowed_senders_json = allowed_senders
             .map(serde_json::to_string)
             .transpose()

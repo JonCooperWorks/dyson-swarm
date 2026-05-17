@@ -16,6 +16,7 @@ use futures::TryStreamExt;
 use crate::auth::extract_bearer;
 use crate::channels::{TELEGRAM_KIND, telegram_bot_token_secret_name};
 use crate::traits::{InstanceChannelStore, InstanceStore, TokenStore};
+use dyson_swarm_core::http::InternalHttpClient;
 
 #[derive(Clone)]
 pub struct TelegramProxyService {
@@ -23,7 +24,7 @@ pub struct TelegramProxyService {
     pub instances: Arc<dyn InstanceStore>,
     pub channels: Arc<dyn InstanceChannelStore>,
     pub user_secrets: Arc<crate::secrets::UserSecretsService>,
-    pub client: reqwest::Client,
+    pub client: InternalHttpClient,
     pub telegram_base_url: String,
 }
 
@@ -40,9 +41,7 @@ impl TelegramProxyService {
             instances,
             channels,
             user_secrets,
-            client: reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .build()?,
+            client: InternalHttpClient::new()?,
             telegram_base_url: telegram_base_url.into().trim_end_matches('/').to_owned(),
         })
     }
@@ -139,7 +138,7 @@ async fn authorize_and_token(
 }
 
 async fn forward(
-    client: &reqwest::Client,
+    client: &InternalHttpClient,
     method: axum::http::Method,
     headers: &HeaderMap,
     url: String,

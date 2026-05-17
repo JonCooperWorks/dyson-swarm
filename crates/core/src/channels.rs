@@ -595,7 +595,7 @@ mod tests {
             " 123456 ".into(),
             "@TopMan".into(),
             "topman".into(),
-            "".into(),
+            String::new(),
         ])
         .unwrap();
         assert_eq!(entries, vec!["123456", "topman"]);

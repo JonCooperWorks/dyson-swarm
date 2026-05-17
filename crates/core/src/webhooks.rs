@@ -1615,7 +1615,13 @@ pub fn row_verifier_config(row: &WebhookRow) -> Result<WebhookVerifierConfig, We
         signature_separator: row.signature_separator.clone(),
         signature_value_split: row.signature_value_split.clone(),
         timestamp_header: row.timestamp_header.clone(),
-        timestamp_skew_secs: row.timestamp_skew_secs.map(|v| v as u64),
+        timestamp_skew_secs: row
+            .timestamp_skew_secs
+            .map(u64::try_from)
+            .transpose()
+            .map_err(|_| {
+                WebhookError::BadRequest("timestamp skew must be non-negative".to_owned())
+            })?,
         payload_template: row.payload_template.clone(),
         idempotency_header: row.idempotency_header.clone(),
         bearer_path_token: row.bearer_path_token.clone(),
@@ -1900,7 +1906,7 @@ fn render_payload_template(
     let mut out = Vec::with_capacity(template.len() + body.len());
     let mut rest = template;
     while let Some(start) = rest.find("{{") {
-        out.extend_from_slice(rest[..start].as_bytes());
+        out.extend_from_slice(&rest.as_bytes()[..start]);
         let after_start = &rest[start + 2..];
         let Some(end) = after_start.find("}}") else {
             return Err(VerifyError::UnknownPlaceholder {

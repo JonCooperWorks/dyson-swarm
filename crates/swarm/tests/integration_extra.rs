@@ -1784,7 +1784,7 @@ async fn create_standard_webhook(
             "signature_separator": " ",
             "signature_value_split": ",",
             "timestamp_header": "webhook-timestamp",
-            "timestamp_skew_secs": 999999999,
+            "timestamp_skew_secs": 999_999_999,
             "payload_template": "{{id}}.{{timestamp}}.{{body}}",
             "idempotency_header": "webhook-id",
             "secret": "top-secret",

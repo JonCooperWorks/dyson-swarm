@@ -253,8 +253,14 @@ impl Runtime {
     }
 
     async fn forward(&self, req: ForwardRequest) -> ForwardResponse {
+        if req.request_json.len() > MAX_RUNTIME_BODY_BYTES {
+            return err(413, "MCP runtime request exceeded 16 MiB cap");
+        }
         if let Err(e) = validate_transport(&req.transport) {
             return err(400, &e);
+        }
+        if let Err(e) = validate_transport_target(&req.transport).await {
+            return err(403, &e);
         }
         let value: serde_json::Value = match serde_json::from_str(&req.request_json) {
             Ok(v) => v,
@@ -424,6 +430,9 @@ impl Runtime {
     ) -> ForwardResponse {
         if let Err(e) = validate_transport(&transport) {
             return err(400, &e);
+        }
+        if let Err(e) = validate_transport_target(&transport).await {
+            return err(403, &e);
         }
 
         let key = session_key(&instance_id, &server_name);
@@ -861,6 +870,30 @@ fn validate_transport(transport: &TransportSpec) -> Result<(), String> {
             Ok(())
         }
     }
+}
+
+async fn validate_transport_target(transport: &TransportSpec) -> Result<(), String> {
+    match transport {
+        TransportSpec::DockerStdio { .. } => Ok(()),
+        TransportSpec::HttpStreamable { url, .. } => validate_http_streamable_target(url).await,
+    }
+}
+
+async fn validate_http_streamable_target(raw: &str) -> Result<(), String> {
+    validate_http_streamable_url(raw)?;
+    let url = reqwest::Url::parse(raw).map_err(|e| format!("invalid HttpStreamable url: {e}"))?;
+    match url.scheme() {
+        "unix" | "http+unix" => return Ok(()),
+        "http" if url_is_loopback(&url) => return Ok(()),
+        "http" | "https" => {}
+        _ => return Ok(()),
+    }
+
+    let policy = dyson_swarm_core::upstream_policy::OutboundUrlPolicy::default();
+    dyson_swarm_core::upstream_policy::validate_outbound_url(&policy, raw)
+        .await
+        .map(|_| ())
+        .map_err(|e| format!("HttpStreamable upstream URL rejected: {e}"))
 }
 
 fn validate_docker_runtime(runtime: &str) -> Result<(), String> {
@@ -1970,7 +2003,7 @@ for line in sys.stdin:
                 "i-1".into(),
                 "remote".into(),
                 TransportSpec::HttpStreamable {
-                    url: "https://mcp.example.test/mcp".into(),
+                    url: "http://127.0.0.1:9/mcp".into(),
                     headers: BTreeMap::new(),
                     auth_bearer_env: None,
                 },
@@ -2124,6 +2157,61 @@ for line in sys.stdin:
         validate_http_streamable_url("http://127.0.0.1:9000/mcp").unwrap();
     }
 
+    #[tokio::test]
+    async fn http_streamable_target_rejects_internal_metadata_ip() {
+        let err = validate_http_streamable_target("https://169.254.169.254/latest/meta-data")
+            .await
+            .unwrap_err();
+        assert!(err.contains("upstream URL rejected"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn runtime_forward_rejects_internal_http_streamable_target() {
+        let runtime =
+            Runtime::with_docker(Duration::from_secs(30), Arc::new(MockDocker::default()));
+        let resp = runtime
+            .forward(ForwardRequest {
+                instance_id: "i-1".into(),
+                server_name: "remote".into(),
+                transport: TransportSpec::HttpStreamable {
+                    url: "https://10.0.0.1/mcp".into(),
+                    headers: BTreeMap::new(),
+                    auth_bearer_env: None,
+                },
+                request_json: serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/list"
+                })
+                .to_string(),
+            })
+            .await;
+
+        assert_eq!(resp.status, 403);
+        assert!(resp.body.contains("upstream URL rejected"));
+    }
+
+    #[tokio::test]
+    async fn runtime_forward_rejects_oversized_request_json_before_parsing() {
+        let runtime =
+            Runtime::with_docker(Duration::from_secs(30), Arc::new(MockDocker::default()));
+        let resp = runtime
+            .forward(ForwardRequest {
+                instance_id: "i-1".into(),
+                server_name: "remote".into(),
+                transport: TransportSpec::HttpStreamable {
+                    url: "https://example.com/mcp".into(),
+                    headers: BTreeMap::new(),
+                    auth_bearer_env: None,
+                },
+                request_json: " ".repeat(MAX_RUNTIME_BODY_BYTES + 1),
+            })
+            .await;
+
+        assert_eq!(resp.status, 413);
+        assert!(resp.body.contains("16 MiB cap"));
+    }
+
     #[test]
     fn http_streamable_sse_parser_picks_matching_response() {
         let sse = b"event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\"}\n\ndata: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"tools\":[]}}\n\n";
@@ -2191,8 +2279,6 @@ for line in sys.stdin:
             "MASSIVE_API_KEY=secret-one".to_string(),
             "--env=OTHER_TOKEN=secret-two".to_string(),
             "-eTHIRD_TOKEN=secret-three".to_string(),
-            "--entrypoint".to_string(),
-            "python".to_string(),
             "example/mcp".to_string(),
             "./entrypoint.py".to_string(),
         ];
@@ -2254,11 +2340,7 @@ for line in sys.stdin:
             .expect("image arg");
         assert_eq!(
             &launch.args[image_index + 1..],
-            [
-                SECRET_ENTRYPOINT_CONTAINER_PATH,
-                "python",
-                "./entrypoint.py"
-            ]
+            [SECRET_ENTRYPOINT_CONTAINER_PATH, "./entrypoint.py"]
         );
 
         cleanup_secret_dir_sync(launch.secret_dir.as_deref());

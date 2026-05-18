@@ -718,6 +718,7 @@ pub fn validate_docker_stdio_args(args: &[String]) -> Result<(), String> {
         "--network",
         "--net",
         "--security-opt",
+        "--entrypoint",
         "--env-file",
         "--label-file",
         "--cidfile",
@@ -1179,8 +1180,11 @@ pub struct PkceChallenge {
 }
 
 pub fn generate_pkce() -> PkceChallenge {
-    use rand::Rng;
-    let bytes: [u8; 32] = rand::thread_rng().r#gen();
+    use rand::RngCore;
+
+    let mut bytes = [0u8; 32];
+    let mut rng = rand::rngs::OsRng;
+    rng.fill_bytes(&mut bytes);
     let verifier = URL_SAFE_NO_PAD.encode(bytes);
     let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
     PkceChallenge {
@@ -1190,8 +1194,11 @@ pub fn generate_pkce() -> PkceChallenge {
 }
 
 pub fn generate_state() -> String {
-    use rand::Rng;
-    let bytes: [u8; 16] = rand::thread_rng().r#gen();
+    use rand::RngCore;
+
+    let mut bytes = [0u8; 32];
+    let mut rng = rand::rngs::OsRng;
+    rng.fill_bytes(&mut bytes);
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
@@ -1883,6 +1890,8 @@ mod tests {
             vec!["run", "--memory=8g", "img"],
             vec!["run", "--runtime", "runc", "img"],
             vec!["run", "--runtime=crun", "img"],
+            vec!["run", "--entrypoint", "python", "img"],
+            vec!["run", "--entrypoint=python", "img"],
         ] {
             let args: Vec<String> = args.into_iter().map(String::from).collect();
             assert!(
@@ -2154,6 +2163,48 @@ mod tests {
         let p = generate_pkce();
         let want = URL_SAFE_NO_PAD.encode(Sha256::digest(p.verifier.as_bytes()));
         assert_eq!(p.challenge, want);
+    }
+
+    #[test]
+    fn oauth_state_is_32_random_bytes_base64url() {
+        let states: std::collections::BTreeSet<String> =
+            (0..32).map(|_| generate_state()).collect();
+        assert_eq!(states.len(), 32);
+        for state in states {
+            assert_eq!(state.len(), 43);
+            assert!(
+                state
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+                "{state}"
+            );
+        }
+    }
+
+    #[test]
+    fn pkce_verifier_is_unique_base64url() {
+        let challenges: Vec<PkceChallenge> = (0..16).map(|_| generate_pkce()).collect();
+        let verifiers: std::collections::BTreeSet<String> =
+            challenges.iter().map(|p| p.verifier.clone()).collect();
+        assert_eq!(verifiers.len(), challenges.len());
+        for pkce in challenges {
+            assert_eq!(pkce.verifier.len(), 43);
+            assert_eq!(pkce.challenge.len(), 43);
+            assert!(
+                pkce.verifier
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+                "{}",
+                pkce.verifier
+            );
+            assert!(
+                pkce.challenge
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+                "{}",
+                pkce.challenge
+            );
+        }
     }
 
     #[test]

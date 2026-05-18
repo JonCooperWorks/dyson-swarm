@@ -34,8 +34,8 @@ use crate::mcp_servers::{
 };
 use crate::secrets::UserSecretsService;
 use crate::traits::{
-    InstanceStore, McpAuditEntry, McpAuditStore, McpDockerCatalogRow, McpDockerCatalogStore,
-    TokenStore,
+    InstanceStatus, InstanceStore, McpAuditEntry, McpAuditStore, McpDockerCatalogRow,
+    McpDockerCatalogStore, TokenStore,
 };
 use crate::upstream_policy::OutboundUrlPolicy;
 use dyson_swarm_core::http::ExternalHttpClient;
@@ -53,13 +53,13 @@ use errors::{error_resp, jsonrpc_error_resp, store_err_to_resp, swarm_err_to_res
 use redaction::{html_escape, strip_url_query};
 #[cfg(test)]
 use runtime::RuntimeRequest;
+use runtime::{
+    MAX_RUNTIME_BODY_BYTES, call_runtime, forward_runtime_stdio, runtime_forward_request_for_entry,
+    stop_deleted_runtime_server, stop_deleted_runtime_servers_best_effort,
+};
 pub use runtime::{
     RuntimeRestartReport, restart_active_runtime_servers, restart_runtime_server,
     stop_runtime_instance, stop_runtime_server,
-};
-use runtime::{
-    call_runtime, forward_runtime_stdio, runtime_forward_request_for_entry,
-    stop_deleted_runtime_server, stop_deleted_runtime_servers_best_effort,
 };
 use stream::{is_hop_by_hop, parse_sse_jsonrpc};
 use tools::{filter_tools_list_body, peek_jsonrpc};
@@ -460,11 +460,15 @@ async fn forward(
     if record.instance_id != instance_id {
         return error_resp(StatusCode::FORBIDDEN, "instance mismatch");
     }
-    let owner_id = match svc.instances.get(&instance_id).await {
-        Ok(Some(row)) => row.owner_id,
+    let instance = match svc.instances.get(&instance_id).await {
+        Ok(Some(row)) => row,
         Ok(None) => return error_resp(StatusCode::UNAUTHORIZED, "instance gone"),
         Err(_) => return error_resp(StatusCode::INTERNAL_SERVER_ERROR, "instance store error"),
     };
+    if instance.status != InstanceStatus::Live {
+        return error_resp(StatusCode::FORBIDDEN, "instance is not live");
+    }
+    let owner_id = instance.owner_id;
 
     // 2. Pull the server config out of user_secrets.  Decrypts in-process.
     let mut entry = match mcp_servers::get(&svc.user_secrets, &owner_id, &instance_id, &server_name)
@@ -490,9 +494,9 @@ async fn forward(
 
     // 4. Build the outbound request.
     let (parts, body) = req.into_parts();
-    let body_bytes = match axum::body::to_bytes(body, 8 * 1024 * 1024).await {
+    let body_bytes = match axum::body::to_bytes(body, MAX_RUNTIME_BODY_BYTES).await {
         Ok(b) => b,
-        Err(_) => return error_resp(StatusCode::BAD_REQUEST, "body too large"),
+        Err(_) => return error_resp(StatusCode::PAYLOAD_TOO_LARGE, "body too large"),
     };
 
     // Peek at the JSON-RPC envelope so we can enforce the per-tool
@@ -1038,10 +1042,23 @@ async fn oauth_callback(State(svc): State<Arc<McpService>>, uri: Uri) -> Respons
         return callback_html(StatusCode::INTERNAL_SERVER_ERROR, "persist tokens");
     }
 
-    if let Some(loc) = flow.return_to.filter(|s| s.starts_with('/')) {
-        return Redirect::to(&loc).into_response().map(|_| Body::empty());
+    if let Some(loc) = flow.return_to.as_deref().and_then(safe_local_return_path) {
+        return Redirect::to(loc).into_response().map(|_| Body::empty());
     }
     callback_html(StatusCode::OK, "Connected. You can close this tab.")
+}
+
+fn safe_local_return_path(value: &str) -> Option<&str> {
+    if value.is_empty() || value.trim() != value {
+        return None;
+    }
+    if !value.starts_with('/') || value.starts_with("//") || value.contains('\\') {
+        return None;
+    }
+    if value.chars().any(char::is_control) {
+        return None;
+    }
+    Some(value)
 }
 
 fn callback_html(status: StatusCode, msg: &str) -> Response<Body> {
@@ -1313,6 +1330,9 @@ async fn put_docker_catalog_server(
             StatusCode::SERVICE_UNAVAILABLE,
             "docker mcp runtime not configured",
         ));
+    }
+    if !owner_owns_instance(&svc, &caller.user_id, &instance_id).await {
+        return Err(error_resp(StatusCode::NOT_FOUND, "no such instance"));
     }
     let catalog = svc
         .get_docker_catalog_server(&catalog_id)

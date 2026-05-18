@@ -16,7 +16,7 @@ use super::errors::error_resp;
 use super::tools::filter_tools_list_body;
 use super::{validate_remote_mcp_auth_urls, validate_remote_mcp_url};
 
-const MAX_RUNTIME_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+pub(super) const MAX_RUNTIME_BODY_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Serialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -325,7 +325,7 @@ pub(super) async fn call_runtime(
     let mut reader = BufReader::new(stream);
     let out = tokio::time::timeout(
         std::time::Duration::from_secs(125),
-        read_line_capped(&mut reader, MAX_RUNTIME_RESPONSE_BYTES),
+        read_line_capped(&mut reader, MAX_RUNTIME_BODY_BYTES),
     )
     .await
     .map_err(|_| "runtime response timed out".to_owned())?

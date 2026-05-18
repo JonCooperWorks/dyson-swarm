@@ -55,7 +55,7 @@ pub struct ValidatedOutboundUrl {
     pub resolved_addrs: Vec<SocketAddr>,
 }
 
-pub(crate) async fn validate_outbound_url(
+pub async fn validate_outbound_url(
     policy: &OutboundUrlPolicy,
     upstream: &str,
 ) -> Result<ValidatedOutboundUrl, OutboundUrlError> {

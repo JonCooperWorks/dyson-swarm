@@ -33,6 +33,28 @@ fn strip_url_query_passes_through_clean_url() {
 }
 
 #[test]
+fn safe_local_return_path_allows_only_local_absolute_paths() {
+    for good in ["/", "/instances/i-1/mcp", "/path?x=1", "/path#fragment"] {
+        assert_eq!(safe_local_return_path(good), Some(good));
+    }
+    for bad in [
+        "",
+        " ",
+        " /path",
+        "/path ",
+        "//evil.example/path",
+        "https://evil.example/path",
+        "http://evil.example/path",
+        "\\\\evil.example\\path",
+        "/\\evil.example\\path",
+        "/path\\evil",
+        "relative/path",
+    ] {
+        assert_eq!(safe_local_return_path(bad), None, "{bad:?}");
+    }
+}
+
+#[test]
 fn peek_jsonrpc_extracts_method_id_params() {
     let body = br#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"foo"}}"#;
     let (m, id, p) = peek_jsonrpc(body).expect("parses");
@@ -375,6 +397,19 @@ const MCP_TEST_OWNER: &str = "00000000000000000000000000000002";
 const MCP_TEST_INSTANCE: &str = "i-mcp-audit";
 const MCP_TEST_SERVER: &str = "linear";
 
+fn test_caller(user_id: &str) -> CallerIdentity {
+    CallerIdentity {
+        user_id: user_id.to_owned(),
+        identity: crate::auth::UserIdentity {
+            subject: user_id.to_owned(),
+            email: None,
+            display_name: None,
+            source: crate::auth::AuthSource::Bearer,
+            claims: serde_json::Value::Null,
+        },
+    }
+}
+
 async fn create_test_mcp_audit_table(pool: &SqlitePool) {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS mcp_audit (
@@ -608,6 +643,136 @@ async fn tools_call_forward_is_rate_limited_per_owner_and_server() {
     assert!(
         calls.load(Ordering::SeqCst) < 64,
         "MCP rate limit must refuse excess calls before forwarding upstream"
+    );
+}
+
+#[tokio::test]
+async fn forward_rejects_non_live_instances_before_forwarding() {
+    for blocked_status in [
+        InstanceStatus::Paused,
+        InstanceStatus::Configuring,
+        InstanceStatus::Destroyed,
+    ] {
+        let pool = open_in_memory().await.unwrap();
+        create_test_mcp_audit_table(&pool).await;
+        let (upstream_url, calls) = spawn_mcp_upstream().await;
+        let (svc, token, _keys) = build_mcp_proxy_fixture(pool, upstream_url).await;
+        svc.instances
+            .update_status(MCP_TEST_INSTANCE, blocked_status)
+            .await
+            .unwrap();
+        let base = spawn_mcp_proxy(svc).await;
+
+        let client = dyson_swarm_core::http::InternalHttpClient::new().unwrap();
+        let resp = client
+            .post(format!("{base}/mcp/{MCP_TEST_INSTANCE}/{MCP_TEST_SERVER}"))
+            .bearer_auth(&token)
+            .json(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "search", "arguments": {}}
+            }))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{blocked_status:?}");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "non-live instances must be rejected before forwarding"
+        );
+    }
+}
+
+#[tokio::test]
+async fn forward_rejects_oversized_request_body_before_forwarding() {
+    let pool = open_in_memory().await.unwrap();
+    create_test_mcp_audit_table(&pool).await;
+    let (upstream_url, calls) = spawn_mcp_upstream().await;
+    let (svc, token, _keys) = build_mcp_proxy_fixture(pool, upstream_url).await;
+    let base = spawn_mcp_proxy(svc).await;
+
+    let client = dyson_swarm_core::http::InternalHttpClient::new().unwrap();
+    let resp = client
+        .post(format!("{base}/mcp/{MCP_TEST_INSTANCE}/{MCP_TEST_SERVER}"))
+        .bearer_auth(token)
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .body(vec![b' '; MAX_RUNTIME_BODY_BYTES + 1])
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "oversized request bodies must not be forwarded"
+    );
+}
+
+#[tokio::test]
+async fn docker_catalog_put_rejects_cross_owner_before_management_mutation() {
+    let pool = open_in_memory().await.unwrap();
+    let runtime_tmp = tempfile::tempdir().unwrap();
+    let entry = McpServerEntry {
+        url: "https://example.test/mcp".into(),
+        auth: McpAuthSpec::None,
+        headers: std::collections::HashMap::new(),
+        runtime: None,
+        docker_catalog: None,
+        raw_vscode_config: None,
+        oauth_tokens: None,
+        tools_catalog: None,
+        last_check_error: None,
+        enabled_tools: None,
+    };
+    let (svc, _token, _keys) = build_mcp_proxy_fixture_for_entry(
+        pool,
+        entry,
+        Some(runtime_tmp.path().join("runtime.sock")),
+    )
+    .await;
+    let svc = match Arc::try_unwrap(svc) {
+        Ok(svc) => svc.with_docker_catalog(
+            vec![mcp_servers::McpDockerCatalogServer {
+                id: "github".into(),
+                label: "GitHub".into(),
+                description: None,
+                template: serde_json::json!({
+                    "mcpServers": {
+                        "github": {
+                            "command": "docker",
+                            "args": ["run", "--rm", "-i", "ghcr.io/example/github-mcp"]
+                        }
+                    }
+                })
+                .to_string(),
+                placeholders: Vec::new(),
+            }],
+            false,
+        ),
+        Err(_) => panic!("fixture service should have one strong ref"),
+    };
+
+    let resp = put_docker_catalog_server(
+        State(Arc::new(svc)),
+        Path((MCP_TEST_INSTANCE.to_owned(), "github".to_owned())),
+        axum::Extension(test_caller("00000000000000000000000000000003")),
+        Json(PutDockerCatalogBody {
+            placeholders: std::collections::BTreeMap::new(),
+        }),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let body = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
+    assert!(
+        std::str::from_utf8(&body)
+            .unwrap()
+            .contains("no such instance")
     );
 }
 

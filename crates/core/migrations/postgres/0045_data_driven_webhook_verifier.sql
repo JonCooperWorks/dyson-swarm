@@ -5,7 +5,7 @@
 -- verifier metadata column added here.
 
 ALTER TABLE instance_webhooks
-  ADD COLUMN verifier_mode TEXT NOT NULL DEFAULT 'hmac_v2';
+  ADD COLUMN verifier_mode TEXT NOT NULL DEFAULT 'legacy_hmac';
 ALTER TABLE instance_webhooks
   ADD COLUMN signature_algo TEXT;
 ALTER TABLE instance_webhooks
@@ -29,25 +29,9 @@ ALTER TABLE instance_webhooks
 
 UPDATE instance_webhooks
 SET verifier_mode = CASE auth_scheme
-  WHEN 'bearer' THEN 'operator_action_required'
+  WHEN 'bearer' THEN 'legacy_bearer'
   WHEN 'none' THEN 'none'
-  ELSE 'hmac_v2'
-END,
-signature_algo = CASE auth_scheme
-  WHEN 'hmac_sha256' THEN 'sha256'
-  ELSE signature_algo
-END,
-signature_encoding = CASE auth_scheme
-  WHEN 'hmac_sha256' THEN 'hex'
-  ELSE signature_encoding
-END,
-signature_value_split = CASE auth_scheme
-  WHEN 'hmac_sha256' THEN '='
-  ELSE signature_value_split
-END,
-payload_template = CASE auth_scheme
-  WHEN 'hmac_sha256' THEN '{{body}}'
-  ELSE payload_template
+  ELSE 'legacy_hmac'
 END;
 
 ALTER TABLE webhook_deliveries

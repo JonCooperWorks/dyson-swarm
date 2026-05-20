@@ -1082,7 +1082,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn migration_0045_backfills_existing_rows_to_supported_modes() {
+    async fn migrations_backfill_existing_rows_to_supported_modes() {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")
@@ -1136,16 +1136,20 @@ mod tests {
         .await
         .unwrap();
 
-        let migration_sql =
-            include_str!("../../../migrations/sqlite/0045_data_driven_webhook_verifier.sql")
+        for migration_sql in [
+            include_str!("../../../migrations/sqlite/0045_data_driven_webhook_verifier.sql"),
+            include_str!("../../../migrations/sqlite/0052_remove_legacy_webhook_verifiers.sql"),
+        ] {
+            let migration_sql = migration_sql
                 .lines()
                 .filter(|line| !line.trim_start().starts_with("--"))
                 .collect::<Vec<_>>()
                 .join("\n");
-        for statement in migration_sql.split(';') {
-            let statement = statement.trim();
-            if !statement.is_empty() {
-                sqlx::query(statement).execute(&pool).await.unwrap();
+            for statement in migration_sql.split(';') {
+                let statement = statement.trim();
+                if !statement.is_empty() {
+                    sqlx::query(statement).execute(&pool).await.unwrap();
+                }
             }
         }
 

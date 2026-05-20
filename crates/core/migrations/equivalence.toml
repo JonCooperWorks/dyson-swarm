@@ -11,8 +11,8 @@ postgres = "8b12c46d731b15abb25ef45a978c504c63d86cb7ee04315d58617de5c0eb52c2"
 reason = "dialect syntax differs; logical schema matches sqlite"
 
 [equivalence.data_driven_webhook_verifier]
-sqlite = "efb66224770e977d77afdc04586a9c56691016cb23f2f72f7a6c440d61b964f2"
-postgres = "dcf3b00eb028c7362d16c2e6e6bf0bf3d3aa29dced7504950944dc36c6f4c642"
+sqlite = "7ba89f30864bccff52b3406127c161716440a380007e4d21e87dea1829b5ab6d"
+postgres = "4b22820f40b250060ffbbadff21a9fb2719cbed00fbb0499485e1f0e375a5b0e"
 reason = "dialect syntax differs; logical schema matches sqlite"
 
 [equivalence.agent_skill_publications]

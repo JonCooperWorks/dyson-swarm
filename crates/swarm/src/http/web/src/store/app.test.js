@@ -86,12 +86,17 @@ describe('parseHashView', () => {
       mcp: 'instance-mcp',
       'agent-secrets': 'instance-agent-secrets',
       snapshots: 'instance-snapshots',
-      runtime: 'instance-runtime',
+      skills: 'instance-skills',
     };
     for (const [slug, name] of Object.entries(cases)) {
       window.location.hash = `#/i/abc/${slug}`;
       expect(parseHashView()).toEqual({ name, id: 'abc' });
     }
+  });
+
+  test('removed runtime section URL falls back to instance summary', () => {
+    window.location.hash = '#/i/abc/runtime';
+    expect(parseHashView()).toEqual({ name: 'instance', id: 'abc' });
   });
 
   test('"#/new" routes to the dedicated hire page', () => {

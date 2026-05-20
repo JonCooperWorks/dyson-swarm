@@ -163,8 +163,6 @@ pub enum WebhookError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WebhookVerifierMode {
-    LegacyHmac,
-    LegacyBearer,
     None,
     HmacV2,
     BearerV2,
@@ -173,8 +171,6 @@ pub enum WebhookVerifierMode {
 impl WebhookVerifierMode {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::LegacyHmac => "legacy_hmac",
-            Self::LegacyBearer => "legacy_bearer",
             Self::None => "none",
             Self::HmacV2 => "hmac_v2",
             Self::BearerV2 => "bearer_v2",
@@ -183,8 +179,6 @@ impl WebhookVerifierMode {
 
     pub fn parse(raw: &str) -> Option<Self> {
         match raw {
-            "legacy_hmac" => Some(Self::LegacyHmac),
-            "legacy_bearer" => Some(Self::LegacyBearer),
             "none" => Some(Self::None),
             "hmac_v2" => Some(Self::HmacV2),
             "bearer_v2" => Some(Self::BearerV2),
@@ -799,9 +793,7 @@ impl WebhookService {
                 .as_ref()
                 .map(row_verifier_config)
                 .transpose()?
-                .unwrap_or_else(|| {
-                    legacy_verifier_config(spec.auth_scheme, signature_header.clone())
-                }),
+                .unwrap_or_else(|| default_verifier_config(spec.auth_scheme, signature_header)),
         };
         validate_verifier_config(&verifier).map_err(|e| WebhookError::BadRequest(e.to_string()))?;
         if let Some(preset_id) = spec.preset_id.as_deref() {
@@ -1322,12 +1314,7 @@ impl WebhookService {
             body,
             crate::now_secs(),
         )
-        .map_err(|e| match verifier.mode {
-            WebhookVerifierMode::LegacyHmac | WebhookVerifierMode::LegacyBearer => {
-                WebhookError::SignatureMismatch
-            }
-            _ => WebhookError::Verify(e),
-        })?;
+        .map_err(WebhookError::Verify)?;
         if let Some(header_name) = verifier.idempotency_header.as_deref() {
             let key = signature_header_value(signature_headers, header_name).ok_or_else(|| {
                 WebhookError::Verify(VerifyError::MissingHeader {
@@ -1379,14 +1366,6 @@ impl WebhookService {
             Err(e) => Err(WebhookError::Dispatch(e.to_string())),
         }
     }
-}
-
-fn strip_bearer(h: &str) -> Option<&str> {
-    let trimmed = h.trim();
-    trimmed
-        .strip_prefix("Bearer ")
-        .or_else(|| trimmed.strip_prefix("bearer "))
-        .map(str::trim)
 }
 
 fn validate_signature_header(raw: &str) -> Result<String, &'static str> {
@@ -1473,7 +1452,7 @@ pub fn verify_inbound_request(
     config: &WebhookVerifierConfig,
     secret: Option<&str>,
     headers: &[(String, String)],
-    bearer_header: Option<&str>,
+    _bearer_header: Option<&str>,
     bearer_path_token: Option<&str>,
     body: &[u8],
     now_secs: i64,
@@ -1483,20 +1462,6 @@ pub fn verify_inbound_request(
             rendered_payload: None,
             matched_version: None,
         }),
-        WebhookVerifierMode::LegacyBearer => {
-            let provided = bearer_header
-                .and_then(strip_bearer)
-                .ok_or(VerifyError::AllSignaturesMismatched)?;
-            let expected = secret.ok_or(VerifyError::AllSignaturesMismatched)?;
-            if ct_eq(expected.as_bytes(), provided.as_bytes()) {
-                Ok(VerifyOutcome {
-                    rendered_payload: None,
-                    matched_version: None,
-                })
-            } else {
-                Err(VerifyError::AllSignaturesMismatched)
-            }
-        }
         WebhookVerifierMode::BearerV2 => {
             let expected = config
                 .bearer_path_token
@@ -1512,50 +1477,31 @@ pub fn verify_inbound_request(
                 Err(VerifyError::AllSignaturesMismatched)
             }
         }
-        WebhookVerifierMode::LegacyHmac => {
-            let header = signature_header_value(headers, &config.signature_header)
-                .ok_or(VerifyError::MissingSignature)?;
-            let provided_hex = header.strip_prefix("sha256=").unwrap_or(header).trim();
-            let provided =
-                hex::decode(provided_hex).map_err(|e| VerifyError::MalformedSignature {
-                    reason: e.to_string(),
-                })?;
-            let key = secret.ok_or(VerifyError::AllSignaturesMismatched)?;
-            let expected = hmac_digest(SignatureAlgorithm::Sha256, key.as_bytes(), body);
-            if ct_eq(&expected, &provided) {
-                Ok(VerifyOutcome {
-                    rendered_payload: None,
-                    matched_version: None,
-                })
-            } else {
-                Err(VerifyError::AllSignaturesMismatched)
-            }
-        }
         WebhookVerifierMode::HmacV2 => verify_hmac_v2(config, secret, headers, body, now_secs),
     }
 }
 
-fn legacy_verifier_config(
+fn default_verifier_config(
     auth_scheme: WebhookAuthScheme,
     signature_header: String,
 ) -> WebhookVerifierConfig {
     match auth_scheme {
         WebhookAuthScheme::HmacSha256 => WebhookVerifierConfig {
-            mode: WebhookVerifierMode::LegacyHmac,
+            mode: WebhookVerifierMode::HmacV2,
             signature_header,
-            signature_algo: None,
-            signature_encoding: None,
+            signature_algo: Some(SignatureAlgorithm::Sha256),
+            signature_encoding: Some(SignatureEncoding::Hex),
             signature_prefix: None,
             signature_separator: None,
-            signature_value_split: None,
+            signature_value_split: Some("=".to_owned()),
             timestamp_header: None,
             timestamp_skew_secs: None,
-            payload_template: None,
+            payload_template: Some("{{body}}".to_owned()),
             idempotency_header: None,
             bearer_path_token: None,
         },
         WebhookAuthScheme::Bearer => WebhookVerifierConfig {
-            mode: WebhookVerifierMode::LegacyBearer,
+            mode: WebhookVerifierMode::BearerV2,
             signature_header: String::new(),
             signature_algo: None,
             signature_encoding: None,
@@ -1566,7 +1512,7 @@ fn legacy_verifier_config(
             timestamp_skew_secs: None,
             payload_template: None,
             idempotency_header: None,
-            bearer_path_token: None,
+            bearer_path_token: Some(random_path_token()),
         },
         WebhookAuthScheme::None => WebhookVerifierConfig {
             mode: WebhookVerifierMode::None,
@@ -1586,12 +1532,12 @@ fn legacy_verifier_config(
 }
 
 pub fn row_verifier_config(row: &WebhookRow) -> Result<WebhookVerifierConfig, WebhookError> {
-    let mode =
-        WebhookVerifierMode::parse(&row.verifier_mode).unwrap_or_else(|| match row.auth_scheme {
-            WebhookAuthScheme::HmacSha256 => WebhookVerifierMode::LegacyHmac,
-            WebhookAuthScheme::Bearer => WebhookVerifierMode::LegacyBearer,
-            WebhookAuthScheme::None => WebhookVerifierMode::None,
-        });
+    let mode = WebhookVerifierMode::parse(&row.verifier_mode).ok_or_else(|| {
+        WebhookError::BadRequest(format!(
+            "unsupported webhook verifier mode {}; re-save this webhook using hmac_v2 or bearer_v2",
+            row.verifier_mode
+        ))
+    })?;
     let signature_algo =
         match row.signature_algo.as_deref() {
             Some(raw) => Some(SignatureAlgorithm::parse(raw).ok_or_else(|| {
@@ -1630,12 +1576,7 @@ fn validate_verifier_config(config: &WebhookVerifierConfig) -> Result<(), Verify
 }
 
 fn verifier_needs_user_secret(config: &WebhookVerifierConfig) -> bool {
-    matches!(
-        config.mode,
-        WebhookVerifierMode::LegacyHmac
-            | WebhookVerifierMode::LegacyBearer
-            | WebhookVerifierMode::HmacV2
-    )
+    matches!(config.mode, WebhookVerifierMode::HmacV2)
 }
 
 fn random_path_token() -> String {
@@ -1789,13 +1730,15 @@ fn parse_signature_candidate(
         .as_deref()
         .filter(|s| !s.is_empty())
     {
-        candidate
-            .split_once(split)
-            .map(|(_, encoded)| encoded)
-            .ok_or_else(|| VerifyError::MalformedSignature {
-                reason: format!("signature missing value split {split:?}"),
-            })?
-            .to_owned()
+        match candidate.split_once(split) {
+            Some((_, encoded)) => encoded.to_owned(),
+            None if prefix.is_empty() => candidate.to_owned(),
+            None => {
+                return Err(VerifyError::MalformedSignature {
+                    reason: format!("signature missing value split {split:?}"),
+                });
+            }
+        }
     } else if prefix.is_empty() {
         candidate.to_owned()
     } else {
@@ -2072,21 +2015,17 @@ mod tests {
     }
 
     #[test]
-    fn legacy_hmac_path_unchanged_for_github_fixture() {
-        let cfg = WebhookVerifierConfig {
-            mode: WebhookVerifierMode::LegacyHmac,
-            signature_header: "x-hub-signature-256".to_owned(),
-            signature_algo: None,
-            signature_encoding: None,
-            signature_prefix: None,
-            signature_separator: None,
-            signature_value_split: None,
-            timestamp_header: None,
-            timestamp_skew_secs: None,
-            payload_template: None,
-            idempotency_header: None,
-            bearer_path_token: None,
-        };
+    fn hmac_v2_default_split_accepts_github_prefixed_signature() {
+        let cfg = hmac_v2_config(
+            "x-hub-signature-256",
+            SignatureEncoding::Hex,
+            "",
+            None,
+            Some("="),
+            None,
+            "{{body}}",
+            None,
+        );
         let out = verify_fixture(
             &cfg,
             "github",
@@ -2097,8 +2036,11 @@ mod tests {
             1_700_000_000,
         )
         .unwrap();
-        assert!(out.rendered_payload.is_none());
-        assert!(out.matched_version.is_none());
+        assert_eq!(
+            out.rendered_payload.as_deref(),
+            Some(fixture("github", "request.txt"))
+        );
+        assert_eq!(out.matched_version.as_deref(), Some("sha256"));
     }
 
     #[test]
@@ -2748,7 +2690,10 @@ mod tests {
             })
             .await
             .unwrap_err();
-        assert!(matches!(wrong_header, WebhookError::SignatureMismatch));
+        assert!(matches!(
+            wrong_header,
+            WebhookError::Verify(VerifyError::MissingSignature)
+        ));
 
         let right_headers = vec![("X-Hub-Signature-256".into(), signature)];
         let status = svc
@@ -2796,13 +2741,6 @@ mod tests {
     #[test]
     fn ct_eq_short_circuits_on_length() {
         assert!(!ct_eq(b"abc", b"abcd"));
-    }
-
-    #[test]
-    fn strip_bearer_handles_both_cases() {
-        assert_eq!(strip_bearer("Bearer abc"), Some("abc"));
-        assert_eq!(strip_bearer("bearer abc"), Some("abc"));
-        assert_eq!(strip_bearer("abc"), None);
     }
 
     #[test]

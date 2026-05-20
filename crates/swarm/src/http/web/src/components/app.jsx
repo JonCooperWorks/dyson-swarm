@@ -52,7 +52,6 @@ export function renderView(view) {
     case 'instance-mcp':
     case 'instance-agent-secrets':
     case 'instance-snapshots':
-    case 'instance-runtime':
     case 'instance-skills':
     case 'instance-activity':
     case 'instance-tasks':

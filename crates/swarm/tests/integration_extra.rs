@@ -968,7 +968,7 @@ async fn post_replay_redispatches_without_reverifying() {
     let user_id = create_user(&client, &stack.base, "alice-webhook-replay-user", true).await;
     let token = mint_api_key(&client, &stack.base, &user_id).await;
     let instance_id = create_live_instance(&client, &stack.base, &token).await;
-    create_legacy_hmac_webhook(&client, &stack.base, &token, &instance_id, "github").await;
+    create_hmac_v2_webhook(&client, &stack.base, &token, &instance_id, "github").await;
 
     let bad = client
         .post(format!("{}/webhooks/{}/github", stack.base, instance_id))
@@ -1015,7 +1015,7 @@ async fn replay_is_audited_with_user_id() {
     .await;
     let token = mint_api_key(&client, &stack.base, &user_id).await;
     let instance_id = create_live_instance(&client, &stack.base, &token).await;
-    create_legacy_hmac_webhook(&client, &stack.base, &token, &instance_id, "github").await;
+    create_hmac_v2_webhook(&client, &stack.base, &token, &instance_id, "github").await;
     let bad = client
         .post(format!("{}/webhooks/{}/github", stack.base, instance_id))
         .header(
@@ -1088,13 +1088,13 @@ async fn bearer_v2_path_token_required_on_ingest_url() {
 }
 
 #[tokio::test]
-async fn legacy_hmac_endpoint_still_accepts_github_fixture() {
-    let stack = build_stack("alice-webhook-legacy").await;
+async fn hmac_v2_endpoint_accepts_github_fixture() {
+    let stack = build_stack("alice-webhook-hmac-v2").await;
     let client = reqwest::Client::new();
-    let user_id = create_user(&client, &stack.base, "alice-webhook-legacy-user", true).await;
+    let user_id = create_user(&client, &stack.base, "alice-webhook-hmac-v2-user", true).await;
     let token = mint_api_key(&client, &stack.base, &user_id).await;
     let instance_id = create_live_instance(&client, &stack.base, &token).await;
-    create_legacy_hmac_webhook(&client, &stack.base, &token, &instance_id, "github").await;
+    create_hmac_v2_webhook(&client, &stack.base, &token, &instance_id, "github").await;
 
     let r = client
         .post(format!("{}/webhooks/{}/github", stack.base, instance_id))
@@ -1112,6 +1112,41 @@ async fn legacy_hmac_endpoint_still_accepts_github_fixture() {
         .unwrap();
     assert_eq!(r.status(), 204);
     assert_eq!(stack.webhook_dispatches.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn legacy_hmac_verifier_mode_is_rejected_on_create() {
+    let stack = build_stack("alice-webhook-legacy-rejected").await;
+    let client = reqwest::Client::new();
+    let user_id = create_user(
+        &client,
+        &stack.base,
+        "alice-webhook-legacy-rejected-user",
+        true,
+    )
+    .await;
+    let token = mint_api_key(&client, &stack.base, &user_id).await;
+    let instance_id = create_live_instance(&client, &stack.base, &token).await;
+
+    let r = client
+        .post(format!(
+            "{}/v1/instances/{}/webhooks",
+            stack.base, instance_id
+        ))
+        .bearer_auth(&token)
+        .json(&json!({
+            "name": "github",
+            "description": "legacy verifier rejected",
+            "auth_scheme": "hmac_sha256",
+            "verifier_mode": "legacy_hmac",
+            "signature_header": "x-hub-signature-256",
+            "secret": "top-secret",
+            "enabled": true
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 400);
 }
 
 /// Tenancy isolation — alice's instance is invisible to bob via every
@@ -1742,7 +1777,7 @@ async fn create_live_instance(client: &reqwest::Client, base: &str, token: &str)
     v["id"].as_str().unwrap().to_string()
 }
 
-async fn create_legacy_hmac_webhook(
+async fn create_hmac_v2_webhook(
     client: &reqwest::Client,
     base: &str,
     token: &str,
@@ -1754,16 +1789,21 @@ async fn create_legacy_hmac_webhook(
         .bearer_auth(token)
         .json(&json!({
             "name": name,
-            "description": "test legacy webhook",
+            "description": "test hmac_v2 webhook",
             "auth_scheme": "hmac_sha256",
+            "verifier_mode": "hmac_v2",
             "signature_header": "x-hub-signature-256",
+            "signature_algo": "sha256",
+            "signature_encoding": "hex",
+            "signature_value_split": "=",
+            "payload_template": "{{body}}",
             "secret": "top-secret",
             "enabled": true
         }))
         .send()
         .await
         .unwrap();
-    assert_eq!(r.status(), 201, "create_legacy_hmac_webhook failed");
+    assert_eq!(r.status(), 201, "create_hmac_v2_webhook failed");
     r.json().await.unwrap()
 }
 

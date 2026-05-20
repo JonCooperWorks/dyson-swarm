@@ -79,7 +79,6 @@ describe('instance section rail routing', () => {
     expect(instanceSectionFromView({ name: 'instance-mcp', id: 'a' })).toBe('mcp');
     expect(instanceSectionFromView({ name: 'instance-agent-secrets', id: 'a' })).toBe('agent-secrets');
     expect(instanceSectionFromView({ name: 'instance-snapshots', id: 'a' })).toBe('snapshots');
-    expect(instanceSectionFromView({ name: 'instance-runtime', id: 'a' })).toBe('runtime');
   });
 
   test('renders an instance subpage inside the two-pane instance shell', async () => {
@@ -113,6 +112,38 @@ describe('instance section rail routing', () => {
     expect(screen.getByText('Beta')).toBeInTheDocument();
     expect(screen.getByText(/no webhooks yet/)).toBeInTheDocument();
     expect(screen.getByText('Beta').closest('a')).toHaveAttribute('href', '#/i/b/tasks');
+  });
+
+  test('does not render a runtime detail tab', async () => {
+    const row = {
+      id: 'a',
+      name: 'Alpha',
+      status: 'live',
+      task: 'Run useful work.',
+      created_at: 0,
+      last_active_at: 0,
+      last_probe_at: null,
+      open_url: 'https://a.example.test',
+      network_policy: { kind: 'nolocalnet', entries: [] },
+    };
+    setInstances([row]);
+    const client = {
+      getInstance: () => Promise.resolve(row),
+      listInstances: () => Promise.resolve([row]),
+      listWebhooks: () => Promise.resolve([]),
+      listShares: () => Promise.resolve([]),
+      listInstanceSkills: () => Promise.resolve([]),
+    };
+
+    render(
+      React.createElement(ApiProvider, { client, auth: { config: { cube_profiles: [] } } },
+        React.createElement(InstancesView, { view: { name: 'instance', id: 'a' } }),
+      ),
+    );
+
+    await waitFor(() => expect(screen.getAllByText('Alpha').length).toBeGreaterThan(0));
+    expect(screen.queryByRole('tab', { name: /^runtime$/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: /^runtime$/i })).not.toBeInTheDocument();
   });
 
   test('renders Telegram connect instructions and token input on one Channels page', async () => {

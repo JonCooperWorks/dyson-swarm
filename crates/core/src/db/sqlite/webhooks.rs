@@ -519,15 +519,15 @@ mod tests {
             description: "do the thing".into(),
             auth_scheme: WebhookAuthScheme::HmacSha256,
             signature_header: "x-swarm-signature".into(),
-            verifier_mode: "legacy_hmac".into(),
-            signature_algo: None,
-            signature_encoding: None,
+            verifier_mode: "hmac_v2".into(),
+            signature_algo: Some("sha256".into()),
+            signature_encoding: Some("hex".into()),
             signature_prefix: None,
             signature_separator: None,
-            signature_value_split: None,
+            signature_value_split: Some("=".into()),
             timestamp_header: None,
             timestamp_skew_secs: None,
-            payload_template: None,
+            payload_template: Some("{{body}}".into()),
             idempotency_header: None,
             bearer_path_token: None,
             preset_id: None,
@@ -1082,7 +1082,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn migration_0045_backfills_existing_rows_to_legacy_modes() {
+    async fn migration_0045_backfills_existing_rows_to_supported_modes() {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")
@@ -1149,17 +1149,37 @@ mod tests {
             }
         }
 
-        let modes: Vec<(String, String)> =
-            sqlx::query_as("SELECT name, verifier_mode FROM instance_webhooks ORDER BY name")
-                .fetch_all(&pool)
-                .await
-                .unwrap();
+        let modes: Vec<(
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        )> = sqlx::query_as(
+            "SELECT name, verifier_mode, signature_algo, signature_encoding, signature_value_split \
+                 FROM instance_webhooks ORDER BY name",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
         assert_eq!(
             modes,
             vec![
-                ("bearer".to_owned(), "legacy_bearer".to_owned()),
-                ("hmac".to_owned(), "legacy_hmac".to_owned()),
-                ("none".to_owned(), "none".to_owned()),
+                (
+                    "bearer".to_owned(),
+                    "operator_action_required".to_owned(),
+                    None,
+                    None,
+                    None,
+                ),
+                (
+                    "hmac".to_owned(),
+                    "hmac_v2".to_owned(),
+                    Some("sha256".to_owned()),
+                    Some("hex".to_owned()),
+                    Some("=".to_owned()),
+                ),
+                ("none".to_owned(), "none".to_owned(), None, None, None),
             ]
         );
 
@@ -1167,16 +1187,16 @@ mod tests {
         let body = include_bytes!("../../../tests/fixtures/webhooks/github/request.txt");
         crate::webhooks::verify_inbound_request(
             &crate::webhooks::WebhookVerifierConfig {
-                mode: crate::webhooks::WebhookVerifierMode::LegacyHmac,
+                mode: crate::webhooks::WebhookVerifierMode::HmacV2,
                 signature_header: "x-hub-signature-256".to_owned(),
-                signature_algo: None,
-                signature_encoding: None,
+                signature_algo: Some(crate::webhooks::SignatureAlgorithm::Sha256),
+                signature_encoding: Some(crate::webhooks::SignatureEncoding::Hex),
                 signature_prefix: None,
                 signature_separator: None,
-                signature_value_split: None,
+                signature_value_split: Some("=".to_owned()),
                 timestamp_header: None,
                 timestamp_skew_secs: None,
-                payload_template: None,
+                payload_template: Some("{{body}}".to_owned()),
                 idempotency_header: None,
                 bearer_path_token: None,
             },
@@ -1192,5 +1212,99 @@ mod tests {
             crate::now_secs(),
         )
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn migration_0052_converts_or_marks_existing_legacy_modes() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE instance_webhooks (
+                instance_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                auth_scheme TEXT NOT NULL,
+                secret_name TEXT,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                signature_header TEXT,
+                verifier_mode TEXT NOT NULL,
+                signature_algo TEXT,
+                signature_encoding TEXT,
+                signature_prefix TEXT,
+                signature_separator TEXT,
+                signature_value_split TEXT,
+                timestamp_header TEXT,
+                timestamp_skew_secs INTEGER,
+                payload_template TEXT,
+                idempotency_header TEXT,
+                bearer_path_token TEXT,
+                preset_id TEXT,
+                PRIMARY KEY (instance_id, name)
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO instance_webhooks \
+             (instance_id, name, auth_scheme, secret_name, created_at, updated_at, signature_header, verifier_mode) \
+             VALUES \
+             ('i1', 'hmac', 'hmac_sha256', 's', 1, 1, 'x-hub-signature-256', 'legacy_hmac'), \
+             ('i1', 'bearer', 'bearer', 's', 1, 1, NULL, 'legacy_bearer')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let migration_sql =
+            include_str!("../../../migrations/sqlite/0052_remove_legacy_webhook_verifiers.sql")
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("--"))
+                .collect::<Vec<_>>()
+                .join("\n");
+        for statement in migration_sql.split(';') {
+            let statement = statement.trim();
+            if !statement.is_empty() {
+                sqlx::query(statement).execute(&pool).await.unwrap();
+            }
+        }
+
+        let modes: Vec<(
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        )> = sqlx::query_as(
+            "SELECT name, verifier_mode, signature_algo, signature_encoding, signature_value_split \
+                 FROM instance_webhooks ORDER BY name",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            modes,
+            vec![
+                (
+                    "bearer".to_owned(),
+                    "operator_action_required".to_owned(),
+                    None,
+                    None,
+                    None,
+                ),
+                (
+                    "hmac".to_owned(),
+                    "hmac_v2".to_owned(),
+                    Some("sha256".to_owned()),
+                    Some("hex".to_owned()),
+                    Some("=".to_owned()),
+                ),
+            ]
+        );
     }
 }

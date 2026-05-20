@@ -87,7 +87,6 @@ export function instanceSectionFromView(view) {
     case 'instance-mcp': return 'mcp';
     case 'instance-agent-secrets': return 'agent-secrets';
     case 'instance-snapshots': return 'snapshots';
-    case 'instance-runtime': return 'runtime';
     case 'instance-skills': return 'skills';
     case 'instance-activity': return 'activity';
     case 'instance-tasks':
@@ -118,7 +117,6 @@ export function sectionHref(id, section) {
     case 'mcp': return `#/i/${enc}/mcp`;
     case 'agent-secrets': return `#/i/${enc}/agent-secrets`;
     case 'snapshots': return `#/i/${enc}/snapshots`;
-    case 'runtime': return `#/i/${enc}/runtime`;
     case 'skills': return `#/i/${enc}/skills`;
     case 'tasks': return `#/i/${enc}/tasks`;
     case 'artifacts': return `#/i/${enc}/artifacts`;
@@ -2436,7 +2434,6 @@ const DETAIL_SECTIONS = [
   { key: 'mcp', label: 'mcp' },
   { key: 'agent-secrets', label: 'agent secrets' },
   { key: 'snapshots', label: 'snapshots' },
-  { key: 'runtime', label: 'runtime' },
   { key: 'skills', label: 'skills' },
   { key: 'tasks', label: 'webhooks' },
   { key: 'artifacts', label: 'artifacts' },
@@ -2778,8 +2775,6 @@ function DetailSectionBody({ view, instance, activeSection }) {
       return <AgentSecretsPanel instanceId={instance.id} disabled={instance.status === 'destroyed'}/>;
     case 'snapshots':
       return <SnapshotsPanel instanceId={instance.id} disabled={instance.status === 'destroyed'}/>;
-    case 'runtime':
-      return <RuntimeSection instance={instance}/>;
     case 'skills':
       return <SkillsSection instance={instance}/>;
     case 'tasks':
@@ -3528,29 +3523,6 @@ function ToolsSection({ instance }) {
   );
 }
 
-function RuntimeSection({ instance }) {
-  const { auth } = useApi();
-  const cubeProfiles = auth?.config?.cube_profiles || [];
-  return (
-    <section className="panel">
-      <div className="panel-title">runtime</div>
-      {(() => {
-        const profile = findCubeProfile(instance.template_id, cubeProfiles);
-        if (!profile) return null;
-        return <KvRow label="size" value={profileLabel(profile)}/>;
-      })()}
-      <KvRow label="created" value={fmtTime(instance.created_at)}/>
-      <KvRow label="last active" value={fmtTime(instance.last_active_at)}/>
-      <KvRow label="last probe" value={
-        instance.last_probe_at
-          ? `${fmtTime(instance.last_probe_at)} · ${probeLabel(instance.last_probe_status)}`
-          : 'never'
-      }/>
-      {instance.destroyed_at ? <KvRow label="destroyed" value={fmtTime(instance.destroyed_at)}/> : null}
-    </section>
-  );
-}
-
 function EmptyDetail({ onNew, hasInstances }) {
   return (
     <main className="detail-pane detail-empty">
@@ -3560,8 +3532,8 @@ function EmptyDetail({ onNew, hasInstances }) {
           <>
             <h1 className="empty-title">pick an agent</h1>
             <p className="empty-sub">
-              Pick an agent from the left rail to inspect runtime, tools,
-              webhooks, and artifacts. Or create a new one for a fresh job.
+              Pick an agent from the left rail to inspect tools, webhooks,
+              and artifacts. Or create a new one for a fresh job.
             </p>
             <div className="empty-actions">
               <button className="btn btn-primary" onClick={onNew}>create agent</button>

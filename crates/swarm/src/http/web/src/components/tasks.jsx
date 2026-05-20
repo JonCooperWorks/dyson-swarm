@@ -437,7 +437,7 @@ function TaskForm({ instanceId, taskName }) {
       setScheme(row.auth_scheme);
       setOrigScheme(row.auth_scheme);
       setSignatureHeader(row.signature_header || DEFAULT_SIGNATURE_HEADER);
-      setVerifierMode(row.verifier_mode || 'legacy_hmac');
+      setVerifierMode(row.verifier_mode || 'hmac_v2');
       setSignatureAlgo(row.signature_algo || 'sha256');
       setSignatureEncoding(row.signature_encoding || 'hex');
       setSignaturePrefix(row.signature_prefix || '');
@@ -1052,7 +1052,6 @@ function CustomVerificationFields({
                 onChange={e => setVerifierMode(e.target.value)}
                 disabled={disabled}
               >
-                <option value="legacy_hmac">legacy_hmac</option>
                 <option value="hmac_v2">hmac_v2</option>
               </select>
             </label>

@@ -238,7 +238,6 @@ export function setMarketplaceCatalog(catalog) {
 //   #/i/<id>/mcp                → MCP servers panel
 //   #/i/<id>/agent-secrets      → agent-visible secrets
 //   #/i/<id>/snapshots          → snapshots panel
-//   #/i/<id>/runtime            → runtime KV block
 //   #/i/<id>/tasks…             → webhooks (legacy slug)
 //   #/i/<id>/artifacts…         → artifacts
 //   #/i/<id>/activity           → LLM tool-call activity
@@ -382,8 +381,6 @@ function sectionViewName(slug) {
       return 'instance-agent-secrets';
     case 'snapshots':
       return 'instance-snapshots';
-    case 'runtime':
-      return 'instance-runtime';
     case 'skills':
       return 'instance-skills';
     case 'activity':

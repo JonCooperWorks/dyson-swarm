@@ -559,12 +559,11 @@ async fn create_webhook(
         Ok(v) => v,
         Err(status) => return status.into_response(),
     };
-    let secret_required = verifier.as_ref().is_none_or(|v| {
-        !matches!(
-            v.mode,
-            WebhookVerifierMode::BearerV2 | WebhookVerifierMode::None
-        )
-    }) && scheme != WebhookAuthScheme::None;
+    let secret_required = match verifier.as_ref().map(|v| v.mode) {
+        Some(WebhookVerifierMode::HmacV2) => true,
+        Some(WebhookVerifierMode::BearerV2 | WebhookVerifierMode::None) => false,
+        None => scheme == WebhookAuthScheme::HmacSha256,
+    };
     if secret_required && body.secret.as_deref().is_none_or(str::is_empty) {
         return error_response(
             StatusCode::BAD_REQUEST,
@@ -636,12 +635,11 @@ async fn update_webhook(
     let secret_plaintext = body.secret.filter(|s| !s.is_empty());
     if scheme != WebhookAuthScheme::None
         && existing.auth_scheme != scheme
-        && verifier.as_ref().is_none_or(|v| {
-            !matches!(
-                v.mode,
-                WebhookVerifierMode::BearerV2 | WebhookVerifierMode::None
-            )
-        })
+        && match verifier.as_ref().map(|v| v.mode) {
+            Some(WebhookVerifierMode::HmacV2) => true,
+            Some(WebhookVerifierMode::BearerV2 | WebhookVerifierMode::None) => false,
+            None => scheme == WebhookAuthScheme::HmacSha256,
+        }
         && secret_plaintext.is_none()
     {
         // Switching scheme requires a fresh key (the old one was sized

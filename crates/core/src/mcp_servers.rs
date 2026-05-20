@@ -718,7 +718,6 @@ pub fn validate_docker_stdio_args(args: &[String]) -> Result<(), String> {
         "--network",
         "--net",
         "--security-opt",
-        "--entrypoint",
         "--env-file",
         "--label-file",
         "--cidfile",
@@ -1890,8 +1889,6 @@ mod tests {
             vec!["run", "--memory=8g", "img"],
             vec!["run", "--runtime", "runc", "img"],
             vec!["run", "--runtime=crun", "img"],
-            vec!["run", "--entrypoint", "python", "img"],
-            vec!["run", "--entrypoint=python", "img"],
         ] {
             let args: Vec<String> = args.into_iter().map(String::from).collect();
             assert!(
@@ -1910,6 +1907,31 @@ mod tests {
         .map(String::from)
         .collect();
         assert!(validate_docker_stdio_args(&safe).is_ok());
+
+        let entrypoint_safe: Vec<String> = [
+            "run",
+            "--rm",
+            "-i",
+            "--entrypoint",
+            "python",
+            "ghcr.io/example/mcp",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        assert!(validate_docker_stdio_args(&entrypoint_safe).is_ok());
+
+        let entrypoint_equals_safe: Vec<String> = [
+            "run",
+            "--rm",
+            "-i",
+            "--entrypoint=python",
+            "ghcr.io/example/mcp",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        assert!(validate_docker_stdio_args(&entrypoint_equals_safe).is_ok());
     }
 
     #[test]
